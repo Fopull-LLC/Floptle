@@ -1483,6 +1483,9 @@ impl Editor {
         if cmd.terrain_palette_changed {
             self.terrain_textures_dirty = true;
         }
+        if cmd.terrain_palette_edited {
+            self.scene_dirty = true;
+        }
         if let Some(fill) = cmd.fill_terrain.take()
             && let Some(e) = self.target_terrain() {
                 // Snapshot for undo (one step), then fill the whole field. Fills only

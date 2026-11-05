@@ -170,6 +170,7 @@ impl EditorTabViewer<'_> {
         let terrain_tex_scale = &mut *self.terrain_tex_scale;
         let terrain_tex_blend = &mut *self.terrain_tex_blend;
         let terrain_tex_rough = &mut *self.terrain_tex_rough;
+        let terrain_tex_tile = &mut *self.terrain_tex_tile;
         let materials = self.materials;
         let asset_tree = self.asset_tree;
         let project_root = self.project_root;
@@ -280,6 +281,20 @@ impl EditorTabViewer<'_> {
             if terrain_tex_rough.len() < terrain_textures.len() {
                 terrain_tex_rough.resize(terrain_textures.len(), 0.5);
             }
+            if terrain_tex_tile.len() < terrain_textures.len() {
+                terrain_tex_tile.resize(terrain_textures.len(), [0.0; 3]);
+            }
+            // Every slot setting is saved with the scene, so any change to one
+            // leaves the scene unsaved; compared as a whole so a control added
+            // later is covered without remembering to.
+            let before = (
+                terrain_textures.clone(),
+                *terrain_glow,
+                terrain_tex_scale.clone(),
+                terrain_tex_blend.clone(),
+                terrain_tex_rough.clone(),
+                terrain_tex_tile.clone(),
+            );
             for (slot, tex) in terrain_textures.iter_mut().enumerate().take(visible) {
                 ui.horizontal_wrapped(|ui| {
                     let sel = terrain_brush.tex_slot == slot as i32;
@@ -395,10 +410,50 @@ impl EditorTabViewer<'_> {
                                  a ragged one.",
                             );
                         }
+                        // What breaks the repeat up from far off. Read every
+                        // frame, like blend, so dragging them shows at once.
+                        let tile = &mut terrain_tex_tile[slot];
+                        ui.add(egui::DragValue::new(&mut tile[0]).speed(0.01).range(0.0..=1.0).prefix("antitile "))
+                            .on_hover_text(
+                                "hides the grid a repeating texture shows from far away. Above \
+                                 0, the texture is laid in hexagons about a tile across, each \
+                                 shifted and turned at random and blended into its neighbours; \
+                                 the number is how far they may turn (0.0 to 1.0). Keep it low \
+                                 for textures with a direction, such as planks or strata. Costs \
+                                 three texture reads where there was one, for this slot only.",
+                            );
+                        ui.add(egui::DragValue::new(&mut tile[1]).speed(0.01).range(0.0..=1.0).prefix("macro "))
+                            .on_hover_text(
+                                "a slow swell of lighter and darker patches across this \
+                                 texture, the way real ground varies from far off. 0 is none, \
+                                 1 is strong.",
+                            );
+                        if tile[1] > 0.0 {
+                            let mut size = if tile[2] > 0.0 { tile[2] } else { 60.0 };
+                            if ui
+                                .add(egui::DragValue::new(&mut size).speed(0.5).range(2.0..=2000.0).prefix("size ").suffix(" m"))
+                                .on_hover_text("how big, in metres, the patches of the macro variation are.")
+                                .changed()
+                            {
+                                tile[2] = size;
+                            }
+                        }
                     }
                 });
             }
-            ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture. ▦ sets how often a slot's texture repeats, so a fine texture and a coarse one can share a palette. Blend sets how wide a slot fades into its neighbours.");
+            if before
+                != (
+                    terrain_textures.clone(),
+                    *terrain_glow,
+                    terrain_tex_scale.clone(),
+                    terrain_tex_blend.clone(),
+                    terrain_tex_rough.clone(),
+                    terrain_tex_tile.clone(),
+                )
+            {
+                cmd.terrain_palette_edited = true;
+            }
+            ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture. ▦ sets how often a slot's texture repeats, so a fine texture and a coarse one can share a palette. Blend sets how wide a slot fades into its neighbours. Antitile and macro hide a texture's repeat from far off.");
         }
         ui.separator();
         // Fill-bounds tool. Sculpting near an edge grows only the bounds (the

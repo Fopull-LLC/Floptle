@@ -898,6 +898,134 @@ mod shadow_atlas_tests {
         assert!(wide > narrow, "a 3 m blend mixes no more than a 0.5 m one: {counts:?}");
     }
 
+    /// **Anti-tiling hides a texture's repeat from far off (0626).** One slot
+    /// of light noise with one dark disc per tile, so the picture's structure
+    /// is the tile's own period, a grid of dots, seen straight down from 60 m. Plain, the picture correlates
+    /// strongly with itself one tile across; hex-tiled, that peak is gone. A
+    /// macro layer adds broad light and dark patches: the picture's block
+    /// means spread further apart. `FLOPTLE_ANTITILE_PNG=<dir>` writes them.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn antitile_hides_the_repeat_and_macro_varies_the_ground() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_antitile_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
+        let mut seed = 0x2545_f491u32;
+        let mut noise = Vec::with_capacity(32 * 32 * 4);
+        for i in 0..32 * 32 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let (x, y) = ((i % 32) as f32 - 16.0, (i / 32) as f32 - 16.0);
+            let v = if x * x + y * y < 36.0 { 20 } else { 150 + (seed >> 24) as u8 / 4 };
+            noise.extend_from_slice(&[v, v, v, 255]);
+        }
+        let tex = floptle_render::TextureData { pixels: noise, width: 32, height: 32 };
+        std::fs::write(dir.join("textures/noise.png"), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        ed.project_root = dir.clone();
+        ed.terrain_textures = vec!["textures/noise.png".into()];
+        ed.terrain_textures_dirty = true;
+        for _ in 0..20_000 {
+            ed.sync_terrain_palette(false);
+            if ed.terrain_palette_job.is_none() && !ed.terrain_textures_dirty {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 3,
+            radius: 400.0,
+            voxel: 2.0,
+            relief: 0.0,
+            cave_depth: 0.0,
+            craters: 0,
+            surface_a: floptle_field::procgen::LayerPaint { slot: 1, color: [1.0; 3] },
+            surface_b: floptle_field::procgen::LayerPaint { slot: 1, color: [1.0; 3] },
+            subsoil_depth: 0.0,
+            ..Default::default()
+        });
+        let top = field.raycast(Vec3::new(0.0, 600.0, 0.0), Vec3::NEG_Y, 600.0).unwrap();
+        add_body(&mut ed, 1, DVec3::ZERO, &field);
+        settle(&mut ed);
+        let sun = ed.world.spawn();
+        ed.world.insert(sun, Transform { rotation: floptle_core::math::Quat::from_rotation_x(-1.5), ..Transform::IDENTITY });
+        ed.world.insert(sun, floptle_core::Light { intensity: 1.0, shadows: false, ..Default::default() });
+        ed.camera.position = DVec3::new(top.x as f64, top.y as f64 + 60.0, top.z as f64 + 0.01);
+        ed.camera.pitch = -1.55;
+        ed.camera.yaw = 0.0;
+        let (w, h) = (320u32, 240u32);
+        let shoot = |ed: &mut crate::Editor, tile: [f32; 3]| {
+            ed.terrain_tex_tile = vec![tile];
+            let at = ed.camera.position;
+            ed.terrain_gpu_dirty = true;
+            settle(ed);
+            ed.settle_terrain_meshes(at, std::time::Duration::from_secs(60));
+            let cam = ed.camera.render_camera();
+            crate::shot::render_frame_pixels(ed, &cam, None, w, h, !0, false).expect("a frame")
+        };
+        let plain = shoot(&mut ed, [0.0; 3]);
+        let hex = shoot(&mut ed, [1.0, 0.0, 0.0]);
+        let mac = shoot(&mut ed, [0.0, 1.0, 10.0]);
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Ok(out) = std::env::var("FLOPTLE_ANTITILE_PNG") {
+            for (name, px) in [("plain", &plain), ("hex", &hex), ("macro", &mac)] {
+                let tex = floptle_render::TextureData { pixels: px.clone(), width: w, height: h };
+                std::fs::write(std::path::Path::new(&out).join(format!("antitile_{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+            }
+        }
+        // Luminance of the middle 120 x 120, inside the ground the fixture
+        // meshes at full detail.
+        const N: usize = 120;
+        let lum = |px: &[u8]| -> Vec<f32> {
+            let mut v = Vec::with_capacity(N * N);
+            for y in 60..180u32 {
+                for x in 100..220u32 {
+                    let i = ((y * w + x) * 4) as usize;
+                    v.push(px[i] as f32 * 0.3 + px[i + 1] as f32 * 0.59 + px[i + 2] as f32 * 0.11);
+                }
+            }
+            v
+        };
+        // The strongest correlation of the picture with itself shifted by
+        // `d` pixels along x, for shifts past the texture's own grain.
+        let repeat = |px: &[u8]| -> (f32, usize) {
+            let l = lum(px);
+            let mean = l.iter().sum::<f32>() / l.len() as f32;
+            let c: Vec<f32> = l.iter().map(|v| v - mean).collect();
+            let var = c.iter().map(|v| v * v).sum::<f32>().max(1e-6);
+            (8..60usize)
+                .map(|d| {
+                    let mut s = 0.0;
+                    for y in 0..N {
+                        for x in 0..N - d {
+                            s += c[y * N + x] * c[y * N + x + d];
+                        }
+                    }
+                    (s / var * N as f32 / (N - d) as f32, d)
+                })
+                .fold((f32::MIN, 0), |a, b| if b.0 > a.0 { b } else { a })
+        };
+        // How far apart the means of 30 x 30 blocks spread: broad patches.
+        let patches = |px: &[u8]| -> f32 {
+            let l = lum(px);
+            let means: Vec<f32> = (0..16)
+                .map(|b| {
+                    let (bx, by) = ((b % 4) * 30, (b / 4) * 30);
+                    (0..30).flat_map(|y| (0..30).map(move |x| (y, x))).map(|(y, x)| l[(by + y) * N + bx + x]).sum::<f32>() / 900.0
+                })
+                .collect();
+            let m = means.iter().sum::<f32>() / 16.0;
+            (means.iter().map(|v| (v - m) * (v - m)).sum::<f32>() / 16.0).sqrt()
+        };
+        let (p, pd) = repeat(&plain);
+        let (x, xd) = repeat(&hex);
+        assert!(p > 0.5, "the fixture: the plain tile barely repeats ({p:.2} at {pd} px), so this tests nothing");
+        assert!(x < p * 0.5, "hex tiling left the repeat: {x:.2} at {xd} px against {p:.2} at {pd} px plain");
+        let (sp, sm) = (patches(&plain), patches(&mac));
+        // The render is deterministic, so without the layer this is 1.0 exactly;
+        // at full strength the spread about doubles.
+        assert!(sm > sp * 1.6, "a macro layer left the ground as even as before: block spread {sm:.2} against {sp:.2}");
+    }
+
     /// PICTURES (run by hand): a dug world's shadows drawn from the atlas as
     /// the budgeted path leaves it (boxes and a re-laid build), then from the
     /// same proxies uploaded whole the old way. The two must be the same

@@ -1294,6 +1294,97 @@ fn edge_reach_for(blend: &[f32], rough: &[f32], voxel: f32) -> u8 {
     ((need / voxel.max(1e-3) + 0.5).ceil() as u8).clamp(1, MAX_EDGE_REACH)
 }
 
+/// One palette slot's settings, as its line in the palette file carries them
+/// after the path: `|glow`, `|scale=`, `|blend=`, `|rough=`, `|antitile=`,
+/// `|macro=`, `|macrosize=`. The default is what a bare path means.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PaletteFlags {
+    pub glow: bool,
+    pub scale: f32,
+    pub blend: f32,
+    pub rough: f32,
+    /// `[antitile, macro, macro size]`, as `terrain_tex_tile`.
+    pub tile: [f32; 3],
+}
+
+impl Default for PaletteFlags {
+    fn default() -> Self {
+        Self { glow: false, scale: 1.0, blend: 0.0, rough: 0.5, tile: [0.0; 3] }
+    }
+}
+
+impl PaletteFlags {
+    /// The flags after a slot's path, `|flag` per non-default setting, in a
+    /// fixed order. Written only when a setting differs from the default, so
+    /// an untouched palette is byte-identical to what every previous version
+    /// of the editor wrote.
+    pub(crate) fn suffix(&self) -> String {
+        let mut line = String::new();
+        if self.glow {
+            line.push_str("|glow");
+        }
+        if (self.scale - 1.0).abs() > 1e-4 {
+            line.push_str(&format!("|scale={}", self.scale));
+        }
+        if self.blend > 0.0 {
+            line.push_str(&format!("|blend={}", self.blend));
+            if (self.rough - 0.5).abs() > 1e-4 {
+                line.push_str(&format!("|rough={}", self.rough));
+            }
+        }
+        let [anti, mac, size] = self.tile;
+        if anti > 0.0 {
+            line.push_str(&format!("|antitile={anti}"));
+        }
+        if mac > 0.0 {
+            line.push_str(&format!("|macro={mac}"));
+            if size > 0.0 {
+                line.push_str(&format!("|macrosize={size}"));
+            }
+        }
+        line
+    }
+
+    /// Read the flags after a slot's path. Unknown flags are ignored rather
+    /// than folded into the path: this file is written by newer editors than
+    /// the one reading it as often as the other way round, and a slot whose
+    /// texture path had `|someflag` glued onto it would silently stop
+    /// resolving. A value out of range or unreadable keeps the default.
+    pub(crate) fn parse<'a>(flags: impl Iterator<Item = &'a str>) -> Self {
+        let mut f = Self::default();
+        let unit = |v: &str| v.parse().ok().filter(|x: &f32| x.is_finite()).unwrap_or(0.0).clamp(0.0, 1.0);
+        for flag in flags {
+            if flag == "glow" {
+                f.glow = true;
+            } else if let Some(v) = flag.strip_prefix("scale=") {
+                f.scale = v.parse().ok().filter(|x: &f32| x.is_finite() && *x > 0.0).unwrap_or(1.0);
+            } else if let Some(v) = flag.strip_prefix("blend=") {
+                f.blend = v.parse().ok().filter(|x: &f32| x.is_finite() && *x >= 0.0).unwrap_or(0.0).min(16.0);
+            } else if let Some(v) = flag.strip_prefix("rough=") {
+                f.rough = v.parse().ok().filter(|x: &f32| x.is_finite()).unwrap_or(0.5).clamp(0.0, 1.0);
+            } else if let Some(v) = flag.strip_prefix("antitile=") {
+                f.tile[0] = unit(v);
+            } else if let Some(v) = flag.strip_prefix("macrosize=") {
+                f.tile[2] = v.parse().ok().filter(|x: &f32| x.is_finite() && *x > 0.0).unwrap_or(0.0);
+            } else if let Some(v) = flag.strip_prefix("macro=") {
+                f.tile[1] = unit(v);
+            }
+        }
+        f
+    }
+}
+
+/// Per-slot anti-tiling (`terrain_tex_tile`) as the shader's `terrain_tile`:
+/// one lane per slot, x antitile, y macro strength, z macro size. A slot the
+/// list doesn't reach is all zero, the plain tile.
+pub(crate) fn terrain_tile_lanes(tile: &[[f32; 3]]) -> [[f32; 4]; 32] {
+    let mut out = [[0.0f32; 4]; 32];
+    for (lane, t) in out.iter_mut().zip(tile) {
+        *lane = [t[0].clamp(0.0, 1.0), t[1].clamp(0.0, 1.0), t[2].max(0.0), 0.0];
+    }
+    out
+}
+
 pub(crate) fn terrain_scale_lanes(scales: &[f32]) -> [[f32; 4]; 8] {
     let mut out = [[1.0f32; 4]; 8];
     for i in 0..floptle_render::TERRAIN_SLOTS as usize {
@@ -4942,11 +5033,9 @@ impl Editor {
                 let mut scales: Vec<f32> = Vec::new();
                 let mut blends: Vec<f32> = Vec::new();
                 let mut roughs: Vec<f32> = Vec::new();
-                // One line per slot, `path` plus zero or more `|flag` suffixes.
-                // Unknown suffixes are ignored rather than folded into the path:
-                // this file is written by newer editors than the one reading it
-                // as often as the other way round, and a slot whose texture path
-                // had `|someflag` glued onto it would silently stop resolving.
+                let mut tiles: Vec<[f32; 3]> = Vec::new();
+                // One line per slot, `path` plus zero or more `|flag` suffixes
+                // (`PaletteFlags`).
                 let mut palette: Vec<String> = text
                     .lines()
                     .enumerate()
@@ -4959,21 +5048,14 @@ impl Editor {
                             "" => String::new(),
                             p => floptle_scene::portable::rel_path(p, &self.project_root),
                         };
-                        let (mut scale, mut blend, mut rough) = (1.0f32, 0.0f32, 0.5f32);
-                        for flag in parts {
-                            if flag == "glow" {
-                                glow |= 1 << i.min(31);
-                            } else if let Some(v) = flag.strip_prefix("scale=") {
-                                scale = v.parse().ok().filter(|f: &f32| f.is_finite() && *f > 0.0).unwrap_or(1.0);
-                            } else if let Some(v) = flag.strip_prefix("blend=") {
-                                blend = v.parse().ok().filter(|f: &f32| f.is_finite() && *f >= 0.0).unwrap_or(0.0).min(16.0);
-                            } else if let Some(v) = flag.strip_prefix("rough=") {
-                                rough = v.parse().ok().filter(|f: &f32| f.is_finite()).unwrap_or(0.5).clamp(0.0, 1.0);
-                            }
+                        let f = PaletteFlags::parse(parts);
+                        if f.glow {
+                            glow |= 1 << i.min(31);
                         }
-                        scales.push(scale);
-                        blends.push(blend);
-                        roughs.push(rough);
+                        tiles.push(f.tile);
+                        scales.push(f.scale);
+                        blends.push(f.blend);
+                        roughs.push(f.rough);
                         path
                     })
                     .collect();
@@ -4981,10 +5063,12 @@ impl Editor {
                 scales.resize(slots, 1.0);
                 blends.resize(slots, 0.0);
                 roughs.resize(slots, 0.5);
+                tiles.resize(slots, [0.0; 3]);
                 self.terrain_textures = palette;
                 self.terrain_tex_scale = scales;
                 self.terrain_tex_blend = blends;
                 self.terrain_tex_rough = roughs;
+                self.terrain_tex_tile = tiles;
                 self.terrain_glow_mask = glow;
                 self.terrain_textures_dirty = true;
             }
@@ -5332,6 +5416,32 @@ mod tests {
     use super::{CHUNK_FADE_SECS, chunk_fade, chunk_priority, lod_for, raw_lod, rings_for_body, LOD_RINGS, RING_STEPS};
     use floptle_core::math::{DVec3, Quat};
     use floptle_field::BakedSdf;
+
+    /// **A palette slot's settings survive the file, and an untouched slot
+    /// writes nothing.** Every flag round-trips through `suffix` and `parse`;
+    /// a default slot's line is the bare path, byte for byte what editors
+    /// before anti-tiling wrote; an older line reads with anti-tiling off;
+    /// and a flag this editor doesn't know is passed over, not glued to the
+    /// path.
+    #[test]
+    fn a_palette_slots_flags_round_trip_and_defaults_write_nothing() {
+        use super::PaletteFlags;
+        let parse = |line: &str| PaletteFlags::parse(line.split('|').skip(1));
+        assert_eq!(PaletteFlags::default().suffix(), "");
+        let all = PaletteFlags { glow: true, scale: 2.5, blend: 3.0, rough: 0.8, tile: [0.6, 0.4, 120.0] };
+        let line = format!("textures/moss.png{}", all.suffix());
+        assert_eq!(line, "textures/moss.png|glow|scale=2.5|blend=3|rough=0.8|antitile=0.6|macro=0.4|macrosize=120");
+        assert_eq!(parse(&line), all);
+        // Anti-tiling alone; the macro size is written only with a macro.
+        let anti = PaletteFlags { tile: [1.0, 0.0, 80.0], ..Default::default() };
+        assert_eq!(anti.suffix(), "|antitile=1");
+        // A line from before anti-tiling.
+        let old = parse("textures/rock.png|glow|scale=2");
+        assert_eq!(old, PaletteFlags { glow: true, scale: 2.0, ..Default::default() });
+        // Out of range clamps; unknown and unreadable flags keep the default.
+        let odd = parse("x.png|antitile=7|macro=-1|macrosize=nope|shiny=yes");
+        assert_eq!(odd.tile, [1.0, 0.0, 0.0]);
+    }
 
     /// **A mesh looks as far as the widest blend reaches, and no further.**
     /// No width looks nowhere (the meshes are what they always were); a

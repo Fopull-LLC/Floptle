@@ -1548,6 +1548,7 @@ impl Editor {
             terrain_tex_scale: &mut self.terrain_tex_scale,
             terrain_tex_blend: &mut self.terrain_tex_blend,
             terrain_tex_rough: &mut self.terrain_tex_rough,
+            terrain_tex_tile: &mut self.terrain_tex_tile,
             terrain_present,
             terrain_stats,
             assets_grid: &mut self.assets_grid,

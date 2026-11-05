@@ -292,6 +292,12 @@ pub struct RaymarchGlobals {
     pub terrain_blend: [[f32; 4]; 8],
     /// Per-slot roughness of that blend's edge, 0..1 (`|rough=`).
     pub terrain_rough: [[f32; 4]; 8],
+    /// **Per-slot anti-tiling**, one `vec4` per [`TERRAIN_SLOTS`] slot (palette
+    /// `|antitile=`, `|macro=`, `|macrosize=`): x = hex-tiling strength 0..1,
+    /// y = macro variation strength 0..1, z = the macro pattern's size in world
+    /// units (0 reads as 60), w spare. All zero tiles exactly as before.
+    /// Appended at the end so this struct stays byte-identical to the WGSL one.
+    pub terrain_tile: [[f32; 4]; 32],
 }
 
 impl RaymarchGlobals {
@@ -394,6 +400,7 @@ impl Default for RaymarchGlobals {
             fog_body: [0.0; 4],
             terrain_blend: [[0.0; 4]; 8],
             terrain_rough: [[0.0; 4]; 8],
+            terrain_tile: [[0.0; 4]; 32],
             atmo_cloud: [[1.0, 1.0, 1.0, 0.0]; 4],
             atmo_sun: [[1.0, 1.0, 0.0, 0.0]; 4],
             fog_cache: [0.0; 4],

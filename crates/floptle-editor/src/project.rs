@@ -2290,30 +2290,20 @@ impl Editor {
                 .iter()
                 .enumerate()
                 .map(|(i, p)| {
-                    // `path` then a `|flag` per non-default setting, in a fixed
-                    // order. Written only when it differs from the default, so
-                    // an untouched palette is byte-identical to what every
-                    // previous version of the editor wrote.
+                    // `path` then its `PaletteFlags`, only the non-default ones.
                     let mut line = if p.is_empty() {
                         String::new()
                     } else {
                         floptle_scene::portable::rel_path(p, &self.project_root)
                     };
-                    if self.terrain_glow_mask & (1 << i.min(31)) != 0 {
-                        line.push_str("|glow");
-                    }
-                    let scale = self.terrain_tex_scale.get(i).copied().unwrap_or(1.0);
-                    if (scale - 1.0).abs() > 1e-4 {
-                        line.push_str(&format!("|scale={scale}"));
-                    }
-                    let blend = self.terrain_tex_blend.get(i).copied().unwrap_or(0.0);
-                    if blend > 0.0 {
-                        line.push_str(&format!("|blend={blend}"));
-                        let rough = self.terrain_tex_rough.get(i).copied().unwrap_or(0.5);
-                        if (rough - 0.5).abs() > 1e-4 {
-                            line.push_str(&format!("|rough={rough}"));
-                        }
-                    }
+                    let flags = crate::terrain_edit::PaletteFlags {
+                        glow: self.terrain_glow_mask & (1 << i.min(31)) != 0,
+                        scale: self.terrain_tex_scale.get(i).copied().unwrap_or(1.0),
+                        blend: self.terrain_tex_blend.get(i).copied().unwrap_or(0.0),
+                        rough: self.terrain_tex_rough.get(i).copied().unwrap_or(0.5),
+                        tile: self.terrain_tex_tile.get(i).copied().unwrap_or([0.0; 3]),
+                    };
+                    line.push_str(&flags.suffix());
                     line
                 })
                 .collect();

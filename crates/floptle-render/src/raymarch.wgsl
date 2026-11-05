@@ -443,6 +443,26 @@ fn triplanar(slot: i32, rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     // (the Assets panel setting). Both samplers are read and one result is selected:
     // WGSL has no sampler arrays, and `select` keeps this uniform-safe.
     let nearest = (u32(G.terrain_tint.w) & (1u << u32(slot))) != 0u;
+    let anti = terrain_slot_tile(slot).x;
+    if (anti > 0.0) {
+        // Hex-tiled (palette `|antitile=`), at level 0 like the plain taps
+        // below: zero gradients are level 0. The same hexagons as the
+        // raster's, so near and far ground agree.
+        let z = vec2<f32>(0.0);
+        var cx: vec3<f32>;
+        var cy: vec3<f32>;
+        var cz: vec3<f32>;
+        if (nearest) {
+            cx = pal_sample(terrain_tex_nearest, terrain_samp_nearest, rel.zy * scale, slot, z, z, anti);
+            cy = pal_sample(terrain_tex_nearest, terrain_samp_nearest, rel.xz * scale, slot, z, z, anti);
+            cz = pal_sample(terrain_tex_nearest, terrain_samp_nearest, rel.xy * scale, slot, z, z, anti);
+        } else {
+            cx = pal_sample(terrain_tex, terrain_samp, rel.zy * scale, slot, z, z, anti);
+            cy = pal_sample(terrain_tex, terrain_samp, rel.xz * scale, slot, z, z, anti);
+            cz = pal_sample(terrain_tex, terrain_samp, rel.xy * scale, slot, z, z, anti);
+        }
+        return (cx * w.x + cy * w.y + cz * w.z) * terrain_macro(slot, rel);
+    }
     let lx = textureSampleLevel(terrain_tex, terrain_samp, rel.zy * scale, slot, 0.0).rgb;
     let ly = textureSampleLevel(terrain_tex, terrain_samp, rel.xz * scale, slot, 0.0).rgb;
     let lz = textureSampleLevel(terrain_tex, terrain_samp, rel.xy * scale, slot, 0.0).rgb;
@@ -452,7 +472,7 @@ fn triplanar(slot: i32, rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let cx = select(lx, nx, nearest);
     let cy = select(ly, ny, nearest);
     let cz = select(lz, nz, nearest);
-    return cx * w.x + cy * w.y + cz * w.z;
+    return (cx * w.x + cy * w.y + cz * w.z) * terrain_macro(slot, rel);
 }
 
 // One painted slot's contribution at `rel` (slot index is 0-based; < 0 = untextured,

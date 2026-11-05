@@ -197,6 +197,11 @@ struct Globals {
     // (`|rough=`, 0..1). A width of 0 blends as before. Appended at the END.
     terrain_blend: array<vec4<f32>, 8>,
     terrain_rough: array<vec4<f32>, 8>,
+    // Per-slot anti-tiling, one vec4 per slot (palette `|antitile=`,
+    // `|macro=`, `|macrosize=`): x = hex-tiling strength 0..1, y = macro
+    // variation strength 0..1, z = the macro pattern's size in world units
+    // (0 = 60), w spare. All zero tiles exactly as before. Appended at the END.
+    terrain_tile: array<vec4<f32>, 32>,
 };
 
 // The triplanar scale multiplier for palette slot `slot`.
@@ -214,6 +219,132 @@ fn terrain_slot_scale(slot: i32) -> f32 {
     let i = clamp(u32(slot), 0u, 31u);
     let v = G.terrain_scale[i >> 2u][i & 3u];
     return select(v, 1.0, v <= 0.0);
+}
+
+// ---- Anti-tiling (0626) ----------------------------------------------------
+//
+// A texture that repeats every couple of metres shows its period as a grid
+// from 30 m up. Hex tiling (Mikkelsen 2022, "Practical Real-Time Hex-Tiling")
+// lays a grid of hexagons about a tile across over the UVs; each hexagon reads
+// the tile at its own random offset and rotation, and the three hexagons
+// around a point blend, weighted so the blend keeps the texture's contrast
+// instead of washing it grey. Three taps where there was one, and only for
+// what asks for it. Gradients are rotated with the UVs, so filtering and mip
+// selection are those of the plain tile.
+
+// The hexagons around `uv`: three blend weights and, for each hexagon, the
+// tile's UVs there and the rotation the gradients take with them.
+struct HexTaps {
+    w: vec3<f32>,
+    uv1: vec2<f32>,
+    uv2: vec2<f32>,
+    uv3: vec2<f32>,
+    r1: mat2x2<f32>,
+    r2: mat2x2<f32>,
+    r3: mat2x2<f32>,
+};
+
+// A hexagon's random (rotation, offset x, offset y), each 0..1, from its
+// integer grid vertex. Integer hashing, so a cell a million tiles from the
+// origin is as random as one at it.
+fn hex_rand(v: vec2<f32>) -> vec3<f32> {
+    var h = vec2<u32>(vec2<i32>(v));
+    h = h * 1664525u + 1013904223u;
+    h.x += h.y * 1664525u;
+    h.y += h.x * 1664525u;
+    h = h ^ (h >> vec2<u32>(16u));
+    h.x += h.y * 1664525u;
+    h.y += h.x * 1664525u;
+    h = h ^ (h >> vec2<u32>(16u));
+    let z = h.x * 747796405u + h.y * 2891336453u;
+    return vec3<f32>(vec3<u32>(h, z ^ (z >> 16u)) >> vec3<u32>(8u)) * (1.0 / 16777216.0);
+}
+
+// One hexagon's tap: its centre in UV space, a rotation of up to ±π × `amount`
+// about it, and a whole-tile random offset.
+fn hex_tap(uv: vec2<f32>, v: vec2<f32>, amount: f32) -> vec4<f32> {
+    let rnd = hex_rand(v);
+    // The grid vertex back in UV space (the inverse of the skew below, then
+    // of the grid's scale).
+    let centre = vec2<f32>(v.x + 0.5 * v.y, 0.8660254 * v.y) * 0.57735027;
+    let a = (rnd.x * 2.0 - 1.0) * 3.14159265 * amount;
+    let r = vec2<f32>(cos(a), sin(a));
+    let d = uv - centre;
+    let t = vec2<f32>(r.x * d.x - r.y * d.y, r.y * d.x + r.x * d.y) + centre + rnd.yz;
+    return vec4<f32>(t, r);
+}
+
+fn hex_taps(uv: vec2<f32>, amount: f32) -> HexTaps {
+    // A triangle grid whose vertices sit about 0.58 tile apart, so the
+    // hexagon around each is about a tile across: big enough that a texture's
+    // features survive whole, small enough that no period is left.
+    let k = uv * 1.7320508;
+    let skewed = vec2<f32>(k.x - 0.57735027 * k.y, 1.15470054 * k.y);
+    let base = floor(skewed);
+    let f = fract(skewed);
+    let fz = 1.0 - f.x - f.y;
+    let s = step(0.0, -fz);
+    let s2 = 2.0 * s - 1.0;
+    var o: HexTaps;
+    o.w = vec3<f32>(-fz * s2, s - f.y * s2, s - f.x * s2);
+    let t1 = hex_tap(uv, base + vec2<f32>(s, s), amount);
+    let t2 = hex_tap(uv, base + vec2<f32>(s, 1.0 - s), amount);
+    let t3 = hex_tap(uv, base + vec2<f32>(1.0 - s, s), amount);
+    o.uv1 = t1.xy;
+    o.uv2 = t2.xy;
+    o.uv3 = t3.xy;
+    o.r1 = mat2x2<f32>(vec2<f32>(t1.z, t1.w), vec2<f32>(-t1.w, t1.z));
+    o.r2 = mat2x2<f32>(vec2<f32>(t2.z, t2.w), vec2<f32>(-t2.w, t2.z));
+    o.r3 = mat2x2<f32>(vec2<f32>(t3.z, t3.w), vec2<f32>(-t3.w, t3.z));
+    return o;
+}
+
+// The three taps blended. A plain barycentric blend averages three
+// unrelated patches into a grey smear; raising the weights to a power keeps
+// most of each point to one hexagon, and leaning them toward the brighter tap
+// (Mikkelsen's contrast term) hides the seams in the texture's own detail.
+fn hex_blend(c1: vec4<f32>, c2: vec4<f32>, c3: vec4<f32>, w: vec3<f32>) -> vec4<f32> {
+    let lum = vec3<f32>(0.299, 0.587, 0.114);
+    let dw = mix(vec3<f32>(1.0), vec3<f32>(dot(c1.rgb, lum), dot(c2.rgb, lum), dot(c3.rgb, lum)), 0.6);
+    var ww = dw * pow(max(w, vec3<f32>(0.0)), vec3<f32>(7.0));
+    ww = ww / max(ww.x + ww.y + ww.z, 1e-6);
+    return c1 * ww.x + c2 * ww.y + c3 * ww.z;
+}
+
+// A palette layer sampled with explicit gradients, hex-tiled at `amount`
+// (0 = the plain tile, exactly).
+fn pal_sample(t: texture_2d_array<f32>, s: sampler, uv: vec2<f32>, layer: i32, dx: vec2<f32>, dy: vec2<f32>, amount: f32) -> vec3<f32> {
+    if (amount <= 0.0) {
+        return textureSampleGrad(t, s, uv, layer, dx, dy).rgb;
+    }
+    let h = hex_taps(uv, clamp(amount, 0.0, 1.0));
+    let c1 = textureSampleGrad(t, s, h.uv1, layer, h.r1 * dx, h.r1 * dy);
+    let c2 = textureSampleGrad(t, s, h.uv2, layer, h.r2 * dx, h.r2 * dy);
+    let c3 = textureSampleGrad(t, s, h.uv3, layer, h.r3 * dx, h.r3 * dy);
+    return hex_blend(c1, c2, c3, h.w).rgb;
+}
+
+// A slot's anti-tiling settings (see `terrain_tile`).
+fn terrain_slot_tile(slot: i32) -> vec4<f32> {
+    return G.terrain_tile[clamp(u32(slot), 0u, 31u)];
+}
+
+// The macro variation multiplier for slot `slot` at world-stable position `p`:
+// a slow brightness swell, three octaves of value noise at the slot's macro
+// size, so ground a texture tiles across reads as patches of wetter and drier,
+// fresher and more weathered, the way real ground does from far off. 1.0 where
+// the slot has none. Arithmetic only: no texture, so no binding.
+fn terrain_macro(slot: i32, p: vec3<f32>) -> f32 {
+    let t = terrain_slot_tile(slot);
+    if (t.y <= 0.0) {
+        return 1.0;
+    }
+    let q = p / select(t.z, 60.0, t.z <= 0.0);
+    let n = vnoise(q) * 0.55 + vnoise(q * 2.03 + vec3<f32>(17.0, 3.0, 9.0)) * 0.3
+        + vnoise(q * 4.11 + vec3<f32>(31.0, 23.0, 5.0)) * 0.15;
+    // Summed octaves rarely leave 0.25..0.75, so x2 makes strength 1 swing
+    // brightness by up to about half either way.
+    return max(1.0 + clamp(t.y, 0.0, 1.0) * (n - 0.5) * 2.0, 0.2);
 }
 
 // A point mapped into Field Shape `i`'s local frame: un-translate (positions

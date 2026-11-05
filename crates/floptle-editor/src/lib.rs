@@ -636,6 +636,8 @@ struct EditorCmd {
     clear_terrain: bool,
     /// The terrain texture palette changed — re-upload it.
     terrain_palette_changed: bool,
+    /// A palette slot's setting changed (any of them): the scene is unsaved.
+    terrain_palette_edited: bool,
     /// Focus (or open) the Terrain dock tab.
     focus_terrain: bool,
     /// Focus (or open) the ◫ Tiles dock tab, and arm the tile tool.
@@ -1123,6 +1125,9 @@ struct EditorTabViewer<'a> {
     /// tab's blend and rough controls (`|blend=`, `|rough=`).
     terrain_tex_blend: &'a mut Vec<f32>,
     terrain_tex_rough: &'a mut Vec<f32>,
+    /// Per-slot anti-tiling: `[antitile, macro, macro size]` (`|antitile=`,
+    /// `|macro=`, `|macrosize=`).
+    terrain_tex_tile: &'a mut Vec<[f32; 3]>,
     terrain_present: bool,
     /// Terrain stats for the tab: `(volumes, data chunks, resident bytes)`.
     terrain_stats: Option<(usize, usize, usize)>,
@@ -2828,6 +2833,12 @@ struct Editor {
     /// as before), and how much noise breaks that edge up (`|rough=`, 0..1).
     terrain_tex_blend: Vec<f32>,
     terrain_tex_rough: Vec<f32>,
+    /// Per palette slot, what breaks its repeat up, `[antitile, macro, macro
+    /// size]`: hex-tiling strength 0..1 (`|antitile=`), the strength of a slow
+    /// brightness variation 0..1 (`|macro=`), and that variation's size in
+    /// world units (`|macrosize=`, 0 = 60). All zero is the plain tile, as
+    /// before. Short of the palette, a slot reads as all zero.
+    terrain_tex_tile: Vec<[f32; 3]>,
     /// The terrain palette needs re-uploading to the GPU.
     terrain_textures_dirty: bool,
     /// The skybox texture path currently uploaded to the GPU (`None` = solid/white), so

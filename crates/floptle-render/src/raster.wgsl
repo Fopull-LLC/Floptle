@@ -1463,16 +1463,21 @@ fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy:
     let an = abs(normalize(n)) + vec3<f32>(0.0001);
     let w = an / (an.x + an.y + an.z);
     let nearest = (g.terrain_bits.x & (1u << u32(slot))) != 0u;
+    // Anti-tiling (palette `|antitile=`, `|macro=`): see `pal_sample` and
+    // `terrain_macro` in field.wgsl. Both zero samples exactly as before.
+    let tile = terrain_slot_tile(slot);
+    let anti = tile.x;
+    let mac = terrain_macro(slot, p);
     if (nearest) {
-        let nx = textureSampleGrad(terrain_pal_nearest, terrain_pal_samp_nearest, p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale).rgb;
-        let ny = textureSampleGrad(terrain_pal_nearest, terrain_pal_samp_nearest, p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale).rgb;
-        let nz = textureSampleGrad(terrain_pal_nearest, terrain_pal_samp_nearest, p.xy * scale, slot, dpx.xy * scale, dpy.xy * scale).rgb;
-        return nx * w.x + ny * w.y + nz * w.z;
+        let nx = pal_sample(terrain_pal_nearest, terrain_pal_samp_nearest, p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale, anti);
+        let ny = pal_sample(terrain_pal_nearest, terrain_pal_samp_nearest, p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale, anti);
+        let nz = pal_sample(terrain_pal_nearest, terrain_pal_samp_nearest, p.xy * scale, slot, dpx.xy * scale, dpy.xy * scale, anti);
+        return (nx * w.x + ny * w.y + nz * w.z) * mac;
     }
-    let lx = textureSampleGrad(terrain_pal, terrain_pal_samp, p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale).rgb;
-    let ly = textureSampleGrad(terrain_pal, terrain_pal_samp, p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale).rgb;
-    let lz = textureSampleGrad(terrain_pal, terrain_pal_samp, p.xy * scale, slot, dpx.xy * scale, dpy.xy * scale).rgb;
-    return lx * w.x + ly * w.y + lz * w.z;
+    let lx = pal_sample(terrain_pal, terrain_pal_samp, p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale, anti);
+    let ly = pal_sample(terrain_pal, terrain_pal_samp, p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale, anti);
+    let lz = pal_sample(terrain_pal, terrain_pal_samp, p.xy * scale, slot, dpx.xy * scale, dpy.xy * scale, anti);
+    return (lx * w.x + ly * w.y + lz * w.z) * mac;
 }
 
 // The terrain volume containing camera-relative `p` — like field.wgsl's

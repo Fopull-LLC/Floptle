@@ -94,6 +94,19 @@ Only ground blends. A layer one voxel under undug ground stays hidden, so the su
 
 A blend, with its noise, reaches at most 2.5 voxels to each side of the edge, which is 3.75 m on a 1.5 m voxel. A width that would reach further is narrowed to fit: at `rough` 0.5 that allows about 4.3 m on a 1.5 m voxel. A wider blend also makes the terrain's meshes a little slower to build, up to about 1.6 times at the widest. A palette with no blend widths costs nothing extra.
 
+## Hiding a texture's repeat
+
+A ground texture usually repeats every couple of metres, which looks right up close. From 30 m up, though, the repeat shows as a grid. Two more settings per slot in the Terrain tab break it up. Both are off by default, so a palette that doesn't use them looks exactly as it did.
+
+- **antitile**, from 0 to 1. Above 0, the texture is laid in hexagons about one tile across. Each hexagon is shifted and turned at random, and blended into its neighbours, so no grid is left. The number is how far a hexagon may turn: `1` turns it any way, which suits moss, sand and rock. Keep it low for textures with a direction, such as strata, planks or tiles. Texel size and filtering stay as they were, including slots set to pixelated. The slot costs three texture reads where it had one.
+- **macro**, from 0 to 1. A slow swell of lighter and darker patches across the texture, the way real ground varies from far off. `1` brightens or darkens by up to about half. **size** sets how big the patches are, in metres (60 by default). The pattern is calculated rather than read from a texture, so it costs no texture reads.
+
+They are saved on the slot's line like the others:
+
+```
+textures/moss.png|scale=2.5|antitile=1|macro=0.5|macrosize=80
+```
+
 ## The shape of what is dug
 
 How dug, raised and sculpted ground is drawn is the project's choice
