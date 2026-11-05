@@ -147,7 +147,7 @@ impl Editor {
         profile: &Rc<RefCell<floptle_core::profile::FrameProfile>>,
         sky_active: bool,
         sky_uniform_vals: [[f32; 4]; 16],
-        terrain_base_mat: MaterialParams,
+        terrain_base_mat: crate::terrain_edit::TerrainMaterials,
     ) -> Option<FrameGather> {
         self.begin_draw_frame();
         let (Some(gpu), true) = (self.gpu.as_ref(), self.raster.is_some()) else {
@@ -1754,8 +1754,8 @@ impl Editor {
             terrain_bits: [
                 crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root),
                 self.terrain_glow_mask,
-                0,
-                0,
+                self.terrain_surface_bits[0],
+                self.terrain_surface_bits[1],
             ],
         };
         FrameLighting {
@@ -1812,7 +1812,7 @@ impl Editor {
         flat_camera: bool,
         profile: &Rc<RefCell<floptle_core::profile::FrameProfile>>,
         chunk_now: Option<f32>,
-        terrain_base_mat: MaterialParams,
+        terrain_base_mat: crate::terrain_edit::TerrainMaterials,
     ) -> Option<FrameInstances> {
         let (Some(gpu), Some(raster), Some(egui)) =
             (self.gpu.as_mut(), self.raster.as_mut(), self.egui.as_ref())

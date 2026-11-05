@@ -117,6 +117,22 @@ How a slot is filtered follows its texture's setting in the Assets panel, the sa
 - **Smooth** reads the full-size texture at every distance, as the palette always did.
 - **Pixelated** reads the nearest texel of the full-size texture, as before. It is the setting a texture has until you change it.
 
+## Surface maps
+
+A slot can carry the other maps a PBR texture set comes with, so its ground is lit by the sun rather than only coloured. Each is named on the slot's line after its other settings:
+
+```
+textures/rock.png|scale=1.5|normal=textures/rock_normal.png|orm=textures/rock_orm.png|height=textures/rock_height.png
+```
+
+- **normal** is a tangent-space normal map in the OpenGL convention (green up the picture), the convention ambientCG, Poly Haven and most other packs ship. The picture lies on level ground with its right toward +x and its top toward −z, as the colour does, so the bumps line up with what you see.
+- **orm** is the glTF packing: red is occlusion, green roughness, blue metalness. Occlusion darkens the light from the sky and not the sun's. Roughness and metalness multiply the terrain material's own, so they need the material's shading set to Physical to show.
+- **height** is a greyscale height map. It is loaded with the others and kept for blending slots by height.
+
+Every map follows the slot's scale, its anti-tiling (each hexagon turns its normals with its piece of the picture, so a bump is lit from the same side in every hexagon) and its mipmaps. A slot without maps draws exactly as before and costs nothing; a palette where no slot has any adds no memory at all.
+
+A terrain node's own Material now applies in full: its shading model, roughness and metalness reach the ground. Before this they were ignored and terrain always drew with the Classic model.
+
 ## The shape of what is dug
 
 How dug, raised and sculpted ground is drawn is the project's choice

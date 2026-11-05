@@ -251,6 +251,14 @@ impl Editor {
                     (!p.is_empty()).then(|| (crate::project::resolve_asset_path(root, p), nearest))
                 })
                 .collect();
+            // Each slot's surface maps, read alongside its colour.
+            let resolve = |p: &str| (!p.is_empty()).then(|| crate::project::resolve_asset_path(root, p));
+            let maps: Vec<[Option<std::path::PathBuf>; 3]> = (0..self.terrain_textures.len())
+                .map(|i| {
+                    let m = self.terrain_tex_maps.get(i).cloned().unwrap_or_default();
+                    [resolve(&m.normal), resolve(&m.orm), resolve(&m.height)]
+                })
+                .collect();
             let (tx, rx) = std::sync::mpsc::channel();
             crate::worker::spawn("terrain-palette", move || {
                 #[cfg(test)]
@@ -267,8 +275,18 @@ impl Editor {
                     })
                     .collect();
                 let means = layers.iter().map(crate::terrain_edit::layer_mean).collect();
+                let read = |f: &Option<std::path::PathBuf>| {
+                    f.as_ref().and_then(|f| floptle_assets::load_texture_sized_filtered(f, size, size, false))
+                };
+                let (mut normals, mut orms, mut heights) = (Vec::new(), Vec::new(), Vec::new());
+                for [n, o, h] in &maps {
+                    normals.push(read(n));
+                    orms.push(read(o));
+                    heights.push(read(h));
+                }
                 // The mips, here rather than on the frame.
-                let _ = tx.send((floptle_render::TerrainPalette::from_layers(layers, size), means));
+                let palette = floptle_render::TerrainPalette::from_layers(layers, size).with_surfaces(normals, orms, heights);
+                let _ = tx.send((palette, means));
             });
             self.terrain_palette_job = Some(rx);
         }
@@ -289,6 +307,7 @@ impl Editor {
         let mask =
             crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root);
         self.set_terrain_slot_means(means);
+        self.terrain_surface_bits = [palette.normal_mask(), palette.orm_mask()];
         if let Some(gpu) = self.gpu.as_ref() {
             // One array on the GPU: the raymarch and the meshed terrain (drawn
             // in the raster pass, with the per-slot nearest mask) sample it alike.
@@ -1153,6 +1172,411 @@ mod shadow_atlas_tests {
         // crawl as large. The mips read their average.
         assert!(spread < mean * 0.1, "far ground still reads single texels: spread {spread:.1} about a mean of {mean:.1}");
         assert!(crawl < mean * 0.03, "far ground crawled {crawl:.2} a pixel (mean {mean:.1}) under a third-of-a-pixel move");
+    }
+
+    /// Flat ground on a planet, painted with one slot: `colour`, and its
+    /// surface maps if given, hex-tiled by `antitile`, shaded Physical. The
+    /// camera `height` m over it looking down; one `w`×`h` picture under
+    /// each of `suns` (the way toward the sun, and its intensity).
+    #[cfg(feature = "editor-ui")]
+    #[allow(clippy::too_many_arguments)]
+    fn terrain_photos(
+        tag: &str,
+        colour: floptle_render::TextureData,
+        normal: Option<floptle_render::TextureData>,
+        orm: Option<floptle_render::TextureData>,
+        antitile: f32,
+        height: f64,
+        (w, h): (u32, u32),
+        suns: &[([f32; 3], f32)],
+    ) -> Vec<Vec<u8>> {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return Vec::new() };
+        let dir = std::env::temp_dir().join(format!("floptle_surface_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
+        let save = |name: &str, tex: &floptle_render::TextureData| {
+            std::fs::write(dir.join("textures").join(name), floptle_assets::encode_png(tex).unwrap()).unwrap();
+            format!("textures/{name}")
+        };
+        let colour = save("colour.png", &colour);
+        let mut maps = crate::terrain_edit::SlotMaps::default();
+        if let Some(t) = &normal {
+            maps.normal = save("normal.png", t);
+        }
+        if let Some(t) = &orm {
+            maps.orm = save("orm.png", t);
+        }
+        ed.project_root = dir.clone();
+        ed.terrain_textures = vec![colour.clone()];
+        ed.terrain_tex_maps = vec![maps];
+        ed.terrain_tex_tile = vec![[antitile, 0.0, 0.0]];
+        ed.texture_settings.insert(
+            colour,
+            crate::assets::TexSetting { filter: crate::assets::FilterMode::SmoothMipmaps, ..Default::default() },
+        );
+        land_palette(&mut ed);
+        let field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 3,
+            radius: 400.0,
+            voxel: 2.0,
+            relief: 0.0,
+            cave_depth: 0.0,
+            craters: 0,
+            surface_a: floptle_field::procgen::LayerPaint { slot: 1, color: [1.0; 3] },
+            surface_b: floptle_field::procgen::LayerPaint { slot: 1, color: [1.0; 3] },
+            subsoil_depth: 0.0,
+            ..Default::default()
+        });
+        let top = field.raycast(Vec3::new(0.0, 600.0, 0.0), Vec3::NEG_Y, 600.0).unwrap();
+        let body = add_body(&mut ed, 1, DVec3::ZERO, &field);
+        ed.world.insert(
+            body,
+            floptle_core::Material { shading: floptle_core::material::Shading::Physical, roughness: 1.0, metallic: 0.0, ..Default::default() },
+        );
+        settle(&mut ed);
+        let sun = ed.world.spawn();
+        ed.camera.position = DVec3::new(top.x as f64, top.y as f64 + height, top.z as f64 + 0.01);
+        ed.camera.pitch = -1.55;
+        ed.camera.yaw = 0.0;
+        let mut out = Vec::new();
+        for (i, &(direction, intensity)) in suns.iter().enumerate() {
+            ed.world.insert(sun, floptle_core::Light { direction, intensity, shadows: false, ..Default::default() });
+            let at = ed.camera.position;
+            ed.terrain_gpu_dirty = true;
+            settle(&mut ed);
+            ed.settle_terrain_meshes(at, std::time::Duration::from_secs(60));
+            let cam = ed.camera.render_camera();
+            let px = crate::shot::render_frame_pixels(&mut ed, &cam, None, w, h, !0, false).expect("a frame");
+            if let Ok(dir) = std::env::var("FLOPTLE_SURFACE_PNG") {
+                let tex = floptle_render::TextureData { pixels: px.clone(), width: w, height: h };
+                std::fs::write(std::path::Path::new(&dir).join(format!("surface_{tag}_{i}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+            }
+            out.push(px);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }
+
+    /// A 4×4 picture of one colour.
+    #[cfg(feature = "editor-ui")]
+    fn flat_tex(px: [u8; 4]) -> floptle_render::TextureData {
+        floptle_render::TextureData { pixels: px.repeat(16), width: 4, height: 4 }
+    }
+
+    /// Plain grey ground with each surface map a single colour (`None`, no
+    /// map): under each sun, the mean brightness of the middle of a 160×120
+    /// picture from 60 m and its brightest pixel there.
+    #[cfg(feature = "editor-ui")]
+    fn surfaced_ground(tag: &str, normal: Option<[u8; 4]>, orm: Option<[u8; 4]>, suns: &[([f32; 3], f32)]) -> Vec<[f32; 2]> {
+        let shots = terrain_photos(tag, flat_tex([180, 180, 180, 255]), normal.map(flat_tex), orm.map(flat_tex), 0.0, 60.0, (160, 120), suns);
+        shots
+            .iter()
+            .map(|px| {
+                let (mut sum, mut peak) = (0.0f32, 0.0f32);
+                for y in 40..80u32 {
+                    for x in 60..100u32 {
+                        let i = ((y * 160 + x) * 4) as usize;
+                        let l = px[i] as f32 * 0.3 + px[i + 1] as f32 * 0.59 + px[i + 2] as f32 * 0.11;
+                        sum += l;
+                        peak = peak.max(l);
+                    }
+                }
+                [sum / 1600.0, peak]
+            })
+            .collect()
+    }
+
+    /// The way toward a sun 35° up in the sky, on the side `(x, z)` points to.
+    #[cfg(feature = "editor-ui")]
+    fn sun_from(x: f32, z: f32) -> [f32; 3] {
+        let (c, s) = (35f32.to_radians().cos(), 35f32.to_radians().sin());
+        [x * c, s, z * c]
+    }
+
+    /// **A slot's normal map turns the ground toward the light.** A map
+    /// tilting every texel toward the picture's right lights the ground most
+    /// from the +x side, and one tilting toward the picture's top from the
+    /// −z side: the picture lies on the ground with its right toward +x and
+    /// its top toward −z, as its colours do. A flat map lights both sides
+    /// alike, and so does a slot with no map.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn a_slots_normal_map_turns_the_ground_toward_the_light() {
+        let suns = [(sun_from(1.0, 0.0), 1.0), (sun_from(-1.0, 0.0), 1.0), (sun_from(0.0, 1.0), 1.0), (sun_from(0.0, -1.0), 1.0)];
+        let mean = |v: Vec<[f32; 2]>| v.iter().map(|m| m[0]).collect::<Vec<f32>>();
+        let plain = mean(surfaced_ground("plain", None, None, &suns));
+        if plain.is_empty() {
+            return;
+        }
+        let right = mean(surfaced_ground("right", Some([218, 128, 218, 255]), None, &suns));
+        let up = mean(surfaced_ground("up", Some([128, 218, 218, 255]), None, &suns));
+        let level = mean(surfaced_ground("level", Some([128, 128, 255, 255]), None, &suns));
+        let (px, mx, pz, mz) = (0, 1, 2, 3);
+        assert!((plain[px] - plain[mx]).abs() < plain[px] * 0.05, "the fixture: flat ground lit alike from +x and −x, {plain:?}");
+        assert!((level[px] - plain[px]).abs() < plain[px] * 0.05, "a flat normal map should light as no map does: {level:?} against {plain:?}");
+        assert!(right[px] > right[mx] * 1.3, "a map tilted to the picture's right should face +x: {right:?}");
+        assert!(up[mz] > up[pz] * 1.3, "a map tilted to the picture's top should face −z: {up:?}");
+    }
+
+    /// **Hex tiling turns a normal map's texels back with its picture.**
+    /// Each hexagon lays a turned copy of the texture, so a bump in it is
+    /// turned too, and the normals read off it point the way the copy was
+    /// turned unless they are turned back. The fixture is a round bump per
+    /// tile, marked by a dark dot in the colour: lit from one side, every bump
+    /// in every hexagon must be brightest on that side. Without the turn-back
+    /// each hexagon's bumps are lit from a side of their own.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn a_hex_tiled_normal_map_is_lit_from_the_suns_side() {
+        let side = 64u32;
+        let mut dot = Vec::with_capacity((side * side * 4) as usize);
+        let mut bump = Vec::with_capacity((side * side * 4) as usize);
+        let c = side as f32 / 2.0;
+        for y in 0..side {
+            for x in 0..side {
+                let (dx, dy) = (x as f32 + 0.5 - c, y as f32 + 0.5 - c);
+                let r2 = dx * dx + dy * dy;
+                let v = if r2 < 25.0 { 0 } else { 230 };
+                dot.extend_from_slice(&[v, v, v, 255]);
+                // A dome: tilting out from the centre, up the picture as +Y.
+                let (tx, ty) = if r2 < 22.0 * 22.0 { (dx / 22.0 * 0.7, -dy / 22.0 * 0.7) } else { (0.0, 0.0) };
+                let tz = (1.0 - tx * tx - ty * ty).max(0.0).sqrt();
+                let enc = |v: f32| ((v * 0.5 + 0.5) * 255.0).round() as u8;
+                bump.extend_from_slice(&[enc(tx), enc(ty), enc(tz), 255]);
+            }
+        }
+        let tex = |p: Vec<u8>| floptle_render::TextureData { pixels: p, width: side, height: side };
+        let (w, h) = (320u32, 240u32);
+        let sun = [(sun_from(1.0, 0.0), 1.0)];
+        let plain = terrain_photos("bumps", tex(dot.clone()), Some(tex(bump.clone())), None, 0.0, 30.0, (w, h), &sun);
+        if plain.is_empty() {
+            return;
+        }
+        let hex = terrain_photos("bumpshex", tex(dot), Some(tex(bump)), None, 1.0, 30.0, (w, h), &sun);
+        // Each bump's arrow: its ring's brightness about the ring's mean,
+        // weighted by offset. Agreement is how well the arrows line up.
+        let agreement = |px: &[u8]| -> (f64, f64, usize) {
+            let l: Vec<f32> = px.chunks(4).map(|p| p[0] as f32 * 0.3 + p[1] as f32 * 0.59 + p[2] as f32 * 0.11).collect();
+            let (wi, hi) = (w as usize, h as usize);
+            let mut seen = vec![false; wi * hi];
+            let mut centres = Vec::new();
+            for start in 0..wi * hi {
+                if seen[start] || l[start] > 40.0 {
+                    continue;
+                }
+                let (mut stack, mut sum, mut n) = (vec![start], (0.0f64, 0.0f64), 0usize);
+                seen[start] = true;
+                while let Some(i) = stack.pop() {
+                    let (x, y) = (i % wi, i / wi);
+                    sum = (sum.0 + x as f64, sum.1 + y as f64);
+                    n += 1;
+                    for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
+                        if nx < wi && ny < hi && !seen[ny * wi + nx] && l[ny * wi + nx] <= 40.0 {
+                            seen[ny * wi + nx] = true;
+                            stack.push(ny * wi + nx);
+                        }
+                    }
+                }
+                if n >= 2 {
+                    centres.push((sum.0 / n as f64, sum.1 / n as f64));
+                }
+            }
+            let (mut total, mut lengths, mut count) = ((0.0f64, 0.0f64), 0.0f64, 0usize);
+            for &(cx, cy) in &centres {
+                let ring: Vec<(f64, f64, f64)> = (-9i32..=9)
+                    .flat_map(|dy| (-9i32..=9).map(move |dx| (dx, dy)))
+                    .filter_map(|(dx, dy)| {
+                        let r2 = (dx * dx + dy * dy) as f64;
+                        let (x, y) = (cx.round() as i32 + dx, cy.round() as i32 + dy);
+                        ((9.0..=64.0).contains(&r2) && x >= 0 && y >= 0 && (x as usize) < wi && (y as usize) < hi)
+                            .then(|| (dx as f64, dy as f64, l[y as usize * wi + x as usize] as f64))
+                    })
+                    .collect();
+                if ring.len() < 150 {
+                    continue;
+                }
+                let mean = ring.iter().map(|r| r.2).sum::<f64>() / ring.len() as f64;
+                let a = ring.iter().fold((0.0, 0.0), |a, r| (a.0 + r.0 * (r.2 - mean), a.1 + r.1 * (r.2 - mean)));
+                total = (total.0 + a.0, total.1 + a.1);
+                lengths += (a.0 * a.0 + a.1 * a.1).sqrt();
+                count += 1;
+            }
+            let along = total.0 / lengths.max(1e-6);
+            ((total.0 * total.0 + total.1 * total.1).sqrt() / lengths.max(1e-6), along, count)
+        };
+        let ((p, pa, pn), (x, xa, xn)) = (agreement(&plain[0]), agreement(&hex[0]));
+        assert!(pn >= 20 && xn >= 20, "the fixture: too few bumps found ({pn} plain, {xn} hex)");
+        // The camera looks down with +x to the right of the picture.
+        assert!(p > 0.8 && pa > 0.7, "the fixture: one sun should light every plain bump from +x (agreement {p:.2}, along +x {pa:.2})");
+        assert!(x > 0.8 && xa > 0.7, "hex tiling lit each hexagon's bumps from a side of its own: agreement {x:.2}, along +x {xa:.2}, over {xn} bumps");
+    }
+
+    /// **A slot's ORM map shades it.** Its occlusion darkens the light from
+    /// everywhere and not the sun's; its roughness, multiplied into the
+    /// material's, makes a smooth slot catch the sun's highlight that a rough
+    /// one spreads out.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn a_slots_orm_map_darkens_its_crevices_and_sets_its_roughness() {
+        // Ambient only, then the sun nearly overhead behind the camera.
+        let suns = [([0.0, 1.0, 0.0], 0.0), ([0.0, 1.0, 0.05], 1.0)];
+        let open = surfaced_ground("open", None, Some([255, 255, 0, 255]), &suns);
+        if open.is_empty() {
+            return;
+        }
+        let shut = surfaced_ground("shut", None, Some([40, 255, 0, 255]), &suns);
+        let glossy = surfaced_ground("glossy", None, Some([255, 25, 0, 255]), &suns);
+        assert!(open[0][0] > 5.0, "the fixture: the ambient light should show, {open:?}");
+        assert!(shut[0][0] < open[0][0] * 0.5, "occlusion 40/255 should darken the ambient: {shut:?} against {open:?}");
+        // The sun's highlight: a small bright spot on smooth ground, spread
+        // out to nothing on rough ground.
+        assert!(glossy[1][1] > open[1][1] * 1.3, "roughness 0.1 should catch the sun's highlight that 1 spreads out: {glossy:?} against {open:?}");
+    }
+
+    /// PICTURES (run by hand): PBR terrain slots as an artist would set them
+    /// up. Four slots on flat ground: a flagstone photo with a normal, ORM and
+    /// height made from its own brightness; concrete and asphalt sets
+    /// (colour, normal, ORM at 1024 texels); granite with a separate rock
+    /// normal, hex-tiled. Low sun from each side, the maps on and off.
+    /// `FLOPTLE_SHOWCASE_TEXTURES=<a textures folder> FLOPTLE_SURFACE_PNG=<dir>
+    /// cargo test -p floptle-editor --lib pbr_terrain_showcase -- --ignored`;
+    /// the folder holds `env/terrain/03_flagstone.png`, `env/terrain/14_granite.png`,
+    /// `flora/rock_n.png` and `base/{concrete,asphalt}_{albedo,normal,orm}.png`.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    #[ignore]
+    fn pbr_terrain_showcase() {
+        let (Ok(out), Ok(textures)) = (std::env::var("FLOPTLE_SURFACE_PNG"), std::env::var("FLOPTLE_SHOWCASE_TEXTURES")) else { return };
+        let solar = std::path::Path::new(&textures);
+        let load = |rel: &str| floptle_assets::load_texture(&solar.join(rel)).expect(rel);
+        // A normal, ORM and height from a colour photo: brightness as height.
+        let derive = |t: &floptle_render::TextureData, depth: f32| {
+            let (w, h) = (t.width as i32, t.height as i32);
+            let lum = |x: i32, y: i32| {
+                let i = (((y.rem_euclid(h)) * w + x.rem_euclid(w)) * 4) as usize;
+                (t.pixels[i] as f32 * 0.3 + t.pixels[i + 1] as f32 * 0.59 + t.pixels[i + 2] as f32 * 0.11) / 255.0
+            };
+            let blur = |x: i32, y: i32| (lum(x, y) * 4.0 + lum(x + 1, y) + lum(x - 1, y) + lum(x, y + 1) + lum(x, y - 1)) / 8.0;
+            let (mut n, mut orm, mut ht) = (Vec::new(), Vec::new(), Vec::new());
+            for y in 0..h {
+                for x in 0..w {
+                    let hx = (blur(x + 1, y) - blur(x - 1, y)) * depth;
+                    let hy = (blur(x, y + 1) - blur(x, y - 1)) * depth;
+                    let v = [-hx, hy, 1.0f32];
+                    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                    let enc = |c: f32| ((c / l * 0.5 + 0.5) * 255.0).round() as u8;
+                    n.extend_from_slice(&[enc(v[0]), enc(v[1]), enc(v[2]), 255]);
+                    let b = blur(x, y);
+                    let ao = ((0.35 + b * 1.3).min(1.0) * 255.0) as u8;
+                    let rough = ((0.95 - b * 0.55).clamp(0.2, 1.0) * 255.0) as u8;
+                    orm.extend_from_slice(&[ao, rough, 0, 255]);
+                    let hb = (b * 255.0) as u8;
+                    ht.extend_from_slice(&[hb, hb, hb, 255]);
+                }
+            }
+            let tex = |p| floptle_render::TextureData { pixels: p, width: t.width, height: t.height };
+            (tex(n), tex(orm), tex(ht))
+        };
+        let shoot = |tag: &str, maps_on: bool| {
+            let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+            let dir = std::env::temp_dir().join(format!("floptle_showcase_{tag}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
+            let save = |name: &str, t: &floptle_render::TextureData| {
+                std::fs::write(dir.join("textures").join(name), floptle_assets::encode_png(t).unwrap()).unwrap();
+                format!("textures/{name}")
+            };
+            let flag = load("env/terrain/03_flagstone.png");
+            let (fn_, fo, fh) = derive(&flag, 3.0);
+            let slots = [
+                (save("flag.png", &flag), Some(save("flag_n.png", &fn_)), Some(save("flag_orm.png", &fo)), Some(save("flag_h.png", &fh)), 0.0, 1.0),
+                (save("concrete.png", &load("base/concrete_albedo.png")), Some(save("concrete_n.png", &load("base/concrete_normal.png"))), Some(save("concrete_orm.png", &load("base/concrete_orm.png"))), None, 0.0, 0.6),
+                (save("asphalt.png", &load("base/asphalt_albedo.png")), Some(save("asphalt_n.png", &load("base/asphalt_normal.png"))), Some(save("asphalt_orm.png", &load("base/asphalt_orm.png"))), None, 0.0, 0.8),
+                (save("granite.png", &load("env/terrain/14_granite.png")), Some(save("rock_n.png", &load("flora/rock_n.png"))), None, None, 1.0, 1.0),
+            ];
+            ed.project_root = dir.clone();
+            ed.project.terrain_layer_size = 1024;
+            ed.terrain_textures = slots.iter().map(|s| s.0.clone()).collect();
+            ed.terrain_tex_maps = slots
+                .iter()
+                .map(|s| {
+                    if !maps_on {
+                        return crate::terrain_edit::SlotMaps::default();
+                    }
+                    crate::terrain_edit::SlotMaps {
+                        normal: s.1.clone().unwrap_or_default(),
+                        orm: s.2.clone().unwrap_or_default(),
+                        height: s.3.clone().unwrap_or_default(),
+                    }
+                })
+                .collect();
+            ed.terrain_tex_tile = slots.iter().map(|s| [s.4, if s.4 > 0.0 { 0.4 } else { 0.0 }, 40.0]).collect();
+            ed.terrain_tex_scale = slots.iter().map(|s| s.5).collect();
+            ed.terrain_tex_blend = vec![1.5; 4];
+            ed.terrain_tex_rough = vec![0.5; 4];
+            for s in &slots {
+                ed.texture_settings.insert(
+                    s.0.clone(),
+                    crate::assets::TexSetting { filter: crate::assets::FilterMode::SmoothMipmaps, ..Default::default() },
+                );
+            }
+            land_palette(&mut ed);
+            let mut field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+                seed: 3,
+                radius: 400.0,
+                voxel: 1.0,
+                relief: 0.0,
+                cave_depth: 0.0,
+                craters: 0,
+                surface_a: floptle_field::procgen::LayerPaint { slot: 1, color: [1.0; 3] },
+                surface_b: floptle_field::procgen::LayerPaint { slot: 1, color: [1.0; 3] },
+                subsoil_depth: 0.0,
+                ..Default::default()
+            });
+            let top = field.raycast(Vec3::new(0.0, 600.0, 0.0), Vec3::NEG_Y, 600.0).unwrap();
+            // Concrete to the left, asphalt to the right, granite beyond; flagstone the rest.
+            for (x, z, slot) in [(-7.0f32, -4.0f32, 2u8), (7.0, -4.0, 3), (0.0, -16.0, 4)] {
+                field.paint_texture(Vec3::new(top.x + x, top.y, top.z + z), 6.5, slot);
+            }
+            let body = add_body(&mut ed, 1, DVec3::ZERO, &field);
+            ed.world.insert(
+                body,
+                floptle_core::Material { shading: floptle_core::material::Shading::Physical, roughness: 1.0, metallic: 0.0, ..Default::default() },
+            );
+            settle(&mut ed);
+            let sun = ed.world.spawn();
+            let (w, h) = (960u32, 540u32);
+            let views: [(&str, DVec3, f32, [f32; 3]); 8] = [
+                ("walk_sun_left", DVec3::new(0.0, 1.7, 5.0), -0.38, [-0.95, 0.3, -0.1]),
+                ("walk_sun_right", DVec3::new(0.0, 1.7, 5.0), -0.38, [0.95, 0.3, -0.1]),
+                ("overhead", DVec3::new(0.0, 16.0, 4.0), -1.25, [-0.8, 0.5, -0.3]),
+                ("concrete_sun_left", DVec3::new(-7.0, 1.0, -1.0), -0.7, [-0.95, 0.28, 0.1]),
+                ("concrete_sun_right", DVec3::new(-7.0, 1.0, -1.0), -0.7, [0.95, 0.28, 0.1]),
+                ("asphalt", DVec3::new(7.0, 1.0, -1.0), -0.7, [-0.6, 0.35, -0.7]),
+                ("flagstone", DVec3::new(0.0, 0.9, 4.0), -0.75, [-0.9, 0.35, 0.2]),
+                ("granite_edge", DVec3::new(0.0, 1.2, -8.5), -0.7, [0.85, 0.4, -0.3]),
+            ];
+            for (name, at, pitch, sun_dir) in views {
+                ed.world.insert(
+                    sun,
+                    floptle_core::Light { direction: sun_dir, intensity: 1.5, ambient: [0.3, 0.32, 0.38], shadows: true, ..Default::default() },
+                );
+                ed.camera.position = DVec3::new(top.x as f64, top.y as f64, top.z as f64) + at;
+                ed.camera.pitch = pitch;
+                ed.camera.yaw = 0.0;
+                let pos = ed.camera.position;
+                ed.terrain_gpu_dirty = true;
+                settle(&mut ed);
+                ed.settle_terrain_meshes(pos, std::time::Duration::from_secs(120));
+                let cam = ed.camera.render_camera();
+                let px = crate::shot::render_frame_pixels(&mut ed, &cam, None, w, h, !0, false).expect("a frame");
+                let tex = floptle_render::TextureData { pixels: px, width: w, height: h };
+                std::fs::write(std::path::Path::new(&out).join(format!("{tag}_{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        };
+        shoot("maps", true);
+        shoot("nomaps", false);
     }
 
     /// **The palette is one array, at the size the project asks for.** The

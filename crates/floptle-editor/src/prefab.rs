@@ -1157,7 +1157,7 @@ mod tests {
         // not with one picked for both.
         ed.world.insert(a, floptle_core::Material { color: [1.0, 0.0, 0.0], ..Default::default() });
         ed.world.insert(b, floptle_core::Material { color: [0.0, 0.0, 1.0], ..Default::default() });
-        let shared = ed.terrain_material();
+        let shared = ed.terrain_material().into();
         let own = |e| crate::terrain_edit::terrain_instance_material(&ed.world, e, &shared).color;
         assert_eq!((own(a), own(b)), ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]), "each terrain should shade with its own Material");
     }

@@ -625,8 +625,8 @@ impl Editor {
             terrain_bits: [
                 crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root),
                 self.terrain_glow_mask,
-                0,
-                0,
+                self.terrain_surface_bits[0],
+                self.terrain_surface_bits[1],
             ],
         };
 
@@ -1045,7 +1045,7 @@ impl Editor {
         // SDF AO from the scene's PostProcess node shades SDF matter in offscreen
         // views too (previews + the split Game viewport).
         let (_, rm_ao_params) = post_process_uniforms(&self.world);
-        let terrain_mat = self.terrain_material();
+        let terrain_mat = self.terrain_materials();
         // Terrain 2.0 (P2): the meshed terrain draws in this offscreen/Game view too, or a
         // docked Game viewport would show empty ground (its volume is `w = 3`, not drawn by
         // the raymarch). Same instance push as the main Scene view.
@@ -1233,7 +1233,7 @@ impl Editor {
             }
             let (blob_tint, blob_emissive, blob_specular, blob_params, blob_rim) =
                 if show_blobs { blob_mat_arrays(&blobs) } else { blob_mat_arrays(&[]) };
-            let tm = &terrain_mat;
+            let tm = &terrain_mat.shared;
             let (vol_fog_a, vol_fog_b, vol_fog_c) =
                 vol_fog_uniforms(&light_node, self.fog_time, cam.world_position.y as f32);
             let mut g = RaymarchGlobals {

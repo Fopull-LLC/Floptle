@@ -29,7 +29,25 @@ pub fn terrain_layer_size(asked: u32) -> u32 {
 pub struct TerrainPalette {
     size: u32,
     layers: Vec<Option<Vec<Vec<u8>>>>,
+    /// The slots' surface maps, as stored (not sRGB): entry `i` is slot `i`'s
+    /// normal map, entry `TERRAIN_SLOTS + i` its occlusion, roughness,
+    /// metalness and height. They go up as the palette array's layers past
+    /// its colours. Empty when no slot has any.
+    surfaces: Vec<Option<Vec<Vec<u8>>>>,
+    normal_mask: u32,
+    orm_mask: u32,
 }
+
+/// Layers in the palette array when a slot has surface maps: the colours,
+/// then a normal map and an ORM-and-height map for each slot. Without any it
+/// is the colours alone, [`TERRAIN_SLOTS`].
+pub const SURFACED_LAYERS: u32 = TERRAIN_SLOTS * 3;
+
+/// A slot with no normal map: straight up out of the surface.
+const FLAT_NORMAL: [u8; 4] = [128, 128, 255, 255];
+/// A slot with no ORM map: no occlusion, and the material's own roughness and
+/// metalness (the map multiplies them), at the middle height.
+const PLAIN_ORM: [u8; 4] = [255, 255, 255, 128];
 
 impl TerrainPalette {
     /// The palette from `layers`, each already `size`² (the loader resizes
@@ -40,7 +58,67 @@ impl TerrainPalette {
             .take(TERRAIN_SLOTS as usize)
             .map(|t| (t.width == size && t.height == size).then(|| srgb_mip_chain(t.pixels, size)))
             .collect();
-        Self { size, layers }
+        Self { size, layers, surfaces: Vec::new(), normal_mask: 0, orm_mask: 0 }
+    }
+
+    /// Add each slot's surface maps, each already `size`² or `None`: a normal
+    /// map (OpenGL, +Y up), an ORM map (glTF: R occlusion, G roughness, B
+    /// metalness) and a height map (its red channel). A slot that names none
+    /// costs nothing; a palette where none does has no surface array at all.
+    pub fn with_surfaces(
+        mut self,
+        normals: Vec<Option<TextureData>>,
+        orms: Vec<Option<TextureData>>,
+        heights: Vec<Option<TextureData>>,
+    ) -> Self {
+        let size = self.size;
+        let fits = |t: &TextureData| t.width == size && t.height == size;
+        let slots = TERRAIN_SLOTS as usize;
+        let mut normal_layers = Vec::with_capacity(slots);
+        let mut orm_layers = Vec::with_capacity(slots);
+        let (mut normal_mask, mut orm_mask) = (0u32, 0u32);
+        let mut normals = normals.into_iter();
+        let mut orms = orms.into_iter();
+        let mut heights = heights.into_iter();
+        for i in 0..slots {
+            let n = normals.next().flatten().filter(fits);
+            let o = orms.next().flatten().filter(fits);
+            let h = heights.next().flatten().filter(fits);
+            normal_layers.push(n.map(|t| {
+                normal_mask |= 1 << i;
+                linear_mip_chain(t.pixels, size, true)
+            }));
+            orm_layers.push((o.is_some() || h.is_some()).then(|| {
+                if o.is_some() {
+                    orm_mask |= 1 << i;
+                }
+                let texels = (size * size) as usize;
+                let mut px = Vec::with_capacity(texels * 4);
+                for k in 0..texels {
+                    let orm = o.as_ref().map_or([255, 255, 255], |t| [t.pixels[k * 4], t.pixels[k * 4 + 1], t.pixels[k * 4 + 2]]);
+                    let height = h.as_ref().map_or(128, |t| t.pixels[k * 4]);
+                    px.extend_from_slice(&[orm[0], orm[1], orm[2], height]);
+                }
+                linear_mip_chain(px, size, false)
+            }));
+        }
+        if normal_mask != 0 || orm_layers.iter().any(Option::is_some) {
+            normal_layers.extend(orm_layers);
+            self.surfaces = normal_layers;
+        }
+        self.normal_mask = normal_mask;
+        self.orm_mask = orm_mask;
+        self
+    }
+
+    /// The slots with a normal map, bit per slot.
+    pub fn normal_mask(&self) -> u32 {
+        self.normal_mask
+    }
+
+    /// The slots with an ORM map, bit per slot.
+    pub fn orm_mask(&self) -> u32 {
+        self.orm_mask
     }
 
     /// The side of the largest level.
@@ -58,12 +136,17 @@ impl TerrainPalette {
         self.layers.get(layer)?.as_ref()?.get(level).map(Vec::as_slice)
     }
 
-    /// The palette as a [`TERRAIN_SLOTS`]-layer sRGB array with every level.
+    /// The palette as a [`TERRAIN_SLOTS`]-layer sRGB array with every level,
+    /// or [`SURFACED_LAYERS`] when a slot has surface maps. The maps share the
+    /// colours' array, rather than taking a binding of their own, so a custom
+    /// shader keeps every texture slot it had; each value is stored as the
+    /// sRGB code that decodes back to it.
     pub fn upload(&self, gpu: &Gpu) -> wgpu::Texture {
         let levels = self.levels();
+        let layers = if self.surfaces.is_empty() { TERRAIN_SLOTS } else { SURFACED_LAYERS };
         let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("terrain-palette"),
-            size: wgpu::Extent3d { width: self.size, height: self.size, depth_or_array_layers: TERRAIN_SLOTS },
+            size: wgpu::Extent3d { width: self.size, height: self.size, depth_or_array_layers: layers },
             mip_level_count: levels,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -77,21 +160,79 @@ impl TerrainPalette {
                 let side = (self.size >> level).max(1);
                 let bytes = (side * side * 4) as usize;
                 let data = self.level(layer as usize, level as usize).unwrap_or(&white[..bytes]);
-                gpu.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &tex,
-                        mip_level: level,
-                        origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    data,
-                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(side * 4), rows_per_image: Some(side) },
-                    wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
-                );
+                write_layer(gpu, &tex, layer, level, side, data);
+            }
+        }
+        if !self.surfaces.is_empty() {
+            let code = data_to_srgb_table();
+            for (i, surface) in self.surfaces.iter().enumerate() {
+                let neutral = if (i as u32) < TERRAIN_SLOTS { FLAT_NORMAL } else { PLAIN_ORM };
+                for level in 0..levels {
+                    let side = (self.size >> level).max(1);
+                    let encoded: Vec<u8> = match surface.as_ref().and_then(|c| c.get(level as usize)) {
+                        Some(px) => px.iter().map(|&v| code[v as usize]).collect(),
+                        None => neutral.map(|v| code[v as usize]).repeat((side * side) as usize),
+                    };
+                    write_layer(gpu, &tex, TERRAIN_SLOTS + i as u32, level, side, &encoded);
+                }
             }
         }
         tex
     }
+}
+
+fn write_layer(gpu: &Gpu, tex: &wgpu::Texture, layer: u32, level: u32, side: u32, data: &[u8]) {
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: tex,
+            mip_level: level,
+            origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+            aspect: wgpu::TextureAspect::All,
+        },
+        data,
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(side * 4), rows_per_image: Some(side) },
+        wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+    );
+}
+
+/// A square data picture's mip chain (normals, ORM): each level the 2×2
+/// average of the one above, as stored. With `normal` the averaged vector is
+/// put back to unit length, so a bumpy surface far off reads flatter rather
+/// than shorter.
+pub fn linear_mip_chain(level0: Vec<u8>, size: u32, normal: bool) -> Vec<Vec<u8>> {
+    let mut chain = vec![level0];
+    let mut side = size;
+    while side > 1 {
+        let next_side = side / 2;
+        let cur = chain.last().expect("level 0 is there");
+        let mut next = vec![0u8; (next_side * next_side * 4) as usize];
+        for y in 0..next_side {
+            for x in 0..next_side {
+                let at = |dx: u32, dy: u32| (((2 * y + dy) * side + 2 * x + dx) * 4) as usize;
+                let taps = [at(0, 0), at(1, 0), at(0, 1), at(1, 1)];
+                let o = ((y * next_side + x) * 4) as usize;
+                let mut avg = [0.0f32; 4];
+                for (c, a) in avg.iter_mut().enumerate() {
+                    *a = taps.iter().map(|&i| cur[i + c] as f32).sum::<f32>() * 0.25;
+                }
+                if normal {
+                    let v = [avg[0] / 127.5 - 1.0, avg[1] / 127.5 - 1.0, avg[2] / 127.5 - 1.0];
+                    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                    if len > 1e-4 {
+                        for c in 0..3 {
+                            avg[c] = (v[c] / len + 1.0) * 127.5;
+                        }
+                    }
+                }
+                for c in 0..4 {
+                    next[o + c] = (avg[c] + 0.5).clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        chain.push(next);
+        side = next_side;
+    }
+    chain
 }
 
 /// sRGB byte to linear light.
@@ -100,6 +241,24 @@ fn srgb_to_linear_table() -> [f32; 256] {
     for (i, v) in t.iter_mut().enumerate() {
         let c = i as f32 / 255.0;
         *v = if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+    }
+    t
+}
+
+/// For each stored data byte, the sRGB code whose decode is nearest it: what
+/// a surface map is written into the sRGB palette array as.
+fn data_to_srgb_table() -> [u8; 256] {
+    let lin = srgb_to_linear_table();
+    let mut t = [0u8; 256];
+    for (v, code) in t.iter_mut().enumerate() {
+        let want = v as f32 / 255.0;
+        let mut best = 0usize;
+        for (c, l) in lin.iter().enumerate() {
+            if (l - want).abs() < (lin[best] - want).abs() {
+                best = c;
+            }
+        }
+        *code = best as u8;
     }
     t
 }
@@ -174,6 +333,47 @@ mod tests {
                 assert_eq!(t[3], 255);
             }
         }
+    }
+
+    #[test]
+    fn a_normal_maps_mips_stay_unit_length() {
+        // Two opposite tilts side by side: the plain average is half as long
+        // as a normal, and reads as a dark, flattened surface.
+        let mut px = Vec::new();
+        for i in 0..4 {
+            px.extend_from_slice(if i % 2 == 0 { &[218, 128, 218, 255] } else { &[38, 128, 218, 255] });
+        }
+        let chain = linear_mip_chain(px, 2, true);
+        let t = &chain[1];
+        let v = [t[0] as f32 / 127.5 - 1.0, t[1] as f32 / 127.5 - 1.0, t[2] as f32 / 127.5 - 1.0];
+        let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        assert!((len - 1.0).abs() < 0.02, "the averaged normal is {len} long");
+        assert!(v[2] > 0.99, "two opposite tilts average to straight up, not {v:?}");
+    }
+
+    #[test]
+    fn surface_maps_go_where_named_and_nowhere_else() {
+        let grey = |v: u8| Some(TextureData { pixels: vec![v; 4 * 4 * 4], width: 4, height: 4 });
+        let p = TerrainPalette::from_layers(Vec::new(), 4);
+        let none = p.with_surfaces(vec![None; 3], vec![None; 3], vec![None; 3]);
+        assert!(none.surfaces.is_empty(), "a palette naming no maps holds no surface array");
+        let p = TerrainPalette::from_layers(Vec::new(), 4).with_surfaces(vec![None, grey(200)], vec![grey(90)], vec![None, None, grey(40)]);
+        assert_eq!((p.normal_mask(), p.orm_mask()), (0b010, 0b001));
+        let orm = |slot: usize| p.surfaces[TERRAIN_SLOTS as usize + slot].as_ref().map(|c| c[0][..4].to_vec());
+        assert_eq!(orm(0), Some(vec![90, 90, 90, 128]), "an ORM map with no height sits at the middle height");
+        assert_eq!(orm(1), None);
+        assert_eq!(orm(2), Some(vec![255, 255, 255, 40]), "a height map alone keeps the plain ORM");
+    }
+
+    #[test]
+    fn a_surface_value_survives_the_srgb_array() {
+        // Stored as the code that decodes nearest it, every byte comes back
+        // within the step of the sRGB curve at its brightest, about 1.1 bytes.
+        let (code, lin) = (data_to_srgb_table(), srgb_to_linear_table());
+        let worst = (0..256usize).map(|v| (lin[code[v] as usize] * 255.0 - v as f32).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1.2, "a stored value came back {worst} bytes off");
+        assert_eq!(code[0], 0);
+        assert_eq!(code[255], 255);
     }
 
     #[test]

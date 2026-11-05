@@ -77,7 +77,9 @@ pub struct Globals {
     /// f32 packing silently corrupts bits past 2^24).
     pub terrain_mask: [f32; 4],
     /// Per-slot bitmasks, exact at 32 slots: x = nearest filtering, y = GLOW
-    /// (self-lit slots), z/w unused.
+    /// (self-lit slots), z = has a normal map, w = has an ORM map (the
+    /// palette's layers 32 + slot and 64 + slot; see
+    /// [`crate::TerrainPalette::with_surfaces`]).
     pub terrain_bits: [u32; 4],
     /// Each light's CONE, when it is aimed: x = cosine of the half angle where
     /// it reaches zero, y = cosine of the half angle where it is still full.

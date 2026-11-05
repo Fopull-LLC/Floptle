@@ -1374,6 +1374,47 @@ impl PaletteFlags {
     }
 }
 
+/// A palette slot's surface maps, after its path on its line in the palette
+/// file: `|normal=` (OpenGL, +Y up), `|orm=` (glTF: R occlusion, G roughness,
+/// B metalness) and `|height=` (its red channel). Each is a project-relative
+/// path, empty for none; a slot naming none draws as it always has.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SlotMaps {
+    pub normal: String,
+    pub orm: String,
+    pub height: String,
+}
+
+impl SlotMaps {
+    /// The maps as flags, in a fixed order, only those named.
+    pub(crate) fn suffix(&self) -> String {
+        let mut line = String::new();
+        for (key, path) in [("normal", &self.normal), ("orm", &self.orm), ("height", &self.height)] {
+            if !path.is_empty() {
+                line.push_str(&format!("|{key}={path}"));
+            }
+        }
+        line
+    }
+
+    /// The maps a slot's flags name; flags of another kind are left to
+    /// [`PaletteFlags::parse`].
+    pub(crate) fn parse<'a>(flags: impl Iterator<Item = &'a str>, project_root: &std::path::Path) -> Self {
+        let mut m = Self::default();
+        let path = |v: &str| if v.is_empty() { String::new() } else { floptle_scene::portable::rel_path(v, project_root) };
+        for flag in flags {
+            if let Some(v) = flag.strip_prefix("normal=") {
+                m.normal = path(v);
+            } else if let Some(v) = flag.strip_prefix("orm=") {
+                m.orm = path(v);
+            } else if let Some(v) = flag.strip_prefix("height=") {
+                m.height = path(v);
+            }
+        }
+        m
+    }
+}
+
 /// Per-slot anti-tiling (`terrain_tex_tile`) as the shader's `terrain_tile`:
 /// one lane per slot, x antitile, y macro strength, z macro size, w 1 where
 /// the slot reads its mips (bit `i` of `mips`, see [`terrain_mips_mask`]). A
@@ -1879,8 +1920,29 @@ impl Editor {
 
 /// What terrain `e` shades with: its own [`Material`], or `shared` (see
 /// `Editor::terrain_material`) when it has none.
-pub(crate) fn terrain_instance_material(world: &floptle_core::World, e: Entity, shared: &MaterialParams) -> MaterialParams {
-    world.get::<Material>(e).map(crate::shading::material_params).unwrap_or(*shared)
+pub(crate) fn terrain_instance_material(world: &floptle_core::World, e: Entity, mats: &TerrainMaterials) -> MaterialParams {
+    mats.own
+        .get(&e)
+        .copied()
+        .or_else(|| world.get::<Material>(e).map(crate::shading::material_params))
+        .unwrap_or(mats.shared)
+}
+
+/// The materials terrain draws with: each terrain's own [`Material`],
+/// resolved by the renderer the way a mesh's is so its shading model,
+/// roughness and metalness reach the shader, and the shared one a terrain
+/// without its own takes ([`Editor::terrain_material`]). Built before the
+/// renderer is lent to the draw.
+#[derive(Clone)]
+pub(crate) struct TerrainMaterials {
+    pub shared: MaterialParams,
+    pub own: HashMap<Entity, MaterialParams>,
+}
+
+impl From<MaterialParams> for TerrainMaterials {
+    fn from(shared: MaterialParams) -> Self {
+        Self { shared, own: HashMap::new() }
+    }
 }
 
 /// Append every terrain's chunk-mesh instances to the raster draw list. The model matrix
@@ -1898,7 +1960,7 @@ pub(crate) fn push_terrain_instances(
     terrains: &HashMap<Entity, EditorTerrain>,
     world: &floptle_core::World,
     raster: &floptle_render::Raster,
-    base_mat: &MaterialParams,
+    base_mat: &TerrainMaterials,
     cam_world: DVec3,
     view_proj: Mat4,
     sphere_mesh: MeshId,
@@ -5057,6 +5119,7 @@ impl Editor {
                 let mut blends: Vec<f32> = Vec::new();
                 let mut roughs: Vec<f32> = Vec::new();
                 let mut tiles: Vec<[f32; 3]> = Vec::new();
+                let mut maps: Vec<SlotMaps> = Vec::new();
                 // One line per slot, `path` plus zero or more `|flag` suffixes
                 // (`PaletteFlags`).
                 let mut palette: Vec<String> = text
@@ -5071,7 +5134,9 @@ impl Editor {
                             "" => String::new(),
                             p => floptle_scene::portable::rel_path(p, &self.project_root),
                         };
-                        let f = PaletteFlags::parse(parts);
+                        let flags: Vec<&str> = parts.collect();
+                        maps.push(SlotMaps::parse(flags.iter().copied(), &self.project_root));
+                        let f = PaletteFlags::parse(flags.into_iter());
                         if f.glow {
                             glow |= 1 << i.min(31);
                         }
@@ -5087,6 +5152,8 @@ impl Editor {
                 blends.resize(slots, 0.0);
                 roughs.resize(slots, 0.5);
                 tiles.resize(slots, [0.0; 3]);
+                maps.resize(slots, SlotMaps::default());
+                self.terrain_tex_maps = maps;
                 self.terrain_textures = palette;
                 self.terrain_tex_scale = scales;
                 self.terrain_tex_blend = blends;
@@ -5286,21 +5353,40 @@ impl Editor {
     /// terrain's, else the lowest-numbered terrain's that has one, else a
     /// neutral matte default. Per-terrain colour still comes from painting.
     pub(crate) fn terrain_material(&self) -> MaterialParams {
-        // The lowest-numbered terrain, not the first a hash map happens to
-        // list, so every run picks the same one.
-        let pick = self
-            .active_terrain
-            .filter(|e| self.world.get::<Material>(*e).is_some())
-            .or_else(|| {
-                self.terrains
-                    .keys()
-                    .copied()
-                    .filter(|&e| self.world.get::<Material>(e).is_some())
-                    .min_by_key(|e| e.index())
-            });
-        pick.and_then(|e| self.world.get::<Material>(e))
+        self.terrain_material_entity()
+            .and_then(|e| self.world.get::<Material>(e))
             .map(material_params)
             .unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]))
+    }
+
+    /// Every terrain's material as the draw needs it (see [`TerrainMaterials`]).
+    pub(crate) fn terrain_materials(&mut self) -> TerrainMaterials {
+        let mut own = HashMap::new();
+        if let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) {
+            for &e in self.terrains.keys() {
+                if let Some(m) = self.world.get::<Material>(e) {
+                    own.insert(e, crate::shading::material_draw(raster, gpu, m, &self.texture_registry, None).1);
+                }
+            }
+        }
+        let shared = self
+            .terrain_material_entity()
+            .and_then(|e| own.get(&e).copied())
+            .unwrap_or_else(|| self.terrain_material());
+        TerrainMaterials { shared, own }
+    }
+
+    /// The terrain whose Material a terrain without one shades with.
+    fn terrain_material_entity(&self) -> Option<Entity> {
+        // The lowest-numbered terrain, not the first a hash map happens to
+        // list, so every run picks the same one.
+        self.active_terrain.filter(|e| self.world.get::<Material>(*e).is_some()).or_else(|| {
+            self.terrains
+                .keys()
+                .copied()
+                .filter(|&e| self.world.get::<Material>(e).is_some())
+                .min_by_key(|e| e.index())
+        })
     }
 }
 
@@ -5464,6 +5550,29 @@ mod tests {
         // Out of range clamps; unknown and unreadable flags keep the default.
         let odd = parse("x.png|antitile=7|macro=-1|macrosize=nope|shiny=yes");
         assert_eq!(odd.tile, [1.0, 0.0, 0.0]);
+    }
+
+    /// **A slot's surface maps share its line with its other settings.** The
+    /// map flags come after the others and round-trip; the other settings
+    /// read the same with them there (an editor that doesn't know them passes
+    /// them over); and a slot naming none writes nothing.
+    #[test]
+    fn a_palette_slots_maps_round_trip_beside_its_flags() {
+        use super::{PaletteFlags, SlotMaps};
+        let root = std::path::Path::new("/project");
+        assert_eq!(SlotMaps::default().suffix(), "");
+        let maps = SlotMaps { normal: "textures/rock_n.png".into(), orm: "textures/rock_orm.png".into(), height: "textures/rock_h.png".into() };
+        let flags = PaletteFlags { scale: 2.0, tile: [1.0, 0.0, 0.0], ..Default::default() };
+        let line = format!("textures/rock.png{}{}", flags.suffix(), maps.suffix());
+        assert_eq!(
+            line,
+            "textures/rock.png|scale=2|antitile=1|normal=textures/rock_n.png|orm=textures/rock_orm.png|height=textures/rock_h.png"
+        );
+        assert_eq!(SlotMaps::parse(line.split('|').skip(1), root), maps);
+        assert_eq!(PaletteFlags::parse(line.split('|').skip(1)), flags);
+        // One map alone; and a line with none reads none.
+        assert_eq!(SlotMaps::parse("x.png|orm=o.png".split('|').skip(1), root), SlotMaps { orm: "o.png".into(), ..Default::default() });
+        assert_eq!(SlotMaps::parse("x.png|glow|scale=2".split('|').skip(1), root), SlotMaps::default());
     }
 
     /// **A mesh looks as far as the widest blend reaches, and no further.**
@@ -6109,7 +6218,7 @@ mod residency_tests {
             &ed.terrains,
             &ed.world,
             ed.raster.as_ref().unwrap(),
-            &MaterialParams::flat([0.5, 0.5, 0.5]),
+            &MaterialParams::flat([0.5, 0.5, 0.5]).into(),
             cam,
             view_proj,
             ed.mesh_ids[floptle_core::Shape::Sphere as usize],
@@ -6127,7 +6236,7 @@ mod residency_tests {
             &ed.terrains,
             &ed.world,
             ed.raster.as_ref().unwrap(),
-            &MaterialParams::flat([0.5, 0.5, 0.5]),
+            &MaterialParams::flat([0.5, 0.5, 0.5]).into(),
             cam,
             view_proj,
             ed.mesh_ids[floptle_core::Shape::Sphere as usize],
@@ -6944,7 +7053,7 @@ mod residency_tests {
             &ed.terrains,
             &ed.world,
             ed.raster.as_ref().unwrap(),
-            &MaterialParams::flat([0.5, 0.5, 0.5]),
+            &MaterialParams::flat([0.5, 0.5, 0.5]).into(),
             cam,
             view_proj,
             ed.mesh_ids[floptle_core::Shape::Sphere as usize],

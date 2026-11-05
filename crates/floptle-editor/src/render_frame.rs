@@ -534,7 +534,7 @@ impl Editor {
         // Terrain surface material, resolved before the GPU destructure borrows `self.raster`
         // out (`terrain_material` is `&self`): the meshed terrain draws with it in the raster
         // pass (Terrain 2.0 / P2). Cheap; only read when terrains exist.
-        let terrain_base_mat = self.terrain_material();
+        let terrain_base_mat = self.terrain_materials();
 
         // This frame's sky-shader uniforms (Inspector knobs over `.flsl` defaults), also
         // resolved before the GPU destructure takes `&mut self` — both draw sites reuse it.

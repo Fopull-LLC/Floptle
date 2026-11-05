@@ -2304,6 +2304,9 @@ impl Editor {
                         tile: self.terrain_tex_tile.get(i).copied().unwrap_or([0.0; 3]),
                     };
                     line.push_str(&flags.suffix());
+                    if let Some(maps) = self.terrain_tex_maps.get(i) {
+                        line.push_str(&maps.suffix());
+                    }
                     line
                 })
                 .collect();

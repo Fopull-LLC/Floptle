@@ -21,7 +21,7 @@ struct RasterGlobals {
     point_shape: array<vec4<f32>, 16>, // the EMITTER: [kind, a, b, flags] — see area_terms()
     point_rot: array<vec4<f32>, 16>,   // the emitter's world orientation (xyzw quaternion)
     terrain_mask: vec4<f32>,           // y = triplanar scale (bitmasks moved to terrain_bits)
-    terrain_bits: vec4<u32>,           // x = per-slot NEAREST bitmask, y = per-slot GLOW bitmask (bit-exact at 32 slots)
+    terrain_bits: vec4<u32>,           // x = per-slot NEAREST bitmask, y = GLOW, z = has a normal map, w = has an ORM map (bit-exact at 32 slots)
     // Each lamp's CONE: x = cos(half angle where it reaches zero), y = cos(half
     // angle where it is still full. x = -1 is NO cone. Appended at the END so
     // this struct stays byte-identical to the Rust `Globals`.
@@ -1532,7 +1532,89 @@ fn point_ggx(pos_rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, roug
 // the caller BEFORE any branching) so this is legal inside data-dependent loops — the
 // weight-blended splat below samples a variable number of slots per fragment. `slot` is
 // the 0-based palette layer; per-slot nearest filtering comes from `terrain_bits.x`.
-fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, dpy_in: vec3<f32>) -> vec3<f32> {
+// What the slots a terrain fragment blends say about its surface, summed by
+// their weights as `terrain_splat` reads them: the normal in the terrain's
+// own space, and occlusion, roughness, metalness and height. Zero at the start
+// of every fragment; `TS_ANY` is set only when a blended slot has a map, so a
+// palette with none leaves the surface exactly as it was.
+var<private> TS_N: vec3<f32>;
+var<private> TS_ORM: vec4<f32>;
+var<private> TS_W: f32;
+var<private> TS_ANY: bool;
+
+// A slot with no surface maps, or no texture, at weight `wt`: the surface's
+// own normal and the plain ORM.
+fn terrain_surface_plain(n: vec3<f32>, wt: f32) {
+    TS_N += normalize(n) * wt;
+    TS_ORM += vec4<f32>(1.0, 1.0, 1.0, 0.5) * wt;
+    TS_W += wt;
+}
+
+// A normal-map texel as a tangent-space normal in the frame where +y runs
+// along +v. The map is OpenGL's (+Y up the picture), and the picture's up is
+// toward smaller v.
+fn pal_tangent(s: vec4<f32>) -> vec3<f32> {
+    let t = s.xyz * 2.0 - 1.0;
+    return vec3<f32>(t.x, -t.y, t.z);
+}
+
+// One triplanar projection of a slot with surface maps: its colour, the
+// tangent-space normal and the ORM-and-height. Hex-tiled, every map is read
+// through the colour's taps and blended with the colour's weights, so the
+// seams of all three fall in one place, and each tap's normal is turned back
+// by the turn its texture was given.
+struct PalSurface {
+    col: vec3<f32>,
+    n: vec3<f32>,
+    orm: vec4<f32>,
+};
+
+fn pal_surface(uv: vec2<f32>, layer: i32, dx: vec2<f32>, dy: vec2<f32>, amount: f32, has_n: bool, has_o: bool) -> PalSurface {
+    var out: PalSurface;
+    out.n = vec3<f32>(0.0, 0.0, 1.0);
+    out.orm = vec4<f32>(1.0, 1.0, 1.0, 0.5);
+    // The palette's own array carries the surface maps past its colours:
+    // layer 32 + slot the normal map, 64 + slot the ORM and height, stored so
+    // the array's sRGB decode gives back the map's own values.
+    let nl = layer + 32;
+    let ol = layer + 64;
+    if (amount <= 0.0) {
+        out.col = textureSampleGrad(terrain_pal, terrain_pal_samp, uv, layer, dx, dy).rgb;
+        if (has_n) {
+            out.n = pal_tangent(textureSampleGrad(terrain_pal, terrain_pal_samp, uv, nl, dx, dy));
+        }
+        out.orm = textureSampleGrad(terrain_pal, terrain_pal_samp, uv, ol, dx, dy);
+        return out;
+    }
+    let h = hex_taps(uv, clamp(amount, 0.0, 1.0));
+    let c1 = textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv1, layer, h.r1 * dx, h.r1 * dy);
+    let c2 = textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv2, layer, h.r2 * dx, h.r2 * dy);
+    let c3 = textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv3, layer, h.r3 * dx, h.r3 * dy);
+    let ww = hex_weights(c1, c2, c3, h.w);
+    out.col = (c1 * ww.x + c2 * ww.y + c3 * ww.z).rgb;
+    if (has_n) {
+        let s1 = pal_tangent(textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv1, nl, h.r1 * dx, h.r1 * dy));
+        let s2 = pal_tangent(textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv2, nl, h.r2 * dx, h.r2 * dy));
+        let s3 = pal_tangent(textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv3, nl, h.r3 * dx, h.r3 * dy));
+        out.n = vec3<f32>(transpose(h.r1) * s1.xy, s1.z) * ww.x
+            + vec3<f32>(transpose(h.r2) * s2.xy, s2.z) * ww.y
+            + vec3<f32>(transpose(h.r3) * s3.xy, s3.z) * ww.z;
+    }
+    let o1 = textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv1, ol, h.r1 * dx, h.r1 * dy);
+    let o2 = textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv2, ol, h.r2 * dx, h.r2 * dy);
+    let o3 = textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv3, ol, h.r3 * dx, h.r3 * dy);
+    out.orm = o1 * ww.x + o2 * ww.y + o3 * ww.z;
+    return out;
+}
+
+// Triplanar-sample one terrain palette layer at object-space position `p`, blended by the
+// object normal. Explicit-gradient sampling (`dpx`/`dpy` = dpdx/dpdy of `p`, computed by
+// the caller BEFORE any branching) so this is legal inside data-dependent loops — the
+// weight-blended splat below samples a variable number of slots per fragment. `slot` is
+// the 0-based palette layer; per-slot nearest filtering comes from `terrain_bits.x`.
+// `wt` is the slot's share of the fragment: its surface maps (or the plain
+// surface, without any) go into `TS_*` at that weight.
+fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, dpy_in: vec3<f32>, wt: f32) -> vec3<f32> {
     let scale = g.terrain_mask.y * terrain_slot_scale(slot);
     let an = abs(normalize(n)) + vec3<f32>(0.0001);
     let w = an / (an.x + an.y + an.z);
@@ -1548,6 +1630,32 @@ fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, d
     let mips = tile.w > 0.5;
     let dpx = select(vec3<f32>(0.0), dpx_in, mips);
     let dpy = select(vec3<f32>(0.0), dpy_in, mips);
+    // The slot's surface maps (palette `|normal=`, `|orm=`), filtered
+    // smoothly whatever the slot's colour is. The normal is whiteout-blended
+    // across the three projections: each tangent normal is added to the
+    // surface normal's components in its plane.
+    let in_range = slot >= 0 && slot < 32;
+    let bit = 1u << u32(clamp(slot, 0, 31));
+    let has_n = in_range && (g.terrain_bits.z & bit) != 0u;
+    let has_o = in_range && (g.terrain_bits.w & bit) != 0u;
+    if (has_n || has_o) {
+        let sx = pal_surface(p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale, anti, has_n, has_o);
+        let sy = pal_surface(p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale, anti, has_n, has_o);
+        let sz = pal_surface(p.xy * scale, slot, dpx.xy * scale, dpy.xy * scale, anti, has_n, has_o);
+        let nn = normalize(n);
+        let tx = vec3<f32>(sx.n.xy + nn.zy, abs(sx.n.z) * nn.x);
+        let ty = vec3<f32>(sy.n.xy + nn.xz, abs(sy.n.z) * nn.y);
+        let tz = vec3<f32>(sz.n.xy + nn.xy, abs(sz.n.z) * nn.z);
+        TS_N += normalize(tx.zyx * w.x + ty.xzy * w.y + tz.xyz * w.z) * wt;
+        TS_ORM += (sx.orm * w.x + sy.orm * w.y + sz.orm * w.z) * wt;
+        TS_W += wt;
+        TS_ANY = true;
+        if (!nearest) {
+            return (sx.col * w.x + sy.col * w.y + sz.col * w.z) * mac;
+        }
+    } else {
+        terrain_surface_plain(n, wt);
+    }
     if (nearest) {
         let nx = pal_sample(terrain_pal_nearest, terrain_pal_samp_nearest, p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale, anti);
         let ny = pal_sample(terrain_pal_nearest, terrain_pal_samp_nearest, p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale, anti);
@@ -1558,6 +1666,28 @@ fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, d
     let ly = pal_sample(terrain_pal, terrain_pal_samp, p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale, anti);
     let lz = pal_sample(terrain_pal, terrain_pal_samp, p.xy * scale, slot, dpx.xy * scale, dpy.xy * scale, anti);
     return (lx * w.x + ly * w.y + lz * w.z) * mac;
+}
+
+// The terrain's surface normal the slots' maps make, in the world: `nl` in
+// the terrain's own space, turned by the rotation that takes its own frame
+// (its normal and the way its position moves across the screen) to the
+// world's (the same normal there and the same move of the view position).
+// Exact for any turn of the terrain, and `geo` where the move is too small
+// to tell.
+fn terrain_world_normal(nl: vec3<f32>, lnorm: vec3<f32>, wnorm: vec3<f32>, dl: vec3<f32>, dw: vec3<f32>, geo: vec3<f32>) -> vec3<f32> {
+    let a = normalize(lnorm);
+    let b = normalize(wnorm);
+    let ta = dl - a * dot(dl, a);
+    let tb = dw - b * dot(dw, b);
+    if (dot(ta, ta) < 1e-14 || dot(tb, tb) < 1e-14) {
+        return geo;
+    }
+    let ua = normalize(ta);
+    let ub = normalize(tb);
+    let c = vec3<f32>(dot(nl, ua), dot(nl, cross(a, ua)), dot(nl, a));
+    let w = normalize(ub * c.x + cross(b, ub) * c.y + b * c.z);
+    // On the face the camera sees, as `geo` is.
+    return select(w, -w, dot(geo, b) < 0.0);
 }
 
 // The terrain volume containing camera-relative `p` — like field.wgsl's
@@ -1632,11 +1762,11 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
                 var c = vec3<f32>(0.0);
                 var glow = 0.0;
                 if (t < 0.999) {
-                    c += terrain_triplanar(i32(lo) - 1, in.lpos, in.lnorm, dpx, dpy) * (1.0 - t);
+                    c += terrain_triplanar(i32(lo) - 1, in.lpos, in.lnorm, dpx, dpy, 1.0 - t) * (1.0 - t);
                     glow += f32((g.terrain_bits.y >> (lo - 1u)) & 1u) * (1.0 - t);
                 }
                 if (t > 0.001) {
-                    c += terrain_triplanar(i32(hi) - 1, in.lpos, in.lnorm, dpx, dpy) * t;
+                    c += terrain_triplanar(i32(hi) - 1, in.lpos, in.lnorm, dpx, dpy, t) * t;
                     glow += f32((g.terrain_bits.y >> (hi - 1u)) & 1u) * t;
                 }
                 return vec4<f32>(c * tint * 1.6, glow);
@@ -1652,7 +1782,7 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
     let whole = round(av);
     if (aw < 0.01 && abs(av - whole) < 0.01) {
         let layer = i32(whole) - 1;
-        let c = terrain_triplanar(layer, in.lpos, in.lnorm, dpx, dpy) * tint * 1.6;
+        let c = terrain_triplanar(layer, in.lpos, in.lnorm, dpx, dpy, 1.0) * tint * 1.6;
         return vec4<f32>(c, f32((g.terrain_bits.y >> u32(max(layer, 0))) & 1u));
     }
     let vi = splat_volume(in.view_pos);
@@ -1660,8 +1790,8 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
         // Fallback: the old adjacent-layer crossfade on the vertex slot.
         let lo = floor(av);
         let f = av - lo;
-        let c_lo = terrain_triplanar(i32(lo) - 1, in.lpos, in.lnorm, dpx, dpy) * tint * 1.6;
-        let c_hi = terrain_triplanar(i32(ceil(av)) - 1, in.lpos, in.lnorm, dpx, dpy) * tint * 1.6;
+        let c_lo = terrain_triplanar(i32(lo) - 1, in.lpos, in.lnorm, dpx, dpy, 1.0 - f) * tint * 1.6;
+        let c_hi = terrain_triplanar(i32(ceil(av)) - 1, in.lpos, in.lnorm, dpx, dpy, f) * tint * 1.6;
         let g_lo = f32((g.terrain_bits.y >> u32(max(i32(lo) - 1, 0))) & 1u);
         let g_hi = f32((g.terrain_bits.y >> u32(max(i32(ceil(av)) - 1, 0))) & 1u);
         return vec4<f32>(mix(c_lo, c_hi, f), mix(g_lo, g_hi, f));
@@ -1717,10 +1847,12 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
         var ca = vec3<f32>(1.0);
         var ga = 0.0;
         if (pa > 0u) {
-            ca = terrain_triplanar(i32(pa) - 1, in.lpos, in.lnorm, dpx, dpy) * 1.6;
+            ca = terrain_triplanar(i32(pa) - 1, in.lpos, in.lnorm, dpx, dpy, 1.0 - t) * 1.6;
             ga = f32((g.terrain_bits.y >> (pa - 1u)) & 1u);
+        } else {
+            terrain_surface_plain(in.lnorm, 1.0 - t);
         }
-        let cb = terrain_triplanar(i32(pb) - 1, in.lpos, in.lnorm, dpx, dpy) * 1.6;
+        let cb = terrain_triplanar(i32(pb) - 1, in.lpos, in.lnorm, dpx, dpy, t) * 1.6;
         let gb = f32((g.terrain_bits.y >> (pb - 1u)) & 1u);
         return vec4<f32>(mix(ca, cb, t) * tint, mix(ga, gb, t));
     }
@@ -1732,9 +1864,10 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
         wsum = wsum + w;
         if (slots[k] == 0u) {
             albedo = albedo + tint * w; // untextured voxels blend toward the flat tint
+            terrain_surface_plain(in.lnorm, w);
         } else {
             let layer = i32(slots[k]) - 1;
-            albedo = albedo + terrain_triplanar(layer, in.lpos, in.lnorm, dpx, dpy) * tint * 1.6 * w;
+            albedo = albedo + terrain_triplanar(layer, in.lpos, in.lnorm, dpx, dpy, w) * tint * 1.6 * w;
             glow = glow + f32((g.terrain_bits.y >> u32(layer)) & 1u) * w;
         }
     }
@@ -1852,15 +1985,6 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         ao_s = hex_map(ao_tex, ao_samp, mh).r;
         emit_s = hex_map(emit_tex, emit_samp, mh).rgb;
     }
-    let mapped_n = mapped_normal(in, geo_n, muv, ext.nstr, nmap_s);
-    let n = select(mapped_n, geo_n, ext_has(ext, EXT_VERTEX_LIT));
-    let v = normalize(-in.view_pos);
-    let texel = base_texel_hex(in, mh, base_s);
-    // MESHED TERRAIN (tsplat flag): the vertex color's alpha is a palette SLOT, not opacity,
-    // and albedo comes from triplanar-splatting the palette. Terrain is always opaque, so it
-    // bypasses both the alpha multiply and the cutout below (whose test would otherwise
-    // discard it — a slot index reads as a near-zero alpha). Everything else takes the
-    // normal vertex-paint multiply.
     let terrain = in.imeta.x > 0.5;
     // Vertex paint MULTIPLIES — it tints the textured surface rather than replacing
     // it, which is what lets painted color stand in for baked lighting/AO. "Replace"
@@ -1877,6 +2001,30 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     if (terrain) {
         tsplat_val = terrain_splat(in, tp_dpx, tp_dpy, tp_aw, tp_ew);
     }
+    // The palette slots' surface maps, where the terrain's blended slots
+    // have any: their normal and their occlusion, roughness and metalness
+    // stand in for the material's maps. Its view-position derivative is
+    // taken here, beside the terrain's own, where derivatives are allowed.
+    let tp_vdx = dpdx(in.view_pos);
+    let terrain_surfaced = terrain && TS_ANY && !ext_has(ext, EXT_VERTEX_LIT);
+    if (terrain_surfaced) {
+        let o = TS_ORM / max(TS_W, 1e-6);
+        ao_s = o.r;
+        rough_s = o.g;
+        metal_s = o.b;
+    }
+    let mapped_n = mapped_normal(in, geo_n, muv, ext.nstr, nmap_s);
+    var n = select(mapped_n, geo_n, ext_has(ext, EXT_VERTEX_LIT));
+    if (terrain_surfaced) {
+        n = terrain_world_normal(normalize(TS_N), in.lnorm, in.normal, tp_dpx, tp_vdx, geo_n);
+    }
+    let v = normalize(-in.view_pos);
+    let texel = base_texel_hex(in, mh, base_s);
+    // MESHED TERRAIN (tsplat flag): the vertex color's alpha is a palette SLOT, not opacity,
+    // and albedo comes from triplanar-splatting the palette. Terrain is always opaque, so it
+    // bypasses both the alpha multiply and the cutout below (whose test would otherwise
+    // discard it — a slot index reads as a near-zero alpha). Everything else takes the
+    // normal vertex-paint multiply.
     let albedo = select(texel.rgb * in.color.rgb * in.vcolor.rgb, tsplat_val.rgb * in.color.rgb, terrain);
     let emissive = in.emissive.rgb * in.emissive.a * emit_s;
     // Opacity: the material's alpha (in.color.a) times the texture's own alpha,

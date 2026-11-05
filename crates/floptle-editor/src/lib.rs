@@ -2845,6 +2845,12 @@ struct Editor {
     /// world units (`|macrosize=`, 0 = 60). All zero is the plain tile, as
     /// before. Short of the palette, a slot reads as all zero.
     terrain_tex_tile: Vec<[f32; 3]>,
+    /// Per palette slot, its surface maps (`|normal=`, `|orm=`, `|height=`).
+    /// Short of the palette, a slot has none.
+    terrain_tex_maps: Vec<crate::terrain_edit::SlotMaps>,
+    /// Which slots' normal and ORM maps loaded, bit per slot, as the
+    /// palette on the GPU has them: the shader's `terrain_bits` z and w.
+    terrain_surface_bits: [u32; 2],
     /// The terrain palette needs re-uploading to the GPU.
     terrain_textures_dirty: bool,
     /// The skybox texture path currently uploaded to the GPU (`None` = solid/white), so
