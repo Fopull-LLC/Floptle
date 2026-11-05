@@ -1294,7 +1294,10 @@ impl Editor {
                 terrain_scale: crate::terrain_edit::terrain_scale_lanes(&self.terrain_tex_scale),
                 terrain_blend: self.terrain_blend_lanes(),
                 terrain_rough: crate::terrain_edit::terrain_slot_lanes(&self.terrain_tex_rough, 0.5),
-                terrain_tile: crate::terrain_edit::terrain_tile_lanes(&self.terrain_tex_tile),
+                terrain_tile: crate::terrain_edit::terrain_tile_lanes(
+                    &self.terrain_tex_tile,
+                    crate::terrain_edit::terrain_mips_mask(&self.terrain_textures, &self.texture_settings, &self.project_root),
+                ),
                 fog_body: crate::shading::fog_body_lane(&light_node, &self.world, cam.world_position),
                 vol_fog_a,
                 vol_fog_b,

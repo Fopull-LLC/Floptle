@@ -42,6 +42,7 @@ pub mod raymarch;
 pub mod retro;
 pub mod reflect;
 pub mod ssr;
+pub mod terrain_palette;
 pub mod tris;
 pub mod ui;
 pub mod woff;
@@ -77,6 +78,7 @@ pub use raster::{
     BuiltFlsl, FlslBindingId, FlslBlend, FlslBuilder, FlslDraw, FlslShaderId, Globals, InstanceRaw, MaterialParams, Raster,
     SkinDraw, SurfaceExtras, TexFilter, TexId, TexSampling, TexWrap, sun_map_size_for, sun_shadow_matrix, FLSL_ENGINE_SAMPLERS, FLSL_ENGINE_TEXTURES, SUN_MAP_SIZE, flsl_fits_within, flsl_slots_within,
 };
+pub use terrain_palette::{terrain_layer_size, TerrainPalette, TERRAIN_LAYER_SIZE, TERRAIN_LAYER_SIZES};
 pub use raymarch::{
     AtlasRefused, AtlasVolume, Raymarch, RaymarchGlobals, MAX_FIELD_SHAPES, MAX_SHADOW_PROXIES, MAX_VOLUMES, TERRAIN_SLOTS,
 };

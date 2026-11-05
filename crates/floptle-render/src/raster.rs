@@ -1671,7 +1671,11 @@ impl Raster {
             ..Default::default()
         });
         // REPEAT so triplanar tiles; one linear, one nearest (pixel-art slots).
+        // The linear one reads the palette's mips trilinear and anisotropic;
+        // the nearest one keeps pixel art's own pixels at every distance, the
+        // full-size level only, as before the palette had mips.
         let repeat = |filter: wgpu::FilterMode| {
+            let smooth = filter == wgpu::FilterMode::Linear;
             device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("terrain-palette-samp"),
                 address_mode_u: wgpu::AddressMode::Repeat,
@@ -1679,6 +1683,9 @@ impl Raster {
                 address_mode_w: wgpu::AddressMode::Repeat,
                 mag_filter: filter,
                 min_filter: filter,
+                mipmap_filter: if smooth { wgpu::MipmapFilterMode::Linear } else { wgpu::MipmapFilterMode::Nearest },
+                anisotropy_clamp: if smooth { 16 } else { 1 },
+                lod_max_clamp: if smooth { 32.0 } else { 0.0 },
                 ..Default::default()
             })
         };
@@ -3116,6 +3123,13 @@ impl Raster {
     /// bind group (the palette texture is recreated).
     pub fn set_terrain_palette(&mut self, gpu: &Gpu, layers: &[TextureData], nearest_mask: u32) {
         let tex = crate::raymarch::make_terrain_array(gpu, layers);
+        self.set_terrain_palette_texture(gpu, tex, nearest_mask);
+    }
+
+    /// Draw meshed terrain from a palette already on the GPU
+    /// ([`crate::TerrainPalette::upload`]), the same array the raymarch is
+    /// given, and the per-slot nearest bitmask.
+    pub fn set_terrain_palette_texture(&mut self, gpu: &Gpu, tex: wgpu::Texture, nearest_mask: u32) {
         self._terrain_pal = tex;
         self.terrain_pal_view = self._terrain_pal.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -3123,6 +3137,11 @@ impl Raster {
         });
         self.rebuild_globals_bind(&gpu.device);
         self.terrain_nearest_mask = nearest_mask;
+    }
+
+    /// The palette texture meshed terrain draws from.
+    pub fn terrain_palette_texture(&self) -> &wgpu::Texture {
+        &self._terrain_pal
     }
 
     /// The stored per-slot nearest bitmask, folded into `Globals.terrain_mask.x` at draw

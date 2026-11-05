@@ -2581,6 +2581,10 @@ struct Editor {
     /// palette drawn stays until it lands.
     /// The palette's layers come with their mean colours, the impostors' paint.
     terrain_palette_job: Option<std::sync::mpsc::Receiver<crate::terrain_edit::PaletteRead>>,
+    /// The layer size the palette was last read at (`terrain_layer_size`):
+    /// the project changing it reads the palette again. `None` until the
+    /// first read.
+    terrain_palette_size: Option<u32>,
     /// Each terrain's primary-ray rendering is a set of
     /// extracted chunk meshes drawn through the raster pass, instead of sphere-tracing a
     /// voxel field. Meshes extract straight from the authoritative `ChunkField`; the

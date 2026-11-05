@@ -107,6 +107,16 @@ They are saved on the slot's line like the others:
 textures/moss.png|scale=2.5|antitile=1|macro=0.5|macrosize=80
 ```
 
+## Texture size and distance
+
+Each palette slot is stored at one size, 256 texels a side unless the project asks for more. **Project Settings → Terrain layer size** (`terrain_layer_size` in `project.ron`) takes 256, 512 or 1024. A bigger layer keeps a photographed ground sharp at the player's feet. Each step takes four times the memory: about 11, 43 and 171 MiB for all 32 layers. The palette is held once on the GPU, shared by the meshed and the raymarched terrain.
+
+How a slot is filtered follows its texture's setting in the Assets panel, the same setting a material's texture honours:
+
+- **Smooth with mipmaps** reads smaller, averaged copies of the texture as the ground recedes, with anisotropic filtering at glancing angles. Ground a hundred metres off then shows the texture's average colour instead of shimmering as the camera moves. The copies are averaged in linear light, so a speckled rock keeps its brightness with distance. This is the setting to use for photographed ground.
+- **Smooth** reads the full-size texture at every distance, as the palette always did.
+- **Pixelated** reads the nearest texel of the full-size texture, as before. It is the setting a texture has until you change it.
+
 ## The shape of what is dug
 
 How dug, raised and sculpted ground is drawn is the project's choice

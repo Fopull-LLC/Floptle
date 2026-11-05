@@ -276,7 +276,7 @@ fn empty_proxy() -> floptle_field::BakedSdf {
 
 /// A terrain palette read off the frame: each slot's 256² layer, and its
 /// mean colour (what an impostor is painted with).
-pub(crate) type PaletteRead = (Vec<floptle_render::TextureData>, Vec<[f32; 3]>);
+pub(crate) type PaletteRead = (floptle_render::TerrainPalette, Vec<[f32; 3]>);
 
 /// An occluder bake made off the frame: the bake, its model's triangles, and
 /// the milliseconds it took.
@@ -1375,14 +1375,37 @@ impl PaletteFlags {
 }
 
 /// Per-slot anti-tiling (`terrain_tex_tile`) as the shader's `terrain_tile`:
-/// one lane per slot, x antitile, y macro strength, z macro size. A slot the
-/// list doesn't reach is all zero, the plain tile.
-pub(crate) fn terrain_tile_lanes(tile: &[[f32; 3]]) -> [[f32; 4]; 32] {
+/// one lane per slot, x antitile, y macro strength, z macro size, w 1 where
+/// the slot reads its mips (bit `i` of `mips`, see [`terrain_mips_mask`]). A
+/// slot the list doesn't reach is all zero, the plain tile.
+pub(crate) fn terrain_tile_lanes(tile: &[[f32; 3]], mips: u32) -> [[f32; 4]; 32] {
     let mut out = [[0.0f32; 4]; 32];
-    for (lane, t) in out.iter_mut().zip(tile) {
-        *lane = [t[0].clamp(0.0, 1.0), t[1].clamp(0.0, 1.0), t[2].max(0.0), 0.0];
+    for (i, lane) in out.iter_mut().enumerate() {
+        let t = tile.get(i).copied().unwrap_or([0.0; 3]);
+        let m = if mips & (1 << i) != 0 { 1.0 } else { 0.0 };
+        *lane = [t[0].clamp(0.0, 1.0), t[1].clamp(0.0, 1.0), t[2].max(0.0), m];
     }
     out
+}
+
+/// Which palette slots read their mips: those whose texture asks for
+/// `SmoothMipmaps` in the Assets panel, the same setting a material's
+/// texture honours. `Smooth` keeps the full-size picture at every distance,
+/// as the palette always drew it, and `Pixelated` its nearest texel.
+pub(crate) fn terrain_mips_mask(
+    textures: &[String],
+    settings: &std::collections::HashMap<String, crate::assets::TexSetting>,
+    project_root: &std::path::Path,
+) -> u32 {
+    let mut mask = 0u32;
+    for (i, path) in textures.iter().enumerate().take(32) {
+        if !path.is_empty()
+            && crate::assets::tex_setting(settings, project_root, path).filter == crate::assets::FilterMode::SmoothMipmaps
+        {
+            mask |= 1 << i;
+        }
+    }
+    mask
 }
 
 pub(crate) fn terrain_scale_lanes(scales: &[f32]) -> [[f32; 4]; 8] {

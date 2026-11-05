@@ -1532,7 +1532,7 @@ fn point_ggx(pos_rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, roug
 // the caller BEFORE any branching) so this is legal inside data-dependent loops — the
 // weight-blended splat below samples a variable number of slots per fragment. `slot` is
 // the 0-based palette layer; per-slot nearest filtering comes from `terrain_bits.x`.
-fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> vec3<f32> {
+fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, dpy_in: vec3<f32>) -> vec3<f32> {
     let scale = g.terrain_mask.y * terrain_slot_scale(slot);
     let an = abs(normalize(n)) + vec3<f32>(0.0001);
     let w = an / (an.x + an.y + an.z);
@@ -1542,6 +1542,12 @@ fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy:
     let tile = terrain_slot_tile(slot);
     let anti = tile.x;
     let mac = terrain_macro(slot, p);
+    // A slot that reads its mips (`SmoothMipmaps`) samples by its footprint;
+    // any other reads the full-size picture at every distance, as before the
+    // palette had mips: a zero gradient is level 0.
+    let mips = tile.w > 0.5;
+    let dpx = select(vec3<f32>(0.0), dpx_in, mips);
+    let dpy = select(vec3<f32>(0.0), dpy_in, mips);
     if (nearest) {
         let nx = pal_sample(terrain_pal_nearest, terrain_pal_samp_nearest, p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale, anti);
         let ny = pal_sample(terrain_pal_nearest, terrain_pal_samp_nearest, p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale, anti);

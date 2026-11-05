@@ -1640,6 +1640,14 @@ fn is_default_shadow_volumes(n: &u32) -> bool {
     *n == default_shadow_volumes()
 }
 
+fn default_terrain_layer_size() -> u32 {
+    256
+}
+
+fn is_default_terrain_layer_size(n: &u32) -> bool {
+    *n == default_terrain_layer_size()
+}
+
 /// Serializable [`floptle_core::OverloadPolicy`].
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TickOverloadDoc {
@@ -3142,6 +3150,14 @@ pub struct ProjectConfigDoc {
     #[serde(default = "default_shadow_volumes", skip_serializing_if = "is_default_shadow_volumes")]
     pub shadow_volumes: u32,
 
+    /// The size each terrain palette layer is stored at, in texels a side:
+    /// 256, 512 or 1024 (another number rounds down to one of them). A
+    /// bigger layer keeps a photographed ground sharp at the player's feet;
+    /// each step quadruples the memory, about 10.7, 42.7 and 170.7 MiB for
+    /// the 32 layers with their mips.
+    #[serde(default = "default_terrain_layer_size", skip_serializing_if = "is_default_terrain_layer_size")]
+    pub terrain_layer_size: u32,
+
     /// The fraction of the window the 3D scene renders at, 0.25 to 1, upscaled
     /// smoothly to fill it; the game UI stays at full resolution. The setting
     /// that rescues a weak GPU: pixel count is most of what a frame costs.
@@ -3352,6 +3368,7 @@ impl ProjectConfigDoc {
             tick_budget_ms: None,
             origin_rebase_m: None,
             shadow_volumes: default_shadow_volumes(),
+            terrain_layer_size: default_terrain_layer_size(),
             render_scale: default_render_scale(),
             script_budget_ms: None,
             probe_detail: ProbeDetailDoc::default(),

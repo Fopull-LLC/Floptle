@@ -433,9 +433,34 @@ fn map(p: vec3<f32>) -> Matter {
     return base;
 }
 
+// The camera ray of the pixel `fs` is shading, and how its direction turns
+// one pixel across and one down: set at the top of `fs`, the one place a
+// derivative may be taken before the march branches. A palette sample uses
+// them to read the mip its footprint covers. Zero in every other entry
+// point (the masks, the bakes), which samples the full-size level as the
+// palette always did.
+var<private> PIX_RO: vec3<f32>;
+var<private> PIX_RD: vec3<f32>;
+var<private> PIX_DX: vec3<f32>;
+var<private> PIX_DY: vec3<f32>;
+
+// How far the hit point `p` on a surface facing `n` moves when the ray turns
+// by `d`: the neighbouring pixel's ray meets the same plane there. The raster
+// gets the same from `dpdx` of its position.
+fn pixel_step(p: vec3<f32>, n: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+    let t = max(dot(p - PIX_RO, PIX_RD), 0.0);
+    let dn = dot(n, PIX_RD);
+    // A seen surface faces the ray; held off edge-on, where the step runs off
+    // to infinity (anisotropic filtering covers up to 16 to 1).
+    let s = select(dn, -0.05, dn > -0.05);
+    return t * (d - PIX_RD * (dot(n, d) / s));
+}
+
 // Triplanar-sample a terrain palette layer at a box-relative position (world-stable,
-// since `rel` cancels the camera offset), blended by the surface normal.
-fn triplanar(slot: i32, rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+// since `rel` cancels the camera offset), blended by the surface normal. `dpx`
+// and `dpy` are how far the point moves one pixel across and down: they pick
+// the mip level and the anisotropy.
+fn triplanar(slot: i32, rel: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, dpy_in: vec3<f32>) -> vec3<f32> {
     let scale = 0.22 * terrain_slot_scale(slot); // 0.22 ≈ 4.5 world units per tile
     let an = abs(n) + vec3<f32>(0.0001);
     let w = an / (an.x + an.y + an.z);
@@ -444,28 +469,35 @@ fn triplanar(slot: i32, rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     // WGSL has no sampler arrays, and `select` keeps this uniform-safe.
     let nearest = (u32(G.terrain_tint.w) & (1u << u32(slot))) != 0u;
     let anti = terrain_slot_tile(slot).x;
+    // Only a slot that reads its mips (`SmoothMipmaps`) samples by its
+    // footprint; a zero gradient is the full-size level, as before mips.
+    let mips = terrain_slot_tile(slot).w > 0.5;
+    let dpx = select(vec3<f32>(0.0), dpx_in, mips);
+    let dpy = select(vec3<f32>(0.0), dpy_in, mips);
     if (anti > 0.0) {
-        // Hex-tiled (palette `|antitile=`), at level 0 like the plain taps
-        // below: zero gradients are level 0. The same hexagons as the
+        // Hex-tiled (palette `|antitile=`): the same hexagons as the
         // raster's, so near and far ground agree.
-        let z = vec2<f32>(0.0);
+        let gx = dpx * scale;
+        let gy = dpy * scale;
         var cx: vec3<f32>;
         var cy: vec3<f32>;
         var cz: vec3<f32>;
         if (nearest) {
-            cx = pal_sample(terrain_tex_nearest, terrain_samp_nearest, rel.zy * scale, slot, z, z, anti);
-            cy = pal_sample(terrain_tex_nearest, terrain_samp_nearest, rel.xz * scale, slot, z, z, anti);
-            cz = pal_sample(terrain_tex_nearest, terrain_samp_nearest, rel.xy * scale, slot, z, z, anti);
+            cx = pal_sample(terrain_tex_nearest, terrain_samp_nearest, rel.zy * scale, slot, gx.zy, gy.zy, anti);
+            cy = pal_sample(terrain_tex_nearest, terrain_samp_nearest, rel.xz * scale, slot, gx.xz, gy.xz, anti);
+            cz = pal_sample(terrain_tex_nearest, terrain_samp_nearest, rel.xy * scale, slot, gx.xy, gy.xy, anti);
         } else {
-            cx = pal_sample(terrain_tex, terrain_samp, rel.zy * scale, slot, z, z, anti);
-            cy = pal_sample(terrain_tex, terrain_samp, rel.xz * scale, slot, z, z, anti);
-            cz = pal_sample(terrain_tex, terrain_samp, rel.xy * scale, slot, z, z, anti);
+            cx = pal_sample(terrain_tex, terrain_samp, rel.zy * scale, slot, gx.zy, gy.zy, anti);
+            cy = pal_sample(terrain_tex, terrain_samp, rel.xz * scale, slot, gx.xz, gy.xz, anti);
+            cz = pal_sample(terrain_tex, terrain_samp, rel.xy * scale, slot, gx.xy, gy.xy, anti);
         }
         return (cx * w.x + cy * w.y + cz * w.z) * terrain_macro(slot, rel);
     }
-    let lx = textureSampleLevel(terrain_tex, terrain_samp, rel.zy * scale, slot, 0.0).rgb;
-    let ly = textureSampleLevel(terrain_tex, terrain_samp, rel.xz * scale, slot, 0.0).rgb;
-    let lz = textureSampleLevel(terrain_tex, terrain_samp, rel.xy * scale, slot, 0.0).rgb;
+    let gx = dpx * scale;
+    let gy = dpy * scale;
+    let lx = textureSampleGrad(terrain_tex, terrain_samp, rel.zy * scale, slot, gx.zy, gy.zy).rgb;
+    let ly = textureSampleGrad(terrain_tex, terrain_samp, rel.xz * scale, slot, gx.xz, gy.xz).rgb;
+    let lz = textureSampleGrad(terrain_tex, terrain_samp, rel.xy * scale, slot, gx.xy, gy.xy).rgb;
     let nx = textureSampleLevel(terrain_tex_nearest, terrain_samp_nearest, rel.zy * scale, slot, 0.0).rgb;
     let ny = textureSampleLevel(terrain_tex_nearest, terrain_samp_nearest, rel.xz * scale, slot, 0.0).rgb;
     let nz = textureSampleLevel(terrain_tex_nearest, terrain_samp_nearest, rel.xy * scale, slot, 0.0).rgb;
@@ -477,11 +509,11 @@ fn triplanar(slot: i32, rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
 
 // One painted slot's contribution at `rel` (slot index is 0-based; < 0 = untextured,
 // which is just the flat tint).
-fn terrain_slot_color(slot: i32, rel: vec3<f32>, n: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
+fn terrain_slot_color(slot: i32, rel: vec3<f32>, n: vec3<f32>, tint: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> vec3<f32> {
     if (slot < 0) {
         return tint;
     }
-    return triplanar(slot, rel, n) * tint * 1.6; // texture modulates the painted tint
+    return triplanar(slot, rel, n, dpx, dpy) * tint * 1.6; // texture modulates the painted tint
 }
 
 // The terrain texture (if any) at a hit point `p`, multiplied into the tint. The painted
@@ -521,8 +553,10 @@ fn terrain_albedo(p: vec3<f32>, n: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
     }
     let lo = floor(a);
     let f = a - lo;
-    let c_lo = terrain_slot_color(i32(lo) - 1, rel, n, tint);
-    let c_hi = terrain_slot_color(i32(ceil(a)) - 1, rel, n, tint);
+    let dpx = pixel_step(p, n, PIX_DX);
+    let dpy = pixel_step(p, n, PIX_DY);
+    let c_lo = terrain_slot_color(i32(lo) - 1, rel, n, tint, dpx, dpy);
+    let c_hi = terrain_slot_color(i32(ceil(a)) - 1, rel, n, tint, dpx, dpy);
     return mix(c_lo, c_hi, f);
 }
 
@@ -601,6 +635,10 @@ fn sky_ray(ndc: vec2<f32>, rd: vec3<f32>) -> vec3<f32> {
 fn fs(in: VOut) -> FsOut {
     let ro = camera_ray_origin(in.ndc);
     let rd = camera_ray_dir(in.ndc, ro);
+    PIX_RO = ro;
+    PIX_RD = rd;
+    PIX_DX = dpdx(rd);
+    PIX_DY = dpdy(rd);
 
     let max_t = march_bound();
     // Everything drawable lives inside the volume boxes + blob spheres: march

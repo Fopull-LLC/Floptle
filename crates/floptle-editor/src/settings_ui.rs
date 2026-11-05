@@ -1078,6 +1078,30 @@ impl<'a> SettingsCtx<'a> {
                 }
             },
         );
+        row(
+            ui,
+            "Terrain layer size",
+            Some("the texels a side each terrain palette layer is kept at. Bigger keeps a \
+                  photographed ground sharp at the player's feet; each step takes four times \
+                  the memory (about 11, 43 and 171 MiB for all 32 layers)"),
+            |ui| {
+                let mut size = floptle_render::terrain_layer_size(project.terrain_layer_size);
+                egui::ComboBox::from_id_salt("project-terrain-layer-size")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(format!("{size} texels"))
+                    .show_ui(ui, |ui| {
+                        for s in floptle_render::TERRAIN_LAYER_SIZES {
+                            ui.selectable_value(&mut size, s, format!("{s} texels"));
+                        }
+                    });
+                // Against the size it rounds to, so opening the screen never
+                // rewrites a hand-written number.
+                if size != floptle_render::terrain_layer_size(project.terrain_layer_size) {
+                    project.terrain_layer_size = size;
+                    out.save_project = true;
+                }
+            },
+        );
         ui.add_enabled_ui(!project.retro, |ui| {
             row(
                 ui,

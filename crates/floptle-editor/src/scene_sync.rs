@@ -228,8 +228,13 @@ impl Editor {
     /// shadow upload it sat beside. `wait` takes it on this call, for a verb
     /// that draws one picture with no frames before it.
     pub(crate) fn sync_terrain_palette(&mut self, wait: bool) {
+        let size = floptle_render::terrain_layer_size(self.project.terrain_layer_size);
+        if self.terrain_palette_size.is_some_and(|was| was != size) {
+            self.terrain_textures_dirty = true;
+        }
         if std::mem::take(&mut self.terrain_textures_dirty) {
-            // Every slot is resampled to the palette's 256². Honour the texture's own
+            self.terrain_palette_size = Some(size);
+            // Every slot is resampled to the palette's layer size. Honour the texture's own
             // filter setting while doing it — a bilinear resize of pixel art destroys
             // it here, before any sampler runs (this was half the "terrain textures are
             // always blurry" bug; the other half was the hardcoded Linear sampler).
@@ -253,12 +258,17 @@ impl Editor {
                 let layers: Vec<floptle_render::TextureData> = slots
                     .into_iter()
                     .map(|slot| {
-                        slot.and_then(|(file, nearest)| floptle_assets::load_texture_sized_filtered(&file, 256, 256, nearest))
-                            .unwrap_or_else(|| floptle_render::TextureData { pixels: vec![255; 256 * 256 * 4], width: 256, height: 256 })
+                        slot.and_then(|(file, nearest)| floptle_assets::load_texture_sized_filtered(&file, size, size, nearest))
+                            .unwrap_or_else(|| floptle_render::TextureData {
+                                pixels: vec![255; (size * size * 4) as usize],
+                                width: size,
+                                height: size,
+                            })
                     })
                     .collect();
                 let means = layers.iter().map(crate::terrain_edit::layer_mean).collect();
-                let _ = tx.send((layers, means));
+                // The mips, here rather than on the frame.
+                let _ = tx.send((floptle_render::TerrainPalette::from_layers(layers, size), means));
             });
             self.terrain_palette_job = Some(rx);
         }
@@ -273,20 +283,21 @@ impl Editor {
             }
         };
         self.terrain_palette_job = None;
-        let Some((layers, means)) = layers else { return };
+        let Some((palette, means)) = layers else { return };
         // The list the layers were read from: a change since would have
         // started another job above.
         let mask =
             crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root);
         self.set_terrain_slot_means(means);
         if let Some(gpu) = self.gpu.as_ref() {
+            // One array on the GPU: the raymarch and the meshed terrain (drawn
+            // in the raster pass, with the per-slot nearest mask) sample it alike.
+            let tex = palette.upload(gpu);
             if let Some(raymarch) = self.raymarch.as_mut() {
-                raymarch.set_terrain_textures(gpu, &layers);
+                raymarch.set_terrain_palette_texture(gpu, tex.clone());
             }
-            // Meshed terrain (P2/P6) draws in the raster pass, so it needs its own copy
-            // of the palette + the same per-slot nearest mask.
             if let Some(raster) = self.raster.as_mut() {
-                raster.set_terrain_palette(gpu, &layers, mask);
+                raster.set_terrain_palette_texture(gpu, tex, mask);
             }
         }
     }
@@ -1024,6 +1035,155 @@ mod shadow_atlas_tests {
         // The render is deterministic, so without the layer this is 1.0 exactly;
         // at full strength the spread about doubles.
         assert!(sm > sp * 1.6, "a macro layer left the ground as even as before: block spread {sm:.2} against {sp:.2}");
+    }
+
+    /// Read the palette `ed.terrain_textures` names, waiting for it to land.
+    fn land_palette(ed: &mut crate::Editor) {
+        ed.terrain_textures_dirty = true;
+        ed.sync_terrain_palette(true);
+        assert!(ed.terrain_palette_job.is_none(), "the palette should have landed");
+    }
+
+    /// **Distant ground stops crawling.** The palette had one level, so a
+    /// pixel 60 m from a texture tiled every 4.5 m covered a dozen texels and
+    /// read one of them: which one changed with every small camera move, and
+    /// the ground shimmered. With the mips it reads their average. The
+    /// fixture is the worst case, black and white texel by texel at random.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn distant_ground_reads_its_mips_and_holds_still_as_the_camera_moves() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_palette_mips_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
+        let mut seed = 0x9e37_79b9u32;
+        let mut noise = Vec::with_capacity(256 * 256 * 4);
+        for _ in 0..256 * 256 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let v = if seed >> 31 == 0 { 0 } else { 255 };
+            noise.extend_from_slice(&[v, v, v, 255]);
+        }
+        let tex = floptle_render::TextureData { pixels: noise, width: 256, height: 256 };
+        std::fs::write(dir.join("textures/noise.png"), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        ed.project_root = dir.clone();
+        ed.terrain_textures = vec!["textures/noise.png".into()];
+        // What Solar's terrain slots ask for; a texture names no filter is pixel art.
+        ed.texture_settings.insert(
+            "textures/noise.png".into(),
+            crate::assets::TexSetting { filter: crate::assets::FilterMode::SmoothMipmaps, ..Default::default() },
+        );
+        land_palette(&mut ed);
+        let field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 3,
+            radius: 400.0,
+            voxel: 2.0,
+            relief: 0.0,
+            cave_depth: 0.0,
+            craters: 0,
+            surface_a: floptle_field::procgen::LayerPaint { slot: 1, color: [1.0; 3] },
+            surface_b: floptle_field::procgen::LayerPaint { slot: 1, color: [1.0; 3] },
+            subsoil_depth: 0.0,
+            ..Default::default()
+        });
+        let top = field.raycast(Vec3::new(0.0, 600.0, 0.0), Vec3::NEG_Y, 600.0).unwrap();
+        add_body(&mut ed, 1, DVec3::ZERO, &field);
+        settle(&mut ed);
+        let sun = ed.world.spawn();
+        ed.world.insert(sun, Transform { rotation: floptle_core::math::Quat::from_rotation_x(-1.5), ..Transform::IDENTITY });
+        ed.world.insert(sun, floptle_core::Light { intensity: 1.0, shadows: false, ..Default::default() });
+        let (w, h) = (320u32, 240u32);
+        // 60 m up looking down: about 0.2 m a pixel, a dozen texels.
+        let shoot = |ed: &mut crate::Editor, dx: f64| {
+            ed.camera.position = DVec3::new(top.x as f64 + dx, top.y as f64 + 60.0, top.z as f64 + 0.01);
+            ed.camera.pitch = -1.55;
+            ed.camera.yaw = 0.0;
+            let at = ed.camera.position;
+            ed.terrain_gpu_dirty = true;
+            settle(ed);
+            ed.settle_terrain_meshes(at, std::time::Duration::from_secs(60));
+            let cam = ed.camera.render_camera();
+            crate::shot::render_frame_pixels(ed, &cam, None, w, h, !0, false).expect("a frame")
+        };
+        // A third of a pixel over.
+        let a = shoot(&mut ed, 0.0);
+        let b = shoot(&mut ed, 0.07);
+        // A slot left on `Smooth` draws its full-size picture at every
+        // distance, as the palette always did.
+        ed.texture_settings.insert(
+            "textures/noise.png".into(),
+            crate::assets::TexSetting { filter: crate::assets::FilterMode::Smooth, ..Default::default() },
+        );
+        let smooth = shoot(&mut ed, 0.0);
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Ok(out) = std::env::var("FLOPTLE_PALETTE_PNG") {
+            for (name, px) in [("a", &a), ("b", &b)] {
+                let tex = floptle_render::TextureData { pixels: px.clone(), width: w, height: h };
+                std::fs::write(std::path::Path::new(&out).join(format!("palette_mips_{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+            }
+        }
+        let lum = |px: &[u8], i: usize| px[i] as f32 * 0.3 + px[i + 1] as f32 * 0.59 + px[i + 2] as f32 * 0.11;
+        let (mut crawl, mut mean, mut spread, mut n) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        for y in 60..180u32 {
+            for x in 100..220u32 {
+                let i = ((y * w + x) * 4) as usize;
+                crawl += (lum(&a, i) - lum(&b, i)).abs();
+                mean += lum(&a, i);
+                n += 1.0;
+            }
+        }
+        let (crawl, mean) = (crawl / n, mean / n);
+        for y in 60..180u32 {
+            for x in 100..220u32 {
+                let i = ((y * w + x) * 4) as usize;
+                spread += (lum(&a, i) - mean).powi(2);
+            }
+        }
+        let spread = (spread / n).sqrt();
+        let mut kept = 0.0f32;
+        for y in 60..180u32 {
+            for x in 100..220u32 {
+                let i = ((y * w + x) * 4) as usize;
+                kept += (lum(&smooth, i) - mean).powi(2);
+            }
+        }
+        let kept = (kept / n).sqrt();
+        assert!(mean > 20.0, "the fixture: the ground should be lit, mean {mean:.1}");
+        assert!(kept > mean * 0.3, "a Smooth slot should still read single texels as it always did: spread {kept:.1} about {mean:.1}");
+        // One level reads single texels: a spread near half the mean and a
+        // crawl as large. The mips read their average.
+        assert!(spread < mean * 0.1, "far ground still reads single texels: spread {spread:.1} about a mean of {mean:.1}");
+        assert!(crawl < mean * 0.03, "far ground crawled {crawl:.2} a pixel (mean {mean:.1}) under a third-of-a-pixel move");
+    }
+
+    /// **The palette is one array, at the size the project asks for.** The
+    /// raymarch and the meshed terrain each built their own copy; and every
+    /// layer was cut to 256 texels whatever the project wanted.
+    #[test]
+    fn the_palette_is_one_array_at_the_projects_layer_size() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_palette_size_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
+        let tex = floptle_render::TextureData { pixels: vec![128; 1024 * 1024 * 4], width: 1024, height: 1024 };
+        std::fs::write(dir.join("textures/grey.png"), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        ed.project_root = dir.clone();
+        ed.terrain_textures = vec!["textures/grey.png".into()];
+        let held = |ed: &crate::Editor| {
+            let raster = ed.raster.as_ref().unwrap().terrain_palette_texture().clone();
+            let raymarch = ed.raymarch.as_ref().unwrap().terrain_palette_texture().clone();
+            assert!(raster == raymarch, "the raymarch and the raster hold separate palettes");
+            (raster.width(), raster.mip_level_count())
+        };
+        land_palette(&mut ed);
+        assert_eq!(held(&ed), (256, 9), "a project that names no size keeps 256 texels, with every mip");
+        // Changing the setting alone reads the palette again.
+        ed.project.terrain_layer_size = 512;
+        ed.sync_terrain_palette(true);
+        assert_eq!(held(&ed), (512, 10));
+        ed.project.terrain_layer_size = 1024;
+        ed.sync_terrain_palette(true);
+        assert_eq!(held(&ed), (1024, 11));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// PICTURES (run by hand): a dug world's shadows drawn from the atlas as

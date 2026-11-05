@@ -756,7 +756,7 @@ pub struct Raymarch {
 /// enough for a planet's biomes + strata + cave materials and a moon's, in one scene
 /// palette (the palette is per-scene, shared by every terrain volume in it).
 pub const TERRAIN_SLOTS: u32 = 32;
-const TERRAIN_TEX_SIZE: u32 = 256;
+const TERRAIN_TEX_SIZE: u32 = crate::TERRAIN_LAYER_SIZE;
 
 impl Raymarch {
     pub fn new(gpu: &Gpu) -> Self {
@@ -914,6 +914,10 @@ impl Raymarch {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            // The palette's mips, trilinear and anisotropic: ground seen at a
+            // glancing angle stays sharp along the view without crawling.
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 16,
             ..Default::default()
         });
 
@@ -925,6 +929,9 @@ impl Raymarch {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
+            // Pixel art keeps its own pixels at every distance: the full-size
+            // level only, as before the palette had mips.
+            lod_max_clamp: 0.0,
             ..Default::default()
         });
 
@@ -1489,6 +1496,19 @@ impl Raymarch {
     pub fn set_terrain_textures(&mut self, gpu: &Gpu, layers: &[TextureData]) {
         self.terrain_tex = make_terrain_array(gpu, layers);
         self.rebuild_binds(&gpu.device);
+    }
+
+    /// Draw from a palette already on the GPU ([`crate::TerrainPalette::upload`]):
+    /// the one array the raster's meshed terrain samples too, so the palette
+    /// is held once.
+    pub fn set_terrain_palette_texture(&mut self, gpu: &Gpu, tex: wgpu::Texture) {
+        self.terrain_tex = tex;
+        self.rebuild_binds(&gpu.device);
+    }
+
+    /// The palette texture this draws terrain from.
+    pub fn terrain_palette_texture(&self) -> &wgpu::Texture {
+        &self.terrain_tex
     }
 
     /// Upload a single baked volume (replaces all previous ones) — the common case
@@ -2743,52 +2763,12 @@ fn make_sky_texture(gpu: &Gpu, tex: Option<&TextureData>) -> wgpu::Texture {
     texture
 }
 
-/// Create the terrain palette as a `TERRAIN_SLOTS`-layer 256² sRGB array. Provided
-/// layers are uploaded (caller pre-resizes to 256²); the rest default to white.
+/// Create the terrain palette as a `TERRAIN_SLOTS`-layer 256² sRGB array with
+/// its mips. Provided layers are uploaded (caller pre-resizes to 256²); the
+/// rest default to white. A driver with its own layer size builds a
+/// [`crate::TerrainPalette`] instead.
 pub(crate) fn make_terrain_array(gpu: &Gpu, layers: &[TextureData]) -> wgpu::Texture {
-    let size = wgpu::Extent3d {
-        width: TERRAIN_TEX_SIZE,
-        height: TERRAIN_TEX_SIZE,
-        depth_or_array_layers: TERRAIN_SLOTS,
-    };
-    let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("terrain-palette"),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    let white = vec![255u8; (TERRAIN_TEX_SIZE * TERRAIN_TEX_SIZE * 4) as usize];
-    for layer in 0..TERRAIN_SLOTS {
-        let data = layers
-            .get(layer as usize)
-            .filter(|t| t.width == TERRAIN_TEX_SIZE && t.height == TERRAIN_TEX_SIZE)
-            .map(|t| t.pixels.as_slice())
-            .unwrap_or(&white);
-        gpu.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(TERRAIN_TEX_SIZE * 4),
-                rows_per_image: Some(TERRAIN_TEX_SIZE),
-            },
-            wgpu::Extent3d {
-                width: TERRAIN_TEX_SIZE,
-                height: TERRAIN_TEX_SIZE,
-                depth_or_array_layers: 1,
-            },
-        );
-    }
-    tex
+    crate::TerrainPalette::from_layers(layers.to_vec(), TERRAIN_TEX_SIZE).upload(gpu)
 }
 
 /// Allocate the distance (R16Float) + color (Rgba8Unorm) 3D atlas textures.
