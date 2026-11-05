@@ -221,107 +221,147 @@ impl Editor {
 
     /// The terrain texture palette, put on the GPU when it changes.
     ///
-    /// Each slot is read from its file and resampled to the palette's 256² on
-    /// a worker, and the palette drawn stays until all of them are in. Read on
-    /// the frame, it was most of the frame a world's terrain arrived in, and
-    /// of every scene load after a launch in Solar: 66 to 320 ms named as the
-    /// shadow upload it sat beside. `wait` takes it on this call, for a verb
-    /// that draws one picture with no frames before it.
+    /// Each slot is read from its file and resampled to the palette's layer
+    /// size on a worker: from `.floptle/cache/palette/` when it has been read
+    /// before, decoded otherwise. Read on the frame, it was most of the frame
+    /// a world's terrain arrived in. The ground never waits for it in white:
+    /// a palette of each slot's mean colour (cached beside its picture, the
+    /// last one seen, or mid grey) is on the GPU in the frame the list
+    /// changes, and the pictures land into it a few slots a frame
+    /// ([`palette_slots_per_frame`]). A palette that changed but kept its
+    /// size lands into the one already drawn, so an edit to one slot leaves
+    /// the others as they were. `wait` takes every slot on this call, for a
+    /// verb that draws one picture with no frames before it.
     pub(crate) fn sync_terrain_palette(&mut self, wait: bool) {
         let size = floptle_render::terrain_layer_size(self.project.terrain_layer_size);
-        if self.terrain_palette_size.is_some_and(|was| was != size) {
+        let read_before = self.terrain_palette_size;
+        if read_before.is_some_and(|was| was != size) {
             self.terrain_textures_dirty = true;
         }
         if std::mem::take(&mut self.terrain_textures_dirty) {
             self.terrain_palette_size = Some(size);
-            // Every slot is resampled to the palette's layer size. Honour the texture's own
-            // filter setting while doing it — a bilinear resize of pixel art destroys
-            // it here, before any sampler runs (this was half the "terrain textures are
-            // always blurry" bug; the other half was the hardcoded Linear sampler).
-            // Empty / unreadable slots become white so indices align. A list
-            // changed again before it landed starts again: the one in flight is dropped.
+            // Honour each texture's own filter while resizing — a bilinear
+            // resize of pixel art destroys it before any sampler runs — and
+            // size a slot's maps the way its colour is. A list changed again
+            // before it landed starts again: the one in flight is dropped.
             let settings = &self.texture_settings;
-            let root = &self.project_root;
-            let slots: Vec<Option<(std::path::PathBuf, bool)>> = self
+            let root = self.project_root.clone();
+            let resolve = |p: &str| (!p.is_empty()).then(|| crate::project::resolve_asset_path(&root, p));
+            let slots: Vec<PaletteSlotFiles> = self
                 .terrain_textures
                 .iter()
-                .map(|p| {
-                    let nearest = crate::assets::tex_setting(settings, root, p).filter
-                        == crate::assets::FilterMode::Pixelated;
-                    (!p.is_empty()).then(|| (crate::project::resolve_asset_path(root, p), nearest))
-                })
-                .collect();
-            // Each slot's surface maps, read alongside its colour.
-            let resolve = |p: &str| (!p.is_empty()).then(|| crate::project::resolve_asset_path(root, p));
-            let maps: Vec<[Option<std::path::PathBuf>; 3]> = (0..self.terrain_textures.len())
-                .map(|i| {
+                .take(floptle_render::TERRAIN_SLOTS as usize)
+                .enumerate()
+                .map(|(i, p)| {
                     let m = self.terrain_tex_maps.get(i).cloned().unwrap_or_default();
-                    [resolve(&m.normal), resolve(&m.orm), resolve(&m.height)]
+                    PaletteSlotFiles {
+                        colour: resolve(p),
+                        nearest: crate::assets::tex_setting(settings, &root, p).filter
+                            == crate::assets::FilterMode::Pixelated,
+                        maps: [resolve(&m.normal), resolve(&m.orm), resolve(&m.height)],
+                    }
                 })
                 .collect();
+            let surfaced = slots.iter().any(|s| s.maps.iter().any(Option::is_some));
+            let bit = |i: usize, has: bool| if has { 1u32 << i } else { 0 };
+            self.terrain_surface_bits = [
+                slots.iter().enumerate().map(|(i, s)| bit(i, s.maps[0].is_some())).fold(0, |a, b| a | b),
+                slots.iter().enumerate().map(|(i, s)| bit(i, s.maps[1].is_some())).fold(0, |a, b| a | b),
+            ];
+            // What the ground shows until each picture lands: its cached
+            // mean, the mean it last had, or mid grey; nothing at all white.
+            let means: Vec<[f32; 3]> = slots
+                .iter()
+                .enumerate()
+                .map(|(i, s)| match &s.colour {
+                    None => [1.0; 3],
+                    Some(f) => crate::palette_cache::mean(&root, f, size, s.nearest)
+                        .or_else(|| self.terrain_slot_means.get(i).copied())
+                        .unwrap_or([0.214; 3]),
+                })
+                .collect();
+            if let Some(gpu) = self.gpu.as_ref() {
+                let layers = if surfaced { 3 * floptle_render::TERRAIN_SLOTS } else { floptle_render::TERRAIN_SLOTS };
+                let live = self.raster.as_ref().map(|r| r.terrain_palette_texture());
+                let keep = read_before == Some(size)
+                    && live.is_some_and(|t| t.width() == size && t.depth_or_array_layers() == layers);
+                if !keep {
+                    let tex = floptle_render::terrain_palette::stand_in(gpu, size, &means, surfaced);
+                    let mask = crate::terrain_edit::terrain_nearest_mask(
+                        &self.terrain_textures,
+                        &self.texture_settings,
+                        &self.project_root,
+                    );
+                    if let Some(raymarch) = self.raymarch.as_mut() {
+                        raymarch.set_terrain_palette_texture(gpu, tex.clone());
+                    }
+                    if let Some(raster) = self.raster.as_mut() {
+                        raster.set_terrain_palette_texture(gpu, tex, mask);
+                    }
+                }
+            }
+            self.terrain_palette_landing = means;
             let (tx, rx) = std::sync::mpsc::channel();
             crate::worker::spawn("terrain-palette", move || {
                 #[cfg(test)]
                 crate::terrain_edit::made_on("palette");
-                // A slot's maps are sized the way its colour is: a pixel-art
-                // slot's bumps stay one texel each.
-                let nearest: Vec<bool> = slots.iter().map(|s| s.as_ref().is_some_and(|(_, n)| *n)).collect();
-                let layers: Vec<floptle_render::TextureData> = slots
-                    .into_iter()
-                    .map(|slot| {
-                        slot.and_then(|(file, nearest)| floptle_assets::load_texture_sized_filtered(&file, size, size, nearest))
-                            .unwrap_or_else(|| floptle_render::TextureData {
-                                pixels: vec![255; (size * size * 4) as usize],
-                                width: size,
-                                height: size,
-                            })
-                    })
-                    .collect();
-                let means = layers.iter().map(crate::terrain_edit::layer_mean).collect();
-                let read = |f: &Option<std::path::PathBuf>, pixel: bool| {
-                    f.as_ref().and_then(|f| floptle_assets::load_texture_sized_filtered(f, size, size, pixel))
-                };
-                let (mut normals, mut orms, mut heights) = (Vec::new(), Vec::new(), Vec::new());
-                for (i, [n, o, h]) in maps.iter().enumerate() {
-                    let pixel = nearest.get(i).copied().unwrap_or(false);
-                    normals.push(read(n, pixel));
-                    orms.push(read(o, pixel));
-                    heights.push(read(h, pixel));
+                for (i, s) in slots.into_iter().enumerate() {
+                    let read = |f: &Option<std::path::PathBuf>| {
+                        f.as_ref().and_then(|f| crate::palette_cache::load(&root, f, size, s.nearest))
+                    };
+                    let colour = read(&s.colour);
+                    let mean = colour.as_ref().map_or([1.0; 3], |c| c.1);
+                    let [n, o, h] = &s.maps;
+                    let pictures = floptle_render::SlotPictures::new(
+                        // A slot with no picture is white, as it always was.
+                        Some(colour.map_or_else(
+                            || floptle_render::TextureData { pixels: vec![255; (size * size * 4) as usize], width: size, height: size },
+                            |c| c.0,
+                        )),
+                        read(n).map(|t| t.0),
+                        read(o).map(|t| t.0),
+                        read(h).map(|t| t.0),
+                        size,
+                    );
+                    // A newer list took over: stop reading for this one.
+                    if tx.send((i, pictures, mean)).is_err() {
+                        return;
+                    }
                 }
-                // The mips, here rather than on the frame.
-                let palette = floptle_render::TerrainPalette::from_layers(layers, size).with_surfaces(normals, orms, heights);
-                let _ = tx.send((palette, means));
             });
             self.terrain_palette_job = Some(rx);
         }
         let Some(rx) = self.terrain_palette_job.as_ref() else { return };
-        let layers = if wait {
-            rx.recv().ok()
-        } else {
-            match rx.try_recv() {
-                Ok(layers) => Some(layers),
-                Err(std::sync::mpsc::TryRecvError::Empty) => return,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        let budget = if wait { usize::MAX } else { palette_slots_per_frame(size) };
+        let mut landed = Vec::new();
+        let mut done = false;
+        while landed.len() < budget {
+            let next = if wait { rx.recv().map_err(|_| std::sync::mpsc::TryRecvError::Disconnected) } else { rx.try_recv() };
+            match next {
+                Ok(slot) => landed.push(slot),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    done = true;
+                    break;
+                }
             }
-        };
-        self.terrain_palette_job = None;
-        let Some((palette, means)) = layers else { return };
-        // The list the layers were read from: a change since would have
-        // started another job above.
-        let mask =
-            crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root);
-        self.set_terrain_slot_means(means);
-        self.terrain_surface_bits = [palette.normal_mask(), palette.orm_mask()];
-        if let Some(gpu) = self.gpu.as_ref() {
-            // One array on the GPU: the raymarch and the meshed terrain (drawn
-            // in the raster pass, with the per-slot nearest mask) sample it alike.
-            let tex = palette.upload(gpu);
-            if let Some(raymarch) = self.raymarch.as_mut() {
-                raymarch.set_terrain_palette_texture(gpu, tex.clone());
+        }
+        self.terrain_palette_landed_last = landed.len();
+        if let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_ref()) {
+            let tex = raster.terrain_palette_texture();
+            for (i, pictures, _) in &landed {
+                floptle_render::terrain_palette::write_slot(gpu, tex, *i as u32, pictures);
             }
-            if let Some(raster) = self.raster.as_mut() {
-                raster.set_terrain_palette_texture(gpu, tex, mask);
+        }
+        for (i, _, mean) in landed {
+            if let Some(m) = self.terrain_palette_landing.get_mut(i) {
+                *m = mean;
             }
+        }
+        if done {
+            self.terrain_palette_job = None;
+            let means = std::mem::take(&mut self.terrain_palette_landing);
+            self.set_terrain_slot_means(means);
         }
     }
 
@@ -588,6 +628,25 @@ impl Editor {
                 self.import_model(&p);
             }
         }
+    }
+}
+
+/// One palette slot's files, as the worker reads them.
+struct PaletteSlotFiles {
+    colour: Option<std::path::PathBuf>,
+    nearest: bool,
+    /// Normal, ORM, height.
+    maps: [Option<std::path::PathBuf>; 3],
+}
+
+/// How many palette slots land on the GPU in one frame: about 1.4 MB of
+/// writes a frame whatever the layer size, so a palette arriving never
+/// costs a frame its smoothness.
+pub(crate) fn palette_slots_per_frame(size: u32) -> usize {
+    match size {
+        0..=256 => 4,
+        257..=512 => 2,
+        _ => 1,
     }
 }
 
@@ -1656,6 +1715,121 @@ mod shadow_atlas_tests {
         };
         shoot("maps", true);
         shoot("nomaps", false);
+    }
+
+    /// The 1×1 level of palette layer `layer`: the slot's colour as the
+    /// whole ground sees it from far off, right now.
+    fn palette_colour(ed: &crate::Editor, layer: u32) -> [u8; 4] {
+        let (gpu, raster) = (ed.gpu.as_ref().unwrap(), ed.raster.as_ref().unwrap());
+        let tex = raster.terrain_palette_texture();
+        let px = floptle_render::probe::readback_layer(gpu, tex, layer, tex.mip_level_count() - 1);
+        [px[0], px[1], px[2], px[3]]
+    }
+
+    /// **The ground shows its own colours from the first frame, and a palette
+    /// read once is never decoded again.** The palette was white until every
+    /// slot had been decoded and resized on the worker: seconds of white
+    /// ground under load at 512 texels. Now the frame the list arrives has a
+    /// palette of each slot's mean colour on the GPU (mid grey the first time
+    /// a picture is ever seen), the pictures land into it, and each one is
+    /// kept under `.floptle/cache/palette/` with its mean, so a second load
+    /// shows the right colours at once and decodes nothing.
+    #[test]
+    fn a_palette_shows_its_colours_from_the_first_frame_and_decodes_once() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_palette_first_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
+        let colours = [[200u8, 30, 30, 255], [30, 60, 210, 255]];
+        let names = ["red.png", "blue.png"];
+        for (c, n) in colours.iter().zip(names) {
+            let tex = floptle_render::TextureData { pixels: c.repeat(64 * 64), width: 64, height: 64 };
+            std::fs::write(dir.join("textures").join(n), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        }
+        let files: Vec<std::path::PathBuf> = names.iter().map(|n| dir.join("textures").join(n)).collect();
+        let decoded = || {
+            crate::palette_cache::DECODED.lock().unwrap().iter().filter(|p| files.contains(p)).count()
+        };
+        let white = |c: [u8; 4]| c[0] > 245 && c[1] > 245 && c[2] > 245;
+        let near = |c: [u8; 4], want: [u8; 4]| (0..3).all(|k| (c[k] as i32 - want[k] as i32).abs() <= 6);
+        let setup = |ed: &mut crate::Editor| {
+            ed.project_root = dir.clone();
+            ed.terrain_textures = names.iter().map(|n| format!("textures/{n}")).collect();
+            ed.terrain_textures_dirty = true;
+        };
+        // The first time: nothing cached, nothing white.
+        setup(&mut ed);
+        ed.sync_terrain_palette(false);
+        for slot in 0..2 {
+            let c = palette_colour(&ed, slot);
+            assert!(!white(c), "slot {slot} was white on the first frame: {c:?}");
+        }
+        ed.sync_terrain_palette(true);
+        assert!(ed.terrain_palette_job.is_none(), "the palette should have landed");
+        assert_eq!(decoded(), 2, "each picture is decoded the first time");
+        for (slot, want) in colours.iter().enumerate() {
+            assert!(near(palette_colour(&ed, slot as u32), *want), "slot {slot} landed as {:?}", palette_colour(&ed, slot as u32));
+        }
+        // A second editor on the same project: its first frame is already
+        // each slot's own colour, and nothing is decoded.
+        drop(ed);
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        setup(&mut ed);
+        ed.sync_terrain_palette(false);
+        for (slot, want) in colours.iter().enumerate() {
+            let c = palette_colour(&ed, slot as u32);
+            assert!(near(c, *want), "slot {slot} showed {c:?} on the first frame of a second load, not its colour {want:?}");
+        }
+        ed.sync_terrain_palette(true);
+        assert_eq!(decoded(), 2, "a second load decoded a picture the cache holds");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A palette lands a few slots a frame.** Writing every slot's picture
+    /// and its mips in the frame the last one was read was up to 170 MB of
+    /// writes at once at 1024 texels; a palette arriving now costs each
+    /// frame a few slots, and all of them arrive.
+    #[test]
+    fn palette_slots_land_a_few_a_frame() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_palette_budget_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
+        let mut names = Vec::new();
+        for i in 0..32u8 {
+            let c = [i * 7, 255 - i * 7, 100, 255];
+            let tex = floptle_render::TextureData { pixels: c.repeat(16), width: 4, height: 4 };
+            let n = format!("textures/s{i}.png");
+            std::fs::write(dir.join(&n), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+            names.push(n);
+        }
+        ed.project_root = dir.clone();
+        ed.terrain_textures = names;
+        ed.terrain_textures_dirty = true;
+        let budget = super::palette_slots_per_frame(256);
+        // Start the read, then give the worker time to read every slot, so
+        // the whole palette is waiting when the frames come to land it.
+        ed.sync_terrain_palette(false);
+        let (mut frames, mut total) = (usize::from(ed.terrain_palette_landed_last > 0), ed.terrain_palette_landed_last);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        for _ in 0..20_000 {
+            ed.sync_terrain_palette(false);
+            let n = ed.terrain_palette_landed_last;
+            assert!(n <= budget, "a frame landed {n} slots, over its {budget}");
+            if n > 0 {
+                frames += 1;
+                total += n;
+            }
+            if ed.terrain_palette_job.is_none() && !ed.terrain_textures_dirty {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(total, 32, "every slot should land");
+        assert!(frames >= 32 / budget, "32 slots landed over only {frames} frames");
+        let last = palette_colour(&ed, 31);
+        assert!((last[0] as i32 - 217).abs() <= 3 && (last[1] as i32 - 38).abs() <= 3, "the last slot landed as {last:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The palette is one array, at the size the project asks for.** The

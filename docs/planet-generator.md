@@ -117,6 +117,8 @@ How a slot is filtered follows its texture's setting in the Assets panel, the sa
 - **Smooth** reads the full-size texture at every distance, as the palette always did.
 - **Pixelated** reads the nearest texel of the full-size texture, as before. It is the setting a texture has until you change it.
 
+A palette never holds the ground in white while it loads. The frame a palette arrives, every slot shows its own average colour, and its pictures land a few a frame. Each picture is decoded and resized once, then kept in `.floptle/cache/palette/` with its average colour, so the next load shows the right colours at once and decodes nothing. The cache belongs to the engine: new projects list `.floptle/cache/` in `.gitignore`, and upgrading a project adds the line. Deleting the folder only makes the next load slower.
+
 ## Surface maps
 
 A slot can carry the other maps a PBR texture set comes with, so its ground is lit by the sun rather than only coloured. Each is named on the slot's line after its other settings:

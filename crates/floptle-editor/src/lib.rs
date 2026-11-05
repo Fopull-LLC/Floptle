@@ -279,6 +279,7 @@ mod offscreen;
 mod perf_readout;
 mod play_step;
 mod render_frame;
+mod palette_cache;
 mod scene_sync;
 mod render_targets;
 mod rollback;
@@ -2585,6 +2586,12 @@ struct Editor {
     /// the project changing it reads the palette again. `None` until the
     /// first read.
     terrain_palette_size: Option<u32>,
+    /// Each slot's mean colour as the palette in flight lands: its stand-in
+    /// until its picture is in, then the picture's own.
+    terrain_palette_landing: Vec<[f32; 3]>,
+    /// How many palette slots the last frame wrote (see
+    /// `palette_slots_per_frame`).
+    terrain_palette_landed_last: usize,
     /// Each terrain's primary-ray rendering is a set of
     /// extracted chunk meshes drawn through the raster pass, instead of sphere-tracing a
     /// voxel field. Meshes extract straight from the authoritative `ChunkField`; the
@@ -5747,6 +5754,7 @@ mod migrate_tests {
         assert_eq!(super::new_project(&dir, "0.118.0", "", false), 0);
         let ignore = std::fs::read_to_string(dir.join(".gitignore")).expect("a .gitignore");
         assert!(ignore.lines().any(|l| l == crate::upgrade::LIBRARY_IGNORE), "{ignore}");
+        assert!(ignore.lines().any(|l| l == crate::upgrade::CACHE_IGNORE), "{ignore}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

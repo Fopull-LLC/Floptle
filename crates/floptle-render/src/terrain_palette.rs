@@ -88,19 +88,10 @@ impl TerrainPalette {
                 normal_mask |= 1 << i;
                 linear_mip_chain(t.pixels, size, true)
             }));
-            orm_layers.push((o.is_some() || h.is_some()).then(|| {
-                if o.is_some() {
-                    orm_mask |= 1 << i;
-                }
-                let texels = (size * size) as usize;
-                let mut px = Vec::with_capacity(texels * 4);
-                for k in 0..texels {
-                    let orm = o.as_ref().map_or([255, 255, 255], |t| [t.pixels[k * 4], t.pixels[k * 4 + 1], t.pixels[k * 4 + 2]]);
-                    let height = h.as_ref().map_or(128, |t| t.pixels[k * 4]);
-                    px.extend_from_slice(&[orm[0], orm[1], orm[2], height]);
-                }
-                linear_mip_chain(px, size, false)
-            }));
+            if o.is_some() {
+                orm_mask |= 1 << i;
+            }
+            orm_layers.push(ormh_chain(o.as_ref(), h.as_ref(), size));
         }
         if normal_mask != 0 || orm_layers.iter().any(Option::is_some) {
             normal_layers.extend(orm_layers);
@@ -151,7 +142,8 @@ impl TerrainPalette {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            // COPY_SRC so a guard can read back what a slot holds.
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let white = vec![255u8; (self.size * self.size * 4) as usize];
@@ -178,6 +170,133 @@ impl TerrainPalette {
             }
         }
         tex
+    }
+}
+
+/// An ORM map and a height map packed as one chain (R occlusion, G
+/// roughness, B metalness, A height), each `size`²; `None` when neither is.
+fn ormh_chain(o: Option<&TextureData>, h: Option<&TextureData>, size: u32) -> Option<Vec<Vec<u8>>> {
+    if o.is_none() && h.is_none() {
+        return None;
+    }
+    let texels = (size * size) as usize;
+    let mut px = Vec::with_capacity(texels * 4);
+    for k in 0..texels {
+        let orm = o.map_or([255, 255, 255], |t| [t.pixels[k * 4], t.pixels[k * 4 + 1], t.pixels[k * 4 + 2]]);
+        let height = h.map_or(128, |t| t.pixels[k * 4]);
+        px.extend_from_slice(&[orm[0], orm[1], orm[2], height]);
+    }
+    Some(linear_mip_chain(px, size, false))
+}
+
+/// One slot's pictures, mip chains built and ready to write into a live
+/// palette ([`write_slot`]): its colour, and its normal and ORM-and-height
+/// maps if it has them. What a palette that fills in slot by slot hands from
+/// its worker to the frame.
+pub struct SlotPictures {
+    pub colour: Option<Vec<Vec<u8>>>,
+    pub normal: Option<Vec<Vec<u8>>>,
+    pub orm: Option<Vec<Vec<u8>>>,
+}
+
+impl SlotPictures {
+    /// The chains for one slot's pictures, each already `size`² (others are
+    /// left out, as [`TerrainPalette::from_layers`] and
+    /// [`TerrainPalette::with_surfaces`] leave them).
+    pub fn new(
+        colour: Option<TextureData>,
+        normal: Option<TextureData>,
+        orm: Option<TextureData>,
+        height: Option<TextureData>,
+        size: u32,
+    ) -> Self {
+        let fits = |t: &TextureData| t.width == size && t.height == size;
+        let (o, h) = (orm.filter(fits), height.filter(fits));
+        Self {
+            colour: colour.filter(fits).map(|t| srgb_mip_chain(t.pixels, size)),
+            normal: normal.filter(fits).map(|t| linear_mip_chain(t.pixels, size, true)),
+            orm: ormh_chain(o.as_ref(), h.as_ref(), size),
+        }
+    }
+}
+
+/// A palette standing in while its pictures are read: `size`² with every
+/// level, and each slot one flat colour, `means[i]` (linear RGB; mid grey
+/// past the list). With `surfaced`, the layers for surface maps too, flat
+/// normals and plain ORM. The ground shows its colours from the first frame
+/// rather than white, and the pictures land into it slot by slot
+/// ([`write_slot`]).
+pub fn stand_in(gpu: &Gpu, size: u32, means: &[[f32; 3]], surfaced: bool) -> wgpu::Texture {
+    let levels = size.max(1).ilog2() + 1;
+    let layers = if surfaced { SURFACED_LAYERS } else { TERRAIN_SLOTS };
+    let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("terrain-palette"),
+        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: layers },
+        mip_level_count: levels,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        // COPY_SRC so a guard can read back what a slot holds.
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let code = data_to_srgb_table();
+    let mut fill = vec![0u8; (size * size * 4) as usize];
+    for layer in 0..layers {
+        let texel = if layer < TERRAIN_SLOTS {
+            let m = means.get(layer as usize).copied().unwrap_or([0.214; 3]);
+            [linear_to_srgb(m[0]), linear_to_srgb(m[1]), linear_to_srgb(m[2]), 255]
+        } else if layer < 2 * TERRAIN_SLOTS {
+            FLAT_NORMAL.map(|v| code[v as usize])
+        } else {
+            PLAIN_ORM.map(|v| code[v as usize])
+        };
+        for px in fill.as_chunks_mut::<4>().0 {
+            px.copy_from_slice(&texel);
+        }
+        for level in 0..levels {
+            let side = (size >> level).max(1);
+            write_layer(gpu, &tex, layer, level, side, &fill[..(side * side * 4) as usize]);
+        }
+    }
+    tex
+}
+
+/// Write one slot's pictures into a live palette made by [`stand_in`] or
+/// [`TerrainPalette::upload`] at the same size: its colour layer, and its
+/// surface-map layers when the palette has them. A picture the slot does not
+/// have leaves its layer as it was.
+pub fn write_slot(gpu: &Gpu, tex: &wgpu::Texture, slot: u32, pictures: &SlotPictures) {
+    if slot >= TERRAIN_SLOTS {
+        return;
+    }
+    let size = tex.width();
+    let write = |layer: u32, chain: &[Vec<u8>], encode: Option<&[u8; 256]>| {
+        for (level, px) in chain.iter().enumerate() {
+            let side = (size >> level).max(1);
+            if px.len() != (side * side * 4) as usize {
+                return;
+            }
+            match encode {
+                Some(code) => {
+                    let enc: Vec<u8> = px.iter().map(|&v| code[v as usize]).collect();
+                    write_layer(gpu, tex, layer, level as u32, side, &enc);
+                }
+                None => write_layer(gpu, tex, layer, level as u32, side, px),
+            }
+        }
+    };
+    if let Some(c) = &pictures.colour {
+        write(slot, c, None);
+    }
+    if tex.depth_or_array_layers() >= SURFACED_LAYERS {
+        let code = data_to_srgb_table();
+        if let Some(n) = &pictures.normal {
+            write(TERRAIN_SLOTS + slot, n, Some(&code));
+        }
+        if let Some(o) = &pictures.orm {
+            write(2 * TERRAIN_SLOTS + slot, o, Some(&code));
+        }
     }
 }
 

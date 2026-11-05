@@ -8,6 +8,46 @@ pub fn readback(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<[u8; 4]> {
     readback_bytes(gpu, tex).as_chunks::<4>().0.to_vec()
 }
 
+/// One layer of an array texture at one mip level, as a flat RGBA8 buffer:
+/// what a guard reads to see what a palette slot holds right now.
+pub fn readback_layer(gpu: &Gpu, tex: &wgpu::Texture, layer: u32, level: u32) -> Vec<u8> {
+    let (w, h) = ((tex.width() >> level).max(1), (tex.height() >> level).max(1));
+    let unpadded = w * 4;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded = unpadded.div_ceil(align) * align;
+    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback-layer"),
+        size: (padded * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback-layer") });
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: tex,
+            mip_level: level,
+            origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(h) },
+        },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    gpu.queue.submit([enc.finish()]);
+    let slice = buf.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    let data = slice.get_mapped_range();
+    let mut out = Vec::with_capacity((unpadded * h) as usize);
+    for row in 0..h {
+        let start = (row * padded) as usize;
+        out.extend_from_slice(&data[start..start + unpadded as usize]);
+    }
+    out
+}
+
 /// The texture's pixels as a flat byte buffer, four bytes per pixel.
 pub fn readback_bytes(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<u8> {
     let (w, h) = (tex.width(), tex.height());

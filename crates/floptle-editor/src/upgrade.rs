@@ -47,6 +47,7 @@ pub(crate) const STEPS: &[Step] = &[
     Step { id: "terrain-generator", since: "0.117.0", run: crate::terrain_upgrade::pin_terrain_generator },
     Step { id: "body-sizes-in-node-space", since: "0.117.0", run: crate::body_upgrade::keep_world_sizes },
     Step { id: "model-look-and-blend", since: "0.117.0", run: crate::upgrade_models::keep_model_look },
+    Step { id: "ignore-palette-cache", since: "0.117.1", run: ignore_generated_library },
 ];
 
 /// Is `version` older than `since`? A missing stamp is older than everything.
@@ -176,27 +177,49 @@ fn effects_format(root: &Path, _from: Option<&str>) -> Result<Vec<PathBuf>, Stri
 /// game's version control.
 pub(crate) const LIBRARY_IGNORE: &str = ".floptle/library/";
 
-/// `.floptle/library/` holds the annotations the editor writes from the
-/// installed engine each time it opens the project. They belong to the
-/// engine, not the game, so `.gitignore` names them: added if the file lacks
-/// it, the file created if there is none, and left alone otherwise.
+/// The line that keeps the engine's processed terrain palette pictures out
+/// of a game's version control.
+pub(crate) const CACHE_IGNORE: &str = ".floptle/cache/";
+
+/// What the engine generates inside a project, which belongs to the engine
+/// rather than the game, so `.gitignore` names it:
+///
+/// - `.floptle/library/`: the scripting annotations the editor writes from
+///   the installed engine each time it opens the project.
+/// - `.floptle/cache/`: terrain palette pictures, decoded and resized once
+///   so the next load reads them back (tens of megabytes at 512 texels).
+///
+/// Each line is added if the file lacks it, the file created if there is
+/// none, and the file left byte for byte as it was when it has both.
 pub(crate) fn ignore_generated_library(root: &Path, _from: Option<&str>) -> Result<Vec<PathBuf>, String> {
     let path = root.join(".gitignore");
     let cur = floptle_vfs::read_to_string(&path).unwrap_or_default();
-    let has = cur.lines().any(|l| {
-        let l = l.trim();
-        l == LIBRARY_IGNORE || l == ".floptle/library" || l == "/.floptle/library/" || l == "/.floptle/library"
-    });
-    if has {
+    let has = |dir: &str| {
+        let bare = dir.trim_end_matches('/');
+        cur.lines().any(|l| {
+            let l = l.trim();
+            let l = l.strip_prefix('/').unwrap_or(l);
+            l == dir || l == bare
+        })
+    };
+    let wanted = [
+        (LIBRARY_IGNORE, "# Scripting annotations the engine writes when it opens the project."),
+        (CACHE_IGNORE, "# Terrain textures the engine has processed, kept so they load fast."),
+    ];
+    let missing: Vec<_> = wanted.iter().filter(|(dir, _)| !has(dir)).collect();
+    if missing.is_empty() {
         return Ok(Vec::new());
     }
-    let mut next = cur;
-    if !next.is_empty() && !next.ends_with('\n') {
+    let mut next = cur.clone();
+    for (dir, note) in missing {
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str(note);
+        next.push('\n');
+        next.push_str(dir);
         next.push('\n');
     }
-    next.push_str("# Scripting annotations the engine writes when it opens the project.\n");
-    next.push_str(LIBRARY_IGNORE);
-    next.push('\n');
     floptle_vfs::write(&path, next).map_err(|e| e.to_string())?;
     Ok(vec![path])
 }
@@ -328,19 +351,26 @@ mod tests {
         std::fs::create_dir_all(dir.join("vfx")).unwrap();
         let effect = "// a comment\n(name: \"Spark\", tracks: [(name: \"A\", clips: [(start: 0.0, end: 0.2, emit: Some(Rate(rate: 40.0)))])])\n";
         std::fs::write(dir.join("vfx/Spark.vfx.ron"), effect).unwrap();
-        let ignore = "target/\n# mine\n.floptle/library/\n";
+        let ignore = "target/\n# mine\n.floptle/library/\n/.floptle/cache\n";
         std::fs::write(dir.join(".gitignore"), ignore).unwrap();
         let done = run(&dir, None);
         assert!(done.iter().all(|d| d.result.as_ref().is_ok_and(Vec::is_empty)), "a current project was changed: {:?}", report(&dir, &done));
         assert_eq!(std::fs::read_to_string(dir.join("vfx/Spark.vfx.ron")).unwrap(), effect);
         assert_eq!(std::fs::read_to_string(dir.join(".gitignore")).unwrap(), ignore);
 
-        // A .gitignore without the line gets it once, appended after what was there.
+        // A .gitignore without the lines gets each once, appended after what
+        // was there; the later step for the cache then finds it already done.
         std::fs::write(dir.join(".gitignore"), "target/").unwrap();
         let done = run(&dir, None);
         assert_eq!(report(&dir, &done), ["rewrote .gitignore (upgrade step ignore-generated-library)"]);
         let once = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
-        assert!(once.starts_with("target/\n") && once.ends_with(".floptle/library/\n"), "{once:?}");
+        assert!(once.starts_with("target/\n") && once.contains("\n.floptle/library/\n") && once.ends_with("\n.floptle/cache/\n"), "{once:?}");
+        // A project that had the library line from 0.117.0 gains the cache line.
+        std::fs::write(dir.join(".gitignore"), "target/\n.floptle/library/\n").unwrap();
+        let done = run(&dir, Some("0.117.0"));
+        assert_eq!(report(&dir, &done), ["rewrote .gitignore (upgrade step ignore-palette-cache)"]);
+        assert!(std::fs::read_to_string(dir.join(".gitignore")).unwrap().ends_with("\n.floptle/cache/\n"));
+        std::fs::write(dir.join(".gitignore"), &once).unwrap();
         assert!(run(&dir, None).iter().all(|d| d.result.as_ref().is_ok_and(Vec::is_empty)), "the second run changed something");
         assert_eq!(std::fs::read_to_string(dir.join(".gitignore")).unwrap(), once);
         let _ = std::fs::remove_dir_all(&dir);

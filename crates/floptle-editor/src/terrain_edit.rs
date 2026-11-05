@@ -276,7 +276,9 @@ fn empty_proxy() -> floptle_field::BakedSdf {
 
 /// A terrain palette read off the frame: each slot's 256² layer, and its
 /// mean colour (what an impostor is painted with).
-pub(crate) type PaletteRead = (floptle_render::TerrainPalette, Vec<[f32; 3]>);
+/// One palette slot read on the worker: its index, its pictures, and its
+/// mean colour.
+pub(crate) type PaletteRead = (usize, floptle_render::SlotPictures, [f32; 3]);
 
 /// An occluder bake made off the frame: the bake, its model's triangles, and
 /// the milliseconds it took.
