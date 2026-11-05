@@ -1629,7 +1629,9 @@ pub struct SpawnedEffect {
     pub key: String,
     /// The world point it plays at.
     pub pos: [f64; 3],
-    /// The emitter's velocity, which inherit-velocity tracks keep a share of.
+    /// The emitter's velocity: the emit point moves on at it, World tracks keep
+    /// their inherit-velocity share of it, and Local tracks' particles take it
+    /// as their own motion, which their drag and wind slow.
     /// Relative to `frame` when the effect has one.
     pub vel: [f64; 3],
     /// The effect's +Y in the world: a ring lies across it, a cone fires along

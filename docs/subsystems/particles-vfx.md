@@ -101,7 +101,17 @@ squashes the same way along its local Y.
 `inherit_velocity` is the fix for World-space trails on something fast: smoke off
 a moving vessel used to be left behind in space. At 1 a newborn fully keeps up
 with the emitter, then drifts as drag bleeds it off. It only means anything for
-`Space::World` — a `Local` track rides the node already.
+`Space::World` — a `Local` track rides the node already. The velocity is the
+emitter's over the world it rides: a node's own motion across a moving planet
+(what `node.vel` reports for a body), not the planet's orbit, and for a
+`spawnEffect` one-shot the `vel` it was fired with.
+
+A one-shot fired with a `vel` moves its emit point on at that velocity, so a
+stream it is still emitting keeps pace with what fired it. Its `Local` tracks'
+particles take the velocity at birth as their own motion, the way a World
+track with `inherit_velocity` 1 does: `drag` and `Wind` slow it, in a vacuum
+it carries on, and the ones already born are not pushed along by the point.
+A puff fired at 15 m/s with drag 2 drifts about 15 / 2 = 7.5 m and stops.
 
 `collide` makes a track's particles meet the level: tilemap walls, static
 colliders and terrain, never triggers. Each moving particle tests the whole step
@@ -182,7 +192,10 @@ coupling stops falling. Give such a track a downward wind component, or a
 smaller coupling, or add the fall back with a `Directional` force. The
 `Directional`, `Point` and `Vortex` vectors of a `World` track are in world
 axes, not along a planet's up: on a planet, build them from the up where the
-effect plays, or use a `Local` track on a node aligned to the ground. Outside
+effect plays, or use a `Local` track on a node aligned to the ground. A
+`World` track's `Turbulence` field is fixed in the world the effect rides (a
+planet on rails, a ship, a one-shot's `frame`), so smoke over the ground of a
+moving, turning planet swirls as slowly as it would on a still one. Outside
 Play there is no wind. A `Trail` is a
 per-particle ribbon on billboard tracks, spanning `time` seconds of history at
 `width` world units, optionally tapering to nothing (`fade`); a track with no

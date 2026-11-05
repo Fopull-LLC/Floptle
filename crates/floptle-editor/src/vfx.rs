@@ -318,6 +318,9 @@ pub struct VfxSystem {
     /// Each node instance's frame and the frame's pose at its last advance,
     /// so its World-track particles ride the world it is on.
     node_frames: HashMap<Entity, (Entity, floptle_core::transform::Transform)>,
+    /// Each node instance's emit point at its last advance: how fast the node
+    /// moves over the world it rides, which its World tracks' newborns inherit.
+    node_last: HashMap<Entity, DVec3>,
     /// Each node's `setTint`, given to every instance it plays.
     node_tints: HashMap<Entity, [f32; 4]>,
     /// Each node's `setVolume`, given to every instance it plays.
@@ -461,6 +464,7 @@ impl Default for VfxSystem {
             wind: Default::default(),
             preview: None,
             node_frames: HashMap::new(),
+            node_last: HashMap::new(),
             node_tints: HashMap::new(),
             node_volumes: HashMap::new(),
             level: LevelWatch::default(),
@@ -694,6 +698,9 @@ impl VfxSystem {
     pub fn spawn(&mut self, entity: Entity, key: &str) {
         if let Some(fx) = self.effect(key) {
             let mut inst = EffectInstance::new(fx, entity.index().wrapping_add(1));
+            // A fresh start has no motion to inherit yet: it may have moved
+            // anywhere since its last instance.
+            self.node_last.remove(&entity);
             if let Some(t) = self.node_tints.get(&entity) {
                 inst.tint = *t;
             }
@@ -733,6 +740,7 @@ impl VfxSystem {
             world.get::<ParticleSystem>(*e).is_some_and(|ps| ps.asset == *key)
         });
         self.node_frames.retain(|e, _| self.instances.contains_key(e));
+        self.node_last.retain(|e, _| self.instances.contains_key(e));
         // Under a particle budget every effect is born at the share of its
         // rate the budget leaves, alike: the same share for the dust, the
         // rain and the sparks, so none of them is the one that goes out.
@@ -761,27 +769,43 @@ impl VfxSystem {
             // The world it is on: a celestial it hangs under, or the one whose
             // sphere of influence it is in. Its World-track particles ride it.
             let frame = celestial_ancestor(world, *e).or_else(|| frame_at(emitter.translation));
+            // Where last frame's emit point is now, if it had stayed put on the
+            // world it rides: what the node moved beyond that is its own
+            // motion, the velocity its newborns inherit. A node that has just
+            // started, or crossed from one world to another, has none yet.
+            let last = self.node_last.insert(*e, emitter.translation);
+            let mut held = None;
             match frame {
                 Some(f) => {
                     let now = floptle_core::world_transform(world, f);
-                    if let Some((was, last)) = self.node_frames.get(e)
+                    if let Some((was, from)) = self.node_frames.get(e)
                         && *was == f
                     {
-                        inst.carry(last, &now);
+                        inst.carry(from, &now);
+                        held = last.map(|p| {
+                            let turn = (now.rotation * from.rotation.inverse()).normalize();
+                            now.translation + turn.as_dquat() * (p - from.translation)
+                        });
                     }
+                    inst.frame = Some(now);
                     self.node_frames.insert(*e, (f, now));
                 }
                 None => {
-                    self.node_frames.remove(e);
+                    held = if self.node_frames.remove(e).is_some() { None } else { last };
+                    inst.frame = None;
                 }
             }
+            let vel = match held {
+                Some(p) if dt > 0.0 => ((emitter.translation - p) / dt as f64).as_vec3(),
+                _ => Vec3::ZERO,
+            };
             inst.up = match inst.gravity_mode() {
                 floptle_vfx::GravityMode::Field => up_against(g),
                 _ => None,
             }
             .unwrap_or(emitter.rotation * Vec3::Y);
             inst.wind = wind_at(&self.wind, emitter.translation);
-            inst.advance_in_level(dt, g, emitter, level);
+            inst.advance_moving_in_level(dt, g, emitter, vel, level);
         }
         // Spawn for play-on-start systems without an instance: an asset swapped
         // mid-play, or a component attached mid-play.
@@ -804,35 +828,42 @@ impl VfxSystem {
             {
                 d.frame = None;
             }
+            // The emit point moves on with the inherited motion before the
+            // step, so a still-emitting effect keeps pace with the vessel it
+            // was fired from. In a frame the velocity is relative to it, so the
+            // point moves in the frame.
+            let step = d.vel * dt;
             let emitter = match &mut d.frame {
                 Some(link) => {
                     let now = floptle_core::world_transform(world, link.entity);
                     d.inst.carry(&link.last, &now);
                     link.last = now;
+                    link.local.translation += (now.rotation.inverse() * step).as_dvec3();
                     now.mul_transform(&link.local)
                 }
-                None => floptle_core::transform::Transform {
-                    translation: d.pos,
-                    rotation: d.rot,
-                    scale: Vec3::splat(d.scale),
-                },
+                None => {
+                    d.inst.frame = None;
+                    d.pos += step.as_dvec3();
+                    floptle_core::transform::Transform {
+                        translation: d.pos,
+                        rotation: d.rot,
+                        scale: Vec3::splat(d.scale),
+                    }
+                }
             };
             d.pos = emitter.translation;
             d.rot = emitter.rotation;
             d.scale = emitter.scale.x;
+            // The Local tracks' particles live on the emit point. Its motion is
+            // theirs from birth, as their own, so drag and wind slow it; the
+            // ones already born stay where they are as the point moves on.
+            let s = emitter.scale.max(Vec3::splat(1e-4));
+            let local = |v: Vec3| (emitter.rotation.inverse() * v) / s;
+            d.inst.drift = local(d.vel);
+            d.inst.drift_emitter(local(step));
             let g = grav_at(d.pos, d.inst.gravity_mode());
             d.inst.wind = wind_at(&self.wind, emitter.translation);
             d.inst.advance_moving_in_level(dt, g, emitter, d.vel, level);
-            // Carry the emit point along with the inherited motion so a still-emitting
-            // effect keeps pace with the vessel it was fired from. In a frame the
-            // velocity is relative to it, so the point moves in the frame.
-            match &mut d.frame {
-                Some(link) => {
-                    let step = link.last.rotation.inverse() * (d.vel * dt);
-                    link.local.translation += step.as_dvec3();
-                }
-                None => d.pos += (d.vel * dt).as_dvec3(),
-            }
         }
         self.detached.retain(|d| !d.inst.is_done());
         self.hold_to_budget();

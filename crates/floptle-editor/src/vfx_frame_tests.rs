@@ -545,3 +545,233 @@ fn particle_counts_are_filled_in_without_a_draw() {
     let counted = ed.script_host.profile().borrow().counts().particles;
     assert_eq!(counted, 8, "perf.counts().particles on an undrawn frame");
 }
+
+/// A bare effect system holding `docs`, saved under a scratch project.
+fn system_with(tag: &str, docs: &[floptle_scene::VfxEffectDoc]) -> (crate::vfx::VfxSystem, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("floptle-vfx-motion-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for doc in docs {
+        floptle_scene::save_vfx_effect(doc, &dir.join("vfx").join(format!("{}.vfx.ron", doc.name))).unwrap();
+    }
+    let mut vfx = crate::vfx::VfxSystem::default();
+    vfx.rescan(&dir);
+    (vfx, dir)
+}
+
+/// [`still_puff`] in the emitter's own space, slowed by `drag` and by still air.
+fn local_puff(name: &str, drag: f32, wind: f32) -> floptle_scene::VfxEffectDoc {
+    let mut doc = still_puff(name, VfxShapeDoc::Point);
+    let t = &mut doc.tracks[0];
+    t.space = VfxSpaceDoc::Local;
+    t.drag = drag;
+    if wind > 0.0 {
+        t.forces = vec![floptle_scene::VfxForceDoc::Wind { coupling: wind }];
+    }
+    doc
+}
+
+/// The first World-track particle of each one-shot in `range`, in the world.
+fn particles_of(vfx: &crate::vfx::VfxSystem, range: std::ops::Range<usize>) -> Vec<DVec3> {
+    range
+        .map(|i| {
+            let d = &vfx.detached[i];
+            d.inst.anchor() + d.inst.track_particles(0).pos_age[0].truncate().as_dvec3()
+        })
+        .collect()
+}
+
+/// Where a one-shot's first Local-track particle is in the world.
+fn local_particle(d: &crate::vfx::DetachedEffect) -> DVec3 {
+    let p = d.inst.track_particles(0);
+    assert!(p.count > 0, "the puff has a particle");
+    d.emitter().mul_transform(&Transform::from_translation(p.pos_age[0].truncate().as_dvec3())).translation
+}
+
+/// **A puff fired from something moving is slowed by its own drag.** It used
+/// to ride its emit point, which went on at the velocity it was fired with,
+/// so its drag and the air never touched that motion: fired at 15 m/s with a
+/// six-second life it slid 90 m. Now drag 2 stops it after about 15 / 2 =
+/// 7.5 m, the still air does the same, and in a vacuum it keeps going; and
+/// it goes exactly as far as a World-space puff that inherits the velocity.
+#[test]
+fn a_local_puff_fired_with_a_velocity_is_slowed_by_its_drag_and_the_air() {
+    let mut world_twin = still_puff("Twin", VfxShapeDoc::Point);
+    world_twin.tracks[0].drag = 2.0;
+    world_twin.tracks[0].inherit_velocity = 1.0;
+    let docs = [local_puff("Drag", 2.0, 0.0), local_puff("Air", 0.0, 2.0), local_puff("Vacuum", 0.0, 0.0), world_twin];
+    let (mut vfx, dir) = system_with("local", &docs);
+    let world = floptle_core::World::default();
+    let fire = |vfx: &mut crate::vfx::VfxSystem, key: &str, at: DVec3, vel: Vec3| {
+        vfx.spawn_detached_with(
+            key,
+            crate::vfx::DetachedSpawn {
+                emitter: Transform::from_translation(at),
+                vel,
+                frame: None,
+                intensity: None,
+                volume: None,
+                tint: None,
+                up: None,
+            },
+        )
+    };
+    let v = Vec3::new(15.0, 0.0, 0.0);
+    for (i, key) in ["vfx/Drag", "vfx/Air", "vfx/Vacuum"].into_iter().enumerate() {
+        let y = 10.0 * i as f64;
+        fire(&mut vfx, key, DVec3::new(0.0, y, 0.0), Vec3::ZERO);
+        fire(&mut vfx, key, DVec3::new(3.0, y, 0.0), v);
+    }
+    fire(&mut vfx, "vfx/Twin", DVec3::new(0.0, 40.0, 0.0), Vec3::ZERO);
+    fire(&mut vfx, "vfx/Twin", DVec3::new(3.0, 40.0, 0.0), v);
+    let mut played = 0.0f32;
+    for dt in JITTERY.iter().cycle() {
+        if played + dt > 5.0 {
+            break;
+        }
+        played += dt;
+        vfx.advance(&world, *dt, None, &|_| None, None);
+    }
+    let at: Vec<DVec3> = vfx.detached.iter().take(6).map(local_particle).collect();
+    let twin: Vec<DVec3> = particles_of(&vfx, 6..8);
+    let twin_apart = twin[1].x - twin[0].x;
+    // Exactly: v / k · (1 − e^(−k·t)) on top of the 3 m they were fired apart.
+    let slowed = 3.0 + 7.5 * (1.0 - (-2.0 * played as f64).exp());
+    let coasted = 3.0 + 15.0 * played as f64;
+    for (i, (want, what)) in [(slowed, "drag"), (slowed, "still air"), (coasted, "a vacuum")].into_iter().enumerate() {
+        let apart = at[2 * i + 1].x - at[2 * i].x;
+        // The step-by-step drag lands a little short of the exact figure.
+        assert!((apart - want).abs() < 0.6, "in {what} the moving puff went {apart} m from the still one, not {want}");
+        if i < 2 {
+            assert!((apart - twin_apart).abs() < 0.02, "in {what} the Local puff went {apart} m, the World one {twin_apart} m");
+        }
+        assert!(at[2 * i].x.abs() < 1e-3, "the still puff in {what} moved {} m", at[2 * i].x);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A World-space stream, born at 30 a second, that keeps all of its
+/// emitter's motion.
+fn inheriting_stream(name: &str) -> floptle_scene::VfxEffectDoc {
+    let mut doc = still_puff(name, VfxShapeDoc::Point);
+    let t = &mut doc.tracks[0];
+    t.inherit_velocity = 1.0;
+    t.clips[0].emit = Some(floptle_scene::VfxEmitDoc::Rate { rate: 30.0 });
+    doc
+}
+
+/// **A node's own effect inherits the node's motion over its world.** Only a
+/// one-shot was ever handed a velocity, so `inherit_velocity` did nothing on
+/// a node's effect: smoke off a moving vessel stood still in the air. The
+/// motion is the node's against the world it rides, so a node standing on a
+/// planet that moves at 240 m/s and turns gives its newborns nothing, and one
+/// driving across it at 4 m/s gives them 4 m/s.
+#[test]
+fn a_nodes_effect_inherits_its_motion_over_the_world_it_rides() {
+    let (mut vfx, dir) = system_with("inherit", &[inheriting_stream("Stream")]);
+    let mut world = floptle_core::World::default();
+    let planet = world.spawn();
+    world.insert(planet, Transform::IDENTITY);
+    world.insert(planet, CelestialBody::default());
+    let node = |world: &mut floptle_core::World, parent: Option<floptle_core::Entity>, x: f64| {
+        let e = world.spawn();
+        world.insert(e, Transform::from_translation(DVec3::new(x, 50.0, 0.0)));
+        if let Some(p) = parent {
+            world.insert(e, floptle_core::Parent(p));
+        }
+        world.insert(e, floptle_core::ParticleSystem { asset: "vfx/Stream".into(), play_on_start: true });
+        e
+    };
+    let standing = node(&mut world, Some(planet), 0.0);
+    let driving = node(&mut world, Some(planet), 20.0);
+    let free = node(&mut world, None, 900.0);
+    let mut played = 0.0f64;
+    for dt in JITTERY.repeat(3) {
+        played += dt as f64;
+        let spin = floptle_core::math::DQuat::from_rotation_y(0.05 * played).as_quat();
+        world.insert(planet, Transform { translation: DVec3::new(240.0 * played, 0.0, 0.0), rotation: spin, ..Transform::IDENTITY });
+        world.insert(driving, Transform::from_translation(DVec3::new(20.0 + 4.0 * played, 50.0, 0.0)));
+        world.insert(free, Transform::from_translation(DVec3::new(900.0, 50.0, 7.0 * played)));
+        vfx.advance(&world, dt, None, &|_| None, None);
+    }
+    // The newest particle's velocity, in the planet's frame for the two on it.
+    let spin = world.get::<Transform>(planet).unwrap().rotation;
+    let newest = |e: floptle_core::Entity| {
+        let (_, inst) = vfx.instances.get(&e).expect("the node's effect is playing");
+        let p = inst.track_particles(0);
+        assert!(p.count > 3, "the stream is emitting");
+        p.vel_life[p.count - 1].truncate()
+    };
+    let cases = [
+        (standing, spin.inverse() * newest(standing), Vec3::ZERO, "standing on the planet"),
+        (driving, spin.inverse() * newest(driving), Vec3::new(4.0, 0.0, 0.0), "driving across the planet"),
+        (free, newest(free), Vec3::new(0.0, 0.0, 7.0), "moving in open space"),
+    ];
+    for (_, got, want, what) in cases {
+        assert!((got - want).length() < 0.05, "a node {what} gave its newborns {got}, not {want}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **Turbulence swirls the same on a moving world as on a still one.** Its
+/// noise was sampled at the absolute world point, so the field stood still
+/// in the star's frame and a puff over the ground of a planet moving at
+/// 240 m/s crossed 240 m of it a second. It is fixed in the frame the effect
+/// rides now: the same puff on a still planet and on a moving, turning one
+/// takes the same path over its ground.
+#[test]
+fn turbulence_on_a_moving_world_is_fixed_in_that_world() {
+    let mut doc = still_puff("Swirl", VfxShapeDoc::Sphere { radius: 2.0, shell: false });
+    doc.tracks[0].forces = vec![floptle_scene::VfxForceDoc::Turbulence { frequency: 0.3, strength: 3.0 }];
+    let (vfx, dir) = system_with("swirl", &[doc]);
+    let path = |mut vfx: crate::vfx::VfxSystem, speed: f64, turn: f64| -> Vec<DVec3> {
+        let mut world = floptle_core::World::default();
+        let planet = world.spawn();
+        let pose = |t: f64| Transform {
+            translation: DVec3::new(speed * t, 0.0, 0.3 * speed * t),
+            rotation: floptle_core::math::DQuat::from_rotation_y(turn * t).as_quat(),
+            ..Transform::IDENTITY
+        };
+        world.insert(planet, pose(0.0));
+        world.insert(planet, CelestialBody::default());
+        let at = pose(0.0);
+        vfx.spawn_detached_with(
+            "vfx/Swirl",
+            crate::vfx::DetachedSpawn {
+                emitter: Transform::from_translation(DVec3::new(0.0, 40.0, 0.0)),
+                vel: Vec3::ZERO,
+                frame: Some((planet, at)),
+                intensity: None,
+                volume: None,
+                tint: None,
+                up: None,
+            },
+        );
+        let mut played = 0.0f64;
+        for dt in JITTERY.repeat(4) {
+            played += dt as f64;
+            world.insert(planet, pose(played));
+            vfx.advance(&world, dt, None, &|_| None, None);
+        }
+        let now = pose(played);
+        let d = &vfx.detached[0];
+        let p = d.inst.track_particles(0);
+        (0..p.count)
+            .map(|i| now.rotation.inverse().as_dquat() * (d.inst.anchor() + p.pos_age[i].truncate().as_dvec3() - now.translation))
+            .collect()
+    };
+    let fresh = || {
+        let mut v = crate::vfx::VfxSystem::default();
+        v.rescan(&dir);
+        v
+    };
+    drop(vfx);
+    let still = path(fresh(), 0.0, 0.0);
+    let moving = path(fresh(), 240.0, 0.02);
+    assert_eq!(still.len(), moving.len());
+    let swirled = still.iter().map(|p| (*p - DVec3::new(0.0, 40.0, 0.0)).length()).fold(0.0, f64::max);
+    assert!(swirled > 0.5, "the turbulence should move the puff: {swirled} m at most");
+    for (a, b) in still.iter().zip(&moving) {
+        assert!((*a - *b).length() < 0.02, "on a moving world a particle went {} m from where it went on a still one", (*a - *b).length());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

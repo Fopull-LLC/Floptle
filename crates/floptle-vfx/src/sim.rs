@@ -291,6 +291,17 @@ pub struct EffectInstance {
     /// A colour every particle of this instance is multiplied by: one dust
     /// effect matching each world's ground. White until the host sets it.
     pub tint: [f32; 4],
+    /// The velocity the host moves the emit point at, in the emitter's own
+    /// space (m/s): a one-shot fired from something moving keeps pace with it.
+    /// A Local track's newborns carry it as their own motion, so drag and wind
+    /// slow it as they do any other; [`Self::drift_emitter`] keeps the ones
+    /// already born from being pushed along. Zero until the host sets it.
+    pub drift: Vec3,
+    /// The pose of the frame the effect rides (a planet on rails, a ship), as
+    /// of this advance: a World track's turbulence is a field fixed in it, so
+    /// smoke over the ground of a moving world swirls as it would on a still
+    /// one. `None` is the world itself. [`Self::carry`] keeps it current.
+    pub frame: Option<Transform>,
 }
 
 /// Epsilon the playhead starts *before*, so events placed exactly at `t = 0`
@@ -328,6 +339,37 @@ impl EffectInstance {
             wind: Vec3::ZERO,
             up: Vec3::Y,
             tint: [1.0; 4],
+            drift: Vec3::ZERO,
+            frame: None,
+        }
+    }
+
+    /// The emit point moved `by` in its own space (the host moving it along
+    /// [`Self::drift`]): Local-track particles already born stay where they
+    /// are in the world rather than being carried with it. Their trails do too.
+    pub fn drift_emitter(&mut self, by: Vec3) {
+        if by == Vec3::ZERO {
+            return;
+        }
+        let effect = Arc::clone(&self.effect);
+        for (ti, ct) in effect.tracks.iter().enumerate() {
+            if ct.space != Space::Local {
+                continue;
+            }
+            let p = &mut self.tracks[ti].particles;
+            for pa in &mut p.pos_age[..p.count] {
+                *pa = (pa.truncate() - by).extend(pa.w);
+            }
+            // An emitter-path trail is kept in world space already.
+            if !ct.trail_in_world()
+                && let Some(trails) = &mut p.trail
+            {
+                for hist in trails {
+                    for pt in hist {
+                        *pt = (pt.truncate() - by).extend(pt.w);
+                    }
+                }
+            }
         }
     }
 
@@ -337,11 +379,15 @@ impl EffectInstance {
     /// so smoke over a spot on a moving world stays over that spot. Call
     /// before the frame's [`Self::advance_at`].
     pub fn carry(&mut self, from: &Transform, to: &Transform) {
+        self.frame = Some(*to);
         if !self.anchored {
             return;
         }
         let turn = (to.rotation * from.rotation.inverse()).normalize();
-        let turns = turn.dot(Quat::IDENTITY).abs() < 1.0 - 1e-7;
+        // Only an unchanged pose skips the turn: a planet's spin is a few
+        // millionths of a radian a frame, below any tolerance worth having,
+        // and the anchor is turned by it either way.
+        let turns = to.rotation != from.rotation;
         self.anchor = to.translation + turn.as_dquat() * (self.anchor - from.translation);
         if !turns {
             return;
@@ -736,7 +782,7 @@ impl EffectInstance {
                             // Reconstruct the exact accumulator-crossing time so birth
                             // spacing is even regardless of frame boundaries.
                             let tau = (s + (k as f32 - acc0) / rate_eff).clamp(s, e);
-                            spawn(ts, ct, ti as u32, inst_seed, tau, clip_life, jitter, now, lifetime, gravity, emitter, emit_vel, self.intensity, self.volume);
+                            spawn(ts, ct, ti as u32, inst_seed, tau, clip_life, jitter, now, lifetime, gravity, emitter, emit_vel, self.drift, self.intensity, self.volume);
                         }
                     }
                     Emit::Burst { count, count_jitter, pulses, interval, interval_jitter } => {
@@ -760,7 +806,7 @@ impl EffectInstance {
                                 // budget lessens an effect, never hides it.
                                 let n = if self.thin < 1.0 && n > 0 { ((n as f32 * self.thin).round() as u32).max(1) } else { n };
                                 for _ in 0..n {
-                                    spawn(ts, ct, ti as u32, inst_seed, tp, clip_life, jitter, now, lifetime, gravity, emitter, emit_vel, self.intensity, self.volume);
+                                    spawn(ts, ct, ti as u32, inst_seed, tp, clip_life, jitter, now, lifetime, gravity, emitter, emit_vel, self.drift, self.intensity, self.volume);
                                 }
                             }
                         }
@@ -776,6 +822,16 @@ impl EffectInstance {
         // anchor (as f32) shifts it back into world space from the anchor-relative store.
         let anchor = self.anchor.as_vec3();
         let anchor_d = self.anchor;
+        // In a frame, the field is fixed in it: the anchor and each offset are
+        // turned into the frame's own space.
+        let (field_turn, field_anchor) = match &self.frame {
+            Some(f) => {
+                let back = f.rotation.inverse();
+                (back, (back.as_dquat() * (self.anchor - f.translation)).as_vec3())
+            }
+            None => (Quat::IDENTITY, anchor),
+        };
+        let field_out = field_turn.inverse();
         for (ti, ct) in self.effect.tracks.iter().enumerate() {
             let p = &mut self.tracks[ti].particles;
             let damp = (-ct.drag * dt).exp();
@@ -820,10 +876,12 @@ impl EffectInstance {
                 // only replace the base term, so forces survive the re-sample).
                 if !ct.forces.is_empty() {
                     let pos = p.pos_age[i].truncate();
-                    let world = if is_world { anchor + pos } else { pos };
+                    let world = if is_world { field_anchor + field_turn * pos } else { pos };
                     let mut acc = Vec3::ZERO;
                     for force in &ct.forces {
-                        acc += force_accel(force, pos, world);
+                        let a = force_accel(force, pos, world);
+                        // The field's push is along the frame's axes too.
+                        acc += if is_world && matches!(force, Force::Turbulence { .. }) { field_out * a } else { a };
                     }
                     vel += acc * dt;
                     // Carried by the wind: the velocity relative to the air
@@ -1011,6 +1069,7 @@ fn spawn(
     gravity: Vec3,
     emitter: &Transform,
     emit_vel: Vec3,
+    drift: Vec3,
     intensity: f32,
     volume: f32,
 ) {
@@ -1069,7 +1128,18 @@ fn spawn(
     } else {
         (v0 + g0 + inherit, v0)
     };
-    let pos = offset + (carried + inherit) * age0;
+    // A drifting emit point (a one-shot fired from something moving) is where
+    // it is now, at the end of the step: the newborn was born where it was at
+    // `tau`, what it moved since short of that. A Local newborn also moves
+    // with it from birth on, as its own motion, so on a Local track the two
+    // cancel in its position this step.
+    let (pos, vel) = match ct.space {
+        Space::Local => (offset + carried * age0, vel + drift),
+        Space::World => {
+            let back = emitter.rotation * (emitter.scale * drift) * age0;
+            (offset + (carried + inherit) * age0 - back, vel)
+        }
+    };
 
     let misc = Vec4::new(birth_size, speed_mul, 0.0, 0.0);
     // An emitter-path trail keeps its history in anchor-relative world space, so the
@@ -1835,6 +1905,34 @@ mod tests {
         let x1 = inst.track_particles(0).pos_age[0].x;
         // Whichever side it was born, attraction moves |x| toward 0.
         assert!(x1.abs() < x0.abs(), "attractor should pull toward center: {x0} -> {x1}");
+    }
+
+    #[test]
+    fn a_frame_turning_a_little_each_frame_still_turns_its_particles() {
+        use crate::effect::Space;
+        // A planet's spin is a few millionths of a radian a frame. Turns that
+        // small were taken for none: the anchor turned with the planet and the
+        // particles' offsets from it did not, so they slid over its ground.
+        let mut t = Track {
+            clips: vec![burst_clip(0.0, 1, 100.0)],
+            velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+            // Born 100 m from the emitter, which is where the anchor is: the
+            // anchor itself turns with the frame either way.
+            shape: EmitShape::Sphere { radius: 100.0, shell: true },
+            ..Track::default()
+        };
+        t.space = Space::World;
+        let mut inst = EffectInstance::new(one_track_effect(t, 1.0, Playback::Looping), 1);
+        inst.advance_at(0.02, NO_G, Transform::IDENTITY);
+        let born = inst.anchor() + inst.track_particles(0).pos_age[0].truncate().as_dvec3();
+        assert!((born.length() - 100.0).abs() < 1e-3, "the particle should be born 100 m out: {born}");
+        let pose = |k: u32| Transform { rotation: Quat::from_rotation_y(1.0e-5 * k as f32), ..Transform::IDENTITY };
+        for k in 1..=1000 {
+            inst.carry(&pose(k - 1), &pose(k));
+        }
+        let at = inst.anchor() + inst.track_particles(0).pos_age[0].truncate().as_dvec3();
+        let on_ground = pose(1000).rotation.inverse().as_dquat() * at;
+        assert!((on_ground - born).length() < 1e-3, "the particle slid {} m over the turning frame", (on_ground - born).length());
     }
 
     #[test]
