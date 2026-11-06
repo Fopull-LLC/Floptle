@@ -514,6 +514,10 @@ fn counts_table(lua: &Lua, c: &Counts) -> mlua::Result<Table> {
     out.set("fieldChunks", c.field_chunks)?;
     out.set("fieldEdited", c.field_edited)?;
     out.set("fieldStandIns", c.field_stand_ins)?;
+    // Terrain meshes still to come: being made, plus waiting for a worker.
+    // Zero means the ground in view is built, the moment to take a shot.
+    out.set("meshesPending", c.meshes_in_flight + c.meshes_waiting)?;
+    out.set("meshesInFlight", c.meshes_in_flight)?;
     out.set("props", c.props)?;
     out.set("particles", c.particles)?;
     // The capped resources, and what each cap actually cut. A ceiling a
@@ -867,6 +871,8 @@ mod tests {
                 field_chunks: 3100,
                 field_edited: 80,
                 field_stand_ins: 9400,
+                meshes_in_flight: 12,
+                meshes_waiting: 30,
                 ..Default::default()
             });
             prof.end_frame();
@@ -892,6 +898,10 @@ mod tests {
         );
         // The counts that would have diagnosed 0071 and 0075 in one line each.
         assert_eq!(lua.load("return perf.counts().props").eval::<i64>().unwrap(), 117_000);
+        // Terrain meshes still to come: the ones being made and the ones
+        // waiting for a worker, together; and the first alone.
+        assert_eq!(lua.load("return perf.counts().meshesPending").eval::<i64>().unwrap(), 42);
+        assert_eq!(lua.load("return perf.counts().meshesInFlight").eval::<i64>().unwrap(), 12);
         // The terrain's fields, apart from the meshes drawn.
         assert_eq!(
             lua.load("local c = perf.counts() return {c.fieldChunks, c.fieldEdited, c.fieldStandIns}").eval::<Vec<i64>>().unwrap(),

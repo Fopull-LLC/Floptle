@@ -343,6 +343,10 @@ pub(crate) struct TerrainRender {
     /// again at the level it is drawn at, nearest first, and draws its old
     /// mesh until the new one lands.
     pub stale: std::collections::HashSet<[i32; 3]>,
+    /// Chunks that wanted a mesh at this terrain's last scan and were left
+    /// for a later frame because the workers were full: with [`Self::pending`],
+    /// what `perf.counts().meshesPending` reports.
+    pub waiting: usize,
 }
 
 /// Chunks along each edge of a far group: the coarsest chunks are drawn this
@@ -2056,13 +2060,23 @@ impl Editor {
         // ---- 5: top up the worker — dirty edits first (uncapped), then nearest ----
         if let Some(w) = self.terrain_worker.as_mut() {
             queue.sort_unstable_by_key(|&(d, ..)| d);
+            for e in &scanned {
+                if let Some(r) = self.terrain_render.get_mut(e) {
+                    r.waiting = 0;
+                }
+            }
             // One copy of each terrain's field a frame for its jobs to gather
             // from: a table of shared chunks, not the voxels.
             let mut snaps: HashMap<Entity, std::sync::Arc<floptle_field::ChunkField>> = HashMap::new();
             for (prio, e, coord, lod) in queue {
                 let dirty = prio <= -DIRTY_PRIORITY_BOOST / 2;
                 if !dirty && w.in_flight >= WORKER_IN_FLIGHT_CAP {
-                    break; // the rest re-plans next frame
+                    // The rest re-plans next frame; counted, so a game can
+                    // see the ground still to come.
+                    if let Some(r) = self.terrain_render.get_mut(&e) {
+                        r.waiting += 1;
+                    }
+                    continue;
                 }
                 let Some(terrain) = self.terrains.get(&e) else { continue };
                 let Some(render) = self.terrain_render.get_mut(&e) else { continue };
@@ -5346,6 +5360,14 @@ impl Editor {
         })
     }
 
+    /// Terrain chunk meshes not drawn yet, every terrain summed: those a
+    /// worker is making now, and those waiting for a worker (as of each
+    /// terrain's last scan). `perf.counts()`'s `meshesInFlight` and, added
+    /// together, `meshesPending`: zero once the ground in view is all built.
+    pub(crate) fn terrain_mesh_backlog(&self) -> (usize, usize) {
+        self.terrain_render.values().fold((0, 0), |(flight, wait), r| (flight + r.pending.len(), wait + r.waiting))
+    }
+
 /// The world translation of a terrain node (places its field in world space).
     /// A terrain node's world placement: translation + rotation + uniform scale
     /// (x drives — an SDF can't stretch per-axis without breaking the distance
@@ -6356,6 +6378,41 @@ mod residency_tests {
             assert!(std::time::Instant::now() < until, "the world never finished meshing");
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+    }
+
+    /// **The ground still to come can be counted** (`perf.counts().meshesPending`).
+    /// The workers take sixteen chunks at a time and the rest wait for a
+    /// later frame, so the chunks in flight alone said a world was nearly
+    /// built when most of it had not been asked for yet: a game could not
+    /// tell when a shot would show the whole ground. Every chunk is drawn,
+    /// empty, in flight or waiting, and the count reaches zero once built.
+    #[test]
+    fn the_ground_still_to_mesh_is_counted() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.project.terrain_shape = Some(floptle_scene::TerrainShapeDoc::Natural);
+        let fill = floptle_field::procgen::PlanetFill { seed: 3, radius: 300.0, voxel: 2.0, relief: 0.0, cave_depth: 0.0, ..Default::default() };
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        let cam = DVec3::new(0.0, 312.0, 0.0);
+        ed.terrains.insert(e, EditorTerrain::new(floptle_field::procgen::generate_planet(&fill)));
+        let all = ed.terrains[&e].field.chunk_coords().len();
+        ed.sync_terrain_meshes(true, cam);
+        let (flight, waiting) = ed.terrain_mesh_backlog();
+        let r = &ed.terrain_render[&e];
+        assert!(waiting > 0, "the fixture: {all} chunks should be more than the workers take at once ({flight} in flight)");
+        assert_eq!(
+            r.slots.len() + r.empty.len() + flight + waiting,
+            all,
+            "{} drawn, {} empty, {flight} in flight and {waiting} waiting should account for all {all} chunks",
+            r.slots.len(),
+            r.empty.len()
+        );
+        settle(&mut ed, e, cam);
+        // Past the scan throttle, so every terrain has scanned again.
+        for _ in 0..5 {
+            ed.sync_terrain_meshes(false, cam);
+        }
+        assert_eq!(ed.terrain_mesh_backlog(), (0, 0), "the world is built, and the count still says ground is to come");
     }
 
     /// **A re-plan keeps a dig's remesh.** A full re-plan drops the jobs in

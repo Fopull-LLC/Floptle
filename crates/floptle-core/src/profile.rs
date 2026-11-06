@@ -407,6 +407,12 @@ pub struct Counts {
     /// Field chunks put away, standing in as coarse lattices until something
     /// comes near.
     pub field_stand_ins: usize,
+    /// Terrain chunk meshes a worker is making now, every terrain summed.
+    pub meshes_in_flight: usize,
+    /// …and chunks that want a mesh but wait for a free worker. With
+    /// `meshes_in_flight`, the ground still to come: a shot taken while it
+    /// is above zero can show holes or coarse ground.
+    pub meshes_waiting: usize,
     /// Scatter props submitted this frame. A field can ask for 117,000 of
     /// these, and this is how you see the number.
     pub props: usize,

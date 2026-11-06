@@ -2326,6 +2326,7 @@ impl Editor {
             let texture_bytes = if prof.enabled() { raster.texture_bytes() } else { 0 };
             let (field_chunks, field_edited, field_stand_ins) =
                 if prof.enabled() { self.field_residency() } else { (0, 0, 0) };
+            let (meshes_in_flight, meshes_waiting) = self.terrain_mesh_backlog();
             prof.set_counts(floptle_core::profile::Counts {
                 texture_bytes,
                 nodes: ents.len(),
@@ -2337,6 +2338,8 @@ impl Editor {
                 field_chunks,
                 field_edited,
                 field_stand_ins,
+                meshes_in_flight,
+                meshes_waiting,
                 props: scatter_props,
                 props_dropped: self.scatter_cache.dropped,
                 particles,
