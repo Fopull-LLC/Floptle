@@ -1937,6 +1937,23 @@ pub(crate) struct SceneMirror {
 }
 
 impl SceneMirror {
+    /// Every node under `roots`, at any depth, onto `out` (the roots
+    /// themselves not again). A node met twice is pushed once.
+    pub(crate) fn subtree_into(&self, roots: &[u32], out: &mut Vec<u32>) {
+        let mut stack: Vec<u32> = roots.to_vec();
+        let mut seen: std::collections::HashSet<u32> = roots.iter().copied().collect();
+        while let Some(n) = stack.pop() {
+            for &c in self.children.get(&n).map(Vec::as_slice).unwrap_or(&[]) {
+                if seen.insert(c) {
+                    out.push(c);
+                    stack.push(c);
+                }
+            }
+        }
+    }
+}
+
+impl SceneMirror {
     /// `p`'s child list changed.
     pub(crate) fn bump_children(&mut self, p: u32) {
         self.child_clock += 1;

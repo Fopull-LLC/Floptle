@@ -691,6 +691,7 @@ fn ray_filter(
     opts: Option<&Value>,
     current: &Option<(u32, String)>,
     layers: &floptle_core::Layers,
+    scene: &SceneMirror,
     call: &str,
 ) -> mlua::Result<(Vec<u32>, u32)> {
     // Bodies the ray passes through: the caster's own, plus an optional
@@ -715,7 +716,9 @@ fn ray_filter(
                 // that parsing and the two lists drifting is how `layers` ends
                 // up honoured by one and ignored by the other.
                 crate::opts::check_keys(t, crate::shape_api::QUERY_KEYS, call)?;
+                let named = exclude.len();
                 crate::shape_api::ignore_into(call, t.get::<Value>("ignore")?, &mut exclude)?;
+                crate::shape_api::ignore_children(t, scene, named, &mut exclude)?;
                 let names: Vec<String> = match t.get::<Value>("layers") {
                     Ok(Value::String(s)) => vec![s.to_string_lossy().to_string()],
                     Ok(Value::Table(list)) => list.sequence_values::<String>().flatten().collect(),
@@ -795,6 +798,7 @@ fn install_world_queries(
     lua: &Lua,
     logs: &Rc<RefCell<Vec<ScriptLog>>>,
     profile: &crate::SharedProfile,
+    scene: &Rc<RefCell<SceneMirror>>,
 ) -> WorldQueryCells {
     // The `net.*` bridge state — created early so the raycast closure can
     // read the current-instance marker (self-hit exclusion) and `net.rewind`
@@ -825,6 +829,7 @@ fn install_world_queries(
         let so = sim_origin.clone();
         let cur = net.current.clone();
         let lt = layer_table.clone();
+        let sc = scene.clone();
         let prof = profile.clone();
         if let Ok(f) = lua.create_function(move |lua, args: mlua::MultiValue| {
             // Two spellings, one ray: the vector form
@@ -880,7 +885,7 @@ fn install_world_queries(
             let origin = *so.borrow();
             let o = (glam::DVec3::new(ox, oy, oz) - origin).as_vec3();
             let dir = glam::Vec3::new(dx as f32, dy as f32, dz as f32);
-            let (exclude, mask) = ray_filter(ignore.as_ref(), &cur.borrow(), &lt.borrow(), "raycast")?;
+            let (exclude, mask) = ray_filter(ignore.as_ref(), &cur.borrow(), &lt.borrow(), &sc.borrow(), "raycast")?;
             let timer = prof.borrow().enabled().then(floptle_core::profile::Span::new);
             let hit = cast_ray(&cols.borrow(), &hus.borrow(), o, dir, max as f32, &exclude, mask);
             if let Some(t) = timer {
@@ -914,6 +919,7 @@ fn install_world_queries(
         let so = sim_origin.clone();
         let cur = net.current.clone();
         let lt = layer_table.clone();
+        let sc = scene.clone();
         let prof = profile.clone();
         type Args = (Table, Table, Value, Option<Value>);
         if let Ok(f) = lua.create_function(move |lua, (origins, dirs, maxes, opts): Args| {
@@ -936,7 +942,7 @@ fn install_world_queries(
                     _ => Err(mlua::Error::runtime("raycastMany: `maxes` is a distance, or a list of one per ray")),
                 }
             };
-            let (exclude, mask) = ray_filter(opts.as_ref(), &cur.borrow(), &lt.borrow(), "raycastMany")?;
+            let (exclude, mask) = ray_filter(opts.as_ref(), &cur.borrow(), &lt.borrow(), &sc.borrow(), "raycastMany")?;
             let origin = *so.borrow();
             let out = lua.create_table_with_capacity(os.len(), 0)?;
             let timer = prof.borrow().enabled().then(floptle_core::profile::Span::new);
@@ -975,6 +981,7 @@ fn install_world_queries(
             current: net.current.clone(),
             layers: layer_table.clone(),
             profile: profile.clone(),
+            scene: scene.clone(),
         },
     );
 
@@ -2941,13 +2948,16 @@ impl ScriptHost {
             input_sim,
         } = install_input(&lua, &logs);
         let profile: crate::SharedProfile = Rc::new(RefCell::new(Default::default()));
+        // The scripts' copy of the scene: made before the queries, whose
+        // `ignoreChildren` walks its children.
+        let scene_mirror: Rc<RefCell<SceneMirror>> = Rc::default();
         let WorldQueryCells {
             net,
             colliders,
             hulls,
             sim_origin,
             layer_table,
-        } = install_world_queries(&lua, &logs, &profile);
+        } = install_world_queries(&lua, &logs, &profile, &scene_mirror);
         // `water.*` — the engine floats
         // things; a game still decides what being wet means, and every one of
         // those decisions is the same question with a different answer.
@@ -2977,7 +2987,6 @@ impl ScriptHost {
         // The scripts' copy of the scene, made here rather than with the rest
         // of the handle layer below: a source that rides a node reads where
         // that node stands the moment it is created.
-        let scene_mirror: Rc<RefCell<SceneMirror>> = Rc::default();
         crate::scatter_api::install_scatter_api(
             &lua,
             scatter_sources.clone(),

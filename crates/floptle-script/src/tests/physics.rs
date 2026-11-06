@@ -1235,3 +1235,83 @@ end
     assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 1.0, "the script did not finish");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **`ignoreChildren` skips a node's whole subtree.** A stand whose colliders
+/// sit on child nodes was not skipped by ignoring its root: a ray meant to
+/// pass the stand met the stand's own child, and a rover jacked down onto it.
+/// Root A at x 3 holds B at 6, which holds D at 7.5; C at 9 stands alone.
+/// Ignoring A alone still meets B, as before; with `ignoreChildren` every
+/// query passes A, B and D and meets C.
+#[test]
+fn ignore_children_skips_a_nodes_whole_subtree() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_ignore_children_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "caster",
+        r#"
+local function id(h) return h and h.node and h.node.__id end
+local function ids(list)
+  local s = {}
+  for _, h in ipairs(list) do if h.node then s[h.node.__id] = true end end
+  return s
+end
+function update(node, dt)
+  local a, b, c, d = find("A"), find("B"), find("C"), find("D")
+  local o, dir = vec3(0, 0, 0), vec3(1, 0, 0)
+  for _, case in ipairs({ { false, b }, { true, c } }) do
+    local opts, want = { ignore = a, ignoreChildren = case[1] }, case[2].__id
+    local function check(what, got)
+      if got ~= want then error(what .. " (ignoreChildren " .. tostring(case[1]) .. ") met " .. tostring(got) .. ", not " .. want) end
+    end
+    check("raycast", id(raycast(0, 0, 0, 1, 0, 0, 50, opts)))
+    check("raycastMany", id(raycastMany({ o }, { dir }, 50, opts)[1]))
+    check("spherecast", id(spherecast(o, dir, 0.1, 50, opts)))
+    check("capsulecast", id(capsulecast(o, dir, 0.1, 0.2, 50, opts)))
+    check("boxcast", id(boxcast(o, dir, 0.1, 0.1, 50, opts)))
+    local s = ids(overlapSphere(vec3(6, 0, 0), 5, opts))
+    if s[a.__id] or (case[1] and (s[b.__id] or s[d.__id])) or not s[want] then
+      error("overlapSphere (ignoreChildren " .. tostring(case[1]) .. ") did not skip the subtree")
+    end
+    s = ids(overlapBox(vec3(6, 0, 0), 5, 1, opts))
+    if s[a.__id] or (case[1] and (s[b.__id] or s[d.__id])) or not s[want] then
+      error("overlapBox (ignoreChildren " .. tostring(case[1]) .. ") did not skip the subtree")
+    end
+  end
+  node.x = 1
+end
+"#,
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::from_translation(glam::DVec3::new(0.0, 0.0, 50.0)));
+    world.insert(
+        e,
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "caster".into(),
+            enabled: true,
+            params: Vec::new(),
+            refs: Vec::new(),
+            strs: Vec::new(),
+            pinned_bools: None,
+        }]),
+    );
+    let mut hulls = Vec::new();
+    let mut made = std::collections::HashMap::new();
+    for (name, x, parent) in [("A", 3.0, None), ("B", 6.0, Some("A")), ("D", 7.5, Some("B")), ("C", 9.0, None)] {
+        let n = world.spawn();
+        world.insert(n, Transform::from_translation(glam::DVec3::new(x as f64, 0.0, 0.0)));
+        world.insert(n, floptle_core::Name(name.into()));
+        if let Some(p) = parent {
+            world.insert(n, floptle_core::Parent(made[p]));
+        }
+        made.insert(name, n);
+        hulls.push(hull(n.index(), x));
+    }
+    let mut host = ScriptHost::new();
+    host.set_hulls(hulls);
+    host.run(&mut world, &dir, 0.01, 0.01);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 1.0, "the script did not finish");
+    let _ = std::fs::remove_dir_all(&dir);
+}

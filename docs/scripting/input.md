@@ -418,6 +418,15 @@ local h = raycast(x, y, z, 0, -1, 0, 2.0, { ignore = target, layers = { "Ground"
 **both** static geometry and bodies; a misspelled layer name is an error, not a
 silent miss.
 
+`ignore` skips the nodes it names, and only those. A prefab whose colliders sit on child nodes, such as a craft or a launch stand, needs `ignoreChildren = true` to be passed whole by naming its root:
+
+```lua
+-- the deck under the craft, not the craft's own landing legs
+local h = raycast(pos, vec3(0, -1, 0), 10, { ignore = craft, ignoreChildren = true })
+```
+
+Every query takes it: `raycastMany`, `spherecast`, `capsulecast`, `boxcast`, `overlapSphere` and `overlapBox`.
+
 Use it for ground checks, line-of-sight, shooting, or dropping objects onto a surface.
 (The built-in `node.grounded` already does a robust contact check for the character;
 raycast is the general-purpose tool for everything else.)

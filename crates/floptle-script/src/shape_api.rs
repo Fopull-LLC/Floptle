@@ -31,6 +31,8 @@ pub(crate) struct QueryShared {
     pub layers: Rc<RefCell<floptle_core::Layers>>,
     /// Where a sweep's count and time go: `perf.counts().sweeps`/`sweepMs`.
     pub profile: crate::SharedProfile,
+    /// The scripts' copy of the scene, whose children `ignoreChildren` walks.
+    pub scene: Rc<RefCell<crate::SceneMirror>>,
 }
 
 impl QueryShared {
@@ -54,11 +56,11 @@ impl QueryShared {
 
 /// Every key a query options table reads (`raycast`, `overlapSphere`,
 /// `spherecast`, …). Anything else is refused.
-pub(crate) const QUERY_KEYS: &[&str] = &["ignore", "layers"];
+pub(crate) const QUERY_KEYS: &[&str] = &["ignore", "layers", "ignoreChildren"];
 
 /// A sweep's keys: the query's, and `ignoreStart` — surfaces the shape starts
 /// against do not count, so a body resting on a floor can cast along it.
-pub(crate) const CAST_KEYS: &[&str] = &["ignore", "layers", "ignoreStart"];
+pub(crate) const CAST_KEYS: &[&str] = &["ignore", "layers", "ignoreStart", "ignoreChildren"];
 
 /// Parse the shared options table into (bodies to skip, layer mask).
 ///
@@ -89,6 +91,22 @@ fn cast_opts(who: &str, opts: Option<&Value>, shared: &QueryShared) -> mlua::Res
 /// used to be read as one node, found to have no id and dropped, so a cast
 /// told to pass through a craft and its crew hit them both. Anything in the
 /// list that is not a node is an error, not a quiet miss.
+/// `ignoreChildren = true`: every node under the ones `ignore` named is
+/// passed through too, so a prefab whose colliders sit on child nodes (a
+/// craft, a launch stand) is skipped whole by naming its root. Off, only the
+/// nodes named are skipped, as before. `named` is where the nodes `ignore`
+/// gave start in `exclude`: the caller's own node, ahead of them, keeps its
+/// children, so a query skips what the caller carries only when it names
+/// itself.
+pub(crate) fn ignore_children(t: &mlua::Table, scene: &crate::SceneMirror, named: usize, exclude: &mut Vec<u32>) -> mlua::Result<()> {
+    if !t.get::<Option<bool>>("ignoreChildren")?.unwrap_or(false) {
+        return Ok(());
+    }
+    let roots: Vec<u32> = exclude[named..].to_vec();
+    scene.subtree_into(&roots, exclude);
+    Ok(())
+}
+
 pub(crate) fn ignore_into(who: &str, ignore: Value, out: &mut Vec<u32>) -> mlua::Result<()> {
     let node = |v: &Value| -> Option<u32> {
         match v {
@@ -149,7 +167,9 @@ fn query_opts_with(
                 // would have meant "ignore nothing", so the ray hits the caller
                 // and every query returns itself.
                 crate::opts::check_keys(t, keys, who)?;
+                let named = exclude.len();
                 ignore_into(who, t.get::<Value>("ignore")?, &mut exclude)?;
+                ignore_children(t, &shared.scene.borrow(), named, &mut exclude)?;
                 let names: Vec<String> = match t.get::<Value>("layers") {
                     Ok(Value::String(s)) => vec![s.to_string_lossy().to_string()],
                     Ok(Value::Table(list)) => list.sequence_values::<String>().flatten().collect(),

@@ -566,7 +566,7 @@ function onTriggerExit(node, other, hit) — fires the tick a body leaves the tr
 
 ### `overlapBox`
 
-overlapBox(center, halfX, halfY [, opts]) — everything a box in the XY plane overlaps, deepest first: the level's colliders and other bodies, each once. A hitbox, a "can I stand up here", a trigger zone made on the spot. opts: ignore = {nodes}, layers = {names}.
+overlapBox(center, halfX, halfY [, opts]) — everything a box in the XY plane overlaps, deepest first: the level's colliders and other bodies, each once. A hitbox, a "can I stand up here", a trigger zone made on the spot. opts: ignore = {nodes}, layers = {names}, ignoreChildren = true (raycast says how).
 
 ### `params`
 
@@ -1845,7 +1845,7 @@ overlapSphere(center, radius [, opts]) — everything inside a sphere, DEEPEST o
 
 ### `raycast`
 
-raycast(origin, dir, max [, ignore]) — or raycast(ox,oy,oz, dx,dy,dz, max [, ignore]). Cast a ray against the terrain + mesh colliders AND every physics body (players, crates). Returns a hit {x,y,z, nx,ny,nz, distance, node, material} or nil. node is the node it hit, whether that is a body or a piece of level. material is WHICH MATERIAL SLOT of it — the name a level author typed on that face — so a footstep can tell the boards from the grass inside one big map mesh; nil for anything with a single surface (terrain, a Collidable cube, an imported model, a body), and it costs nothing until you read it. Your own node's body is excluded; pass a node as `ignore` to skip its body too. The last arg can instead be an options table: raycast(..., { ignore = target, layers = {"Ground"} }) — ignore takes a node or a list of nodes (every query's does), and a list holding anything else is an error — layers (name or array, Project Settings → Layers) filters what the ray can hit; a misspelled layer is an error. Use for ground checks, line-of-sight, shooting.
+raycast(origin, dir, max [, ignore]) — or raycast(ox,oy,oz, dx,dy,dz, max [, ignore]). Cast a ray against the terrain + mesh colliders AND every physics body (players, crates). Returns a hit {x,y,z, nx,ny,nz, distance, node, material} or nil. node is the node it hit, whether that is a body or a piece of level. material is WHICH MATERIAL SLOT of it — the name a level author typed on that face — so a footstep can tell the boards from the grass inside one big map mesh; nil for anything with a single surface (terrain, a Collidable cube, an imported model, a body), and it costs nothing until you read it. Your own node's body is excluded; pass a node as `ignore` to skip its body too. The last arg can instead be an options table: raycast(..., { ignore = target, layers = {"Ground"} }) — ignore takes a node or a list of nodes (every query's does), and a list holding anything else is an error — ignoreChildren = true skips everything under the nodes ignore names as well, so a prefab whose colliders sit on child nodes (a craft, a launch stand) is passed whole by naming its root; without it only the named nodes are skipped, and every query takes it — layers (name or array, Project Settings → Layers) filters what the ray can hit; a misspelled layer is an error. Use for ground checks, line-of-sight, shooting.
 
 ```lua
 local hit = raycast(node.pos, vec3(0, -1, 0), params.ground_ray)
