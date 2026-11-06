@@ -869,6 +869,17 @@ pub struct Raster {
     /// (Self::depth_prepass_with) wrote, so `prepass_view` answers about that
     /// one rather than about whichever happened to be created last.
     prepass_active: Option<usize>,
+    /// The depth prepass copied its result over the frame's depth buffer, and
+    /// the next colour pass has not run yet: that pass keeps the depth it
+    /// finds (`LoadOp::Load`) even when it clears the colour, so early-z kills
+    /// every hidden fragment. Taken by that one pass, so a later view drawn
+    /// without a prepass clears as it always did.
+    depth_primed: bool,
+    /// Whether the last colour pass kept a primed depth buffer (for tests).
+    last_pass_kept_primed_depth: bool,
+    /// Keep a primed depth buffer in the colour pass (on). Off clears it, as
+    /// before: the same picture, every hidden layer shaded.
+    keep_primed_depth: bool,
     globals_bind: wgpu::BindGroup,
     /// The same, with the 1×1 stand-in where the sun map goes: for the pass
     /// that draws the sun map.
@@ -1927,6 +1938,9 @@ impl Raster {
             prepass: Vec::new(),
             prepass_seq: 0,
             prepass_active: None,
+            depth_primed: false,
+            last_pass_kept_primed_depth: false,
+            keep_primed_depth: true,
             globals_bind,
             globals_bind_sunpass,
             _sun_map: sun_map,
@@ -4087,10 +4101,17 @@ impl Raster {
 
         // Clear when we own the frame; Load when a prior pass (raymarch) already
         // filled the color + depth targets, so the two compose in one depth buffer.
+        //
+        // A frame whose depth the prepass primed keeps that depth even when it
+        // clears the colour: clearing it threw the priming away, and every
+        // hidden layer of a field of cut-out grass cards was shaded, however
+        // many lay behind the nearest (Solar's Earth meadow: about 3 ms).
+        let primed = std::mem::take(&mut self.depth_primed) && self.keep_primed_depth;
+        self.last_pass_kept_primed_depth = primed && clear.is_some();
         let (color_load, depth_load) = match clear {
             Some(c) => (
                 wgpu::LoadOp::Clear(wgpu::Color { r: c[0], g: c[1], b: c[2], a: c[3] }),
-                wgpu::LoadOp::Clear(1.0),
+                if primed { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(1.0) },
             ),
             None => (wgpu::LoadOp::Load, wgpu::LoadOp::Load),
         };
@@ -4988,6 +5009,20 @@ impl Raster {
             size,
         );
         gpu.queue.submit([encoder.finish()]);
+        self.depth_primed = true;
+    }
+
+    /// Whether the last colour pass kept the depth the prepass primed rather
+    /// than clearing it: true for a pass drawn straight after a prepass.
+    pub fn last_pass_kept_primed_depth(&self) -> bool {
+        self.last_pass_kept_primed_depth
+    }
+
+    /// Keep the depth the prepass primed in the colour pass (the default), or
+    /// clear it as before: the same picture either way, which is what a test
+    /// compares; only the work behind it differs.
+    pub fn set_keep_primed_depth(&mut self, on: bool) {
+        self.keep_primed_depth = on;
     }
 }
 

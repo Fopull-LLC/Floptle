@@ -434,3 +434,56 @@ fn volumetric_fog_marched_once_per_four_pixels_draws_the_same_picture() {
     let magenta = ground.clone().filter(|&i| px(&served, i) == [255, 0, 255]).count();
     assert!(magenta * 100 >= ground.len() * 95, "only {magenta} of {} ground pixels took the shared march", ground.len());
 }
+
+
+/// **A frame the depth prepass primed keeps that depth in its colour pass.**
+/// The colour pass cleared the depth whenever it cleared the colour, throwing
+/// the priming away, so every hidden layer of a stack of surfaces (a meadow
+/// of cut-out grass cards) was shaded, however many lay behind the nearest.
+/// Eighty cubes one behind another, the farthest made first, lit by a sun with
+/// contact shadows (which read the prepass): the pass keeps the primed depth, draws exactly the
+/// picture it drew clearing it, and takes much less time.
+#[cfg(feature = "editor-ui")]
+#[test]
+fn a_primed_depth_buffer_is_kept_and_hidden_layers_cost_nothing() {
+    let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+    let sun = ed.world.spawn();
+    ed.world.insert(sun, Transform { rotation: floptle_core::math::Quat::from_rotation_x(-1.0), ..Transform::IDENTITY });
+    // Contact shadows read the prepass, so the frame runs one.
+    ed.world.insert(sun, floptle_core::Light { intensity: 1.0, contact_shadows: true, ..Default::default() });
+    for k in (0..80).rev() {
+        let b = ed.world.spawn();
+        ed.world.insert(
+            b,
+            Transform {
+                translation: DVec3::new(0.0, 0.0, -4.0 - k as f64 * 0.125),
+                scale: floptle_core::math::Vec3::new(40.0, 40.0, 0.1),
+                ..Transform::IDENTITY
+            },
+        );
+        ed.world.insert(b, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.2 + 0.01 * k as f32, 0.5, 0.3] });
+    }
+    ed.camera.position = DVec3::ZERO;
+    ed.camera.pitch = 0.0;
+    ed.camera.yaw = 0.0;
+    let (w, h) = (1600u32, 1200u32);
+    let cam = ed.camera.render_camera();
+    let shoot = |ed: &mut crate::Editor, keep: bool, frames: u32| {
+        ed.raster.as_mut().unwrap().set_keep_primed_depth(keep);
+        let mut px = Vec::new();
+        let t = std::time::Instant::now();
+        for _ in 0..frames {
+            px = crate::shot::render_frame_pixels(ed, &cam, None, w, h, !0, false).expect("a frame");
+        }
+        (px, t.elapsed().as_secs_f64() / frames as f64, ed.raster.as_ref().unwrap().last_pass_kept_primed_depth())
+    };
+    // Warm both paths up, then measure.
+    let _ = shoot(&mut ed, true, 2);
+    let _ = shoot(&mut ed, false, 2);
+    let (kept, t_kept, did_keep) = shoot(&mut ed, true, 8);
+    let (cleared, t_cleared, _) = shoot(&mut ed, false, 8);
+    assert!(did_keep, "the colour pass cleared the depth the prepass primed");
+    let differ = kept.iter().zip(&cleared).filter(|(a, b)| a.abs_diff(**b) > 1).count();
+    assert_eq!(differ, 0, "keeping the primed depth changed {differ} channel values of the picture");
+    assert!(t_kept < t_cleared * 0.8, "keeping the primed depth took {:.2} ms against {:.2} clearing it", t_kept * 1e3, t_cleared * 1e3);
+}
