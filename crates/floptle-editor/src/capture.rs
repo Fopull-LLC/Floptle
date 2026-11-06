@@ -86,6 +86,17 @@ pub(crate) fn render_frame_texture(
     // …and the tile layers, whose meshes only the frame loops built: a shot or
     // a `camera.capture` of a 2D level drew its sprites over an empty sky.
     ed.sync_tilemaps();
+    // What the camera draws besides its nodes: a camera other than the
+    // player's photographs with its own switches (sky, terrain, fog,
+    // shadows), as its render target draws; the player's camera draws all of
+    // it, as the game's own view does.
+    let draws = stack_of
+        .filter(|e| floptle_core::active_camera(&ed.world) != Some(*e))
+        .and_then(|e| match ed.world.get::<Matter>(e) {
+            Some(Matter::Camera { draws, .. }) => Some(*draws),
+            _ => None,
+        })
+        .unwrap_or_default();
     let gpu = ed.gpu.take()?;
     let aspect = w as f32 / h as f32;
     // **Retro composites at the retro resolution and upscales**, exactly as the
@@ -172,6 +183,7 @@ pub(crate) fn render_frame_texture(
             // camera's picture keeps to the side cache, or it would forget
             // the props round the player.
             scatter_main: stack_of.is_none_or(|e| floptle_core::active_camera(&ed.world) == Some(e)),
+            draws,
             ..Default::default()
         },
     );
@@ -701,6 +713,53 @@ end
         // A corner is sky: the cube sits in the middle.
         let [r, g, b, _] = png.get_pixel(1, 1).0;
         assert!(r > 150 && g < 60 && b < 60, "the sky came out ({r}, {g}, {b}), not the shader's red");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A capture through another camera draws what that camera draws.**
+    /// A camera's switches (sky, terrain, fog, shadows) held for its render
+    /// target and were dropped by `camera.capture`, so a studio or minimap
+    /// camera that turned the sky off got it back in every picture. The side
+    /// camera, sky off, photographs the Skybox's plain grey; the player's
+    /// camera still draws the sky shader, as the game's own view does.
+    #[test]
+    fn a_capture_through_another_camera_draws_what_that_camera_draws() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let (asker, dir) = scene(&mut ed, "draws");
+        std::fs::write(dir.join("red.flsl"), "shader red {\n  stage sky\n  output color = vec3(1, 0, 0)\n}\n").unwrap();
+        ed.project_root = dir.clone();
+        let sky = ed.world.spawn();
+        ed.world.insert(sky, Transform::IDENTITY);
+        ed.world.insert(
+            sky,
+            Matter::Skybox {
+                color: [0.14; 3],
+                size: 500.0,
+                texture: None,
+                tint: [1.0; 3],
+                shader: Some(dir.join("red.flsl").to_string_lossy().into_owned()),
+                shader_params: Default::default(),
+            },
+        );
+        let side = ed
+            .world
+            .query::<Name>()
+            .find(|(_, n)| n.0 == "Side")
+            .map(|(e, _)| e)
+            .expect("the side camera");
+        if let Some(Matter::Camera { draws, .. }) = ed.world.get_mut::<Matter>(side) {
+            draws.sky = false;
+        }
+        frames(&mut ed, &dir, |ed| get::<mlua::String>(ed, asker, "front").is_some() && get::<mlua::String>(ed, asker, "side").is_some());
+        let front = get::<mlua::String>(&ed, asker, "front").expect("no PNG came back");
+        let front = image::load_from_memory_with_format(&front.as_bytes(), image::ImageFormat::Png).unwrap().to_rgba8();
+        let side = get::<mlua::String>(&ed, asker, "side").expect("no JPEG came back");
+        let side = image::load_from_memory_with_format(&side.as_bytes(), image::ImageFormat::Jpeg).unwrap().to_rgba8();
+        let [r, g, b, _] = front.get_pixel(1, 1).0;
+        assert!(r > 150 && g < 60 && b < 60, "the player's camera lost its sky: ({r}, {g}, {b})");
+        let [r, g, b, _] = side.get_pixel(2, 2).0;
+        // The Skybox's 0.14 grey is linear light: about 105 in the picture.
+        assert!((85..=125).contains(&r) && (r as i32 - g as i32).abs() < 25 && (r as i32 - b as i32).abs() < 25, "the side camera drew the sky it switched off: ({r}, {g}, {b})");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
