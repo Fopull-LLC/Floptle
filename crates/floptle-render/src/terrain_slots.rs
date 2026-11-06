@@ -64,7 +64,8 @@ pub struct TerrainSlotRaw {
     /// Classic specular override: rgb, w strength (w < 0 = inherit).
     pub specular: [f32; 4],
     /// Classic overrides: x shininess, y rim strength, z ambient (each < 0 =
-    /// inherit), w reserved.
+    /// inherit), w a pixel-art picture's own width in texels (0 = the
+    /// layer's), the grid a pixel border steps on.
     pub classic: [f32; 4],
     /// rgb rim colour, w wetness response (reserved; 1).
     pub rim_wet: [f32; 4],

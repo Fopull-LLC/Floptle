@@ -841,6 +841,33 @@ impl<'a> SettingsCtx<'a> {
         );
         row(
             ui,
+            "Terrain border",
+            Some("how a terrain palette slot meets its neighbours when it is first given a texture. \
+                  \"natural\": a 1 m blend that the two slots' heights decide, so sand fills the \
+                  cracks between cobbles (uses the slots' height maps). \"soft\": the narrow fade of \
+                  one triangle, which is how projects from before this setting drew. Each slot can \
+                  still be set on its own in the Terrain tab"),
+            |ui| {
+                use floptle_scene::TerrainBorderDoc as B;
+                let mut b = project.terrain_border_resolved();
+                egui::ComboBox::from_id_salt("project-terrain-border")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(match b {
+                        B::Natural => "natural",
+                        B::Soft => "soft",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut b, B::Natural, "natural");
+                        ui.selectable_value(&mut b, B::Soft, "soft");
+                    });
+                if b != project.terrain_border_resolved() {
+                    project.terrain_border = Some(b);
+                    out.save_project = true;
+                }
+            },
+        );
+        row(
+            ui,
             "Wheel friction",
             Some("how a wheel joint's wheel grips. \"once\": its tyre grips by its friction times \
                   how hard the ground presses on it, so a wheel of friction 0.6 drives at up to \

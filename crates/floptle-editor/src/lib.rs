@@ -1131,6 +1131,11 @@ struct EditorTabViewer<'a> {
     /// Per-slot anti-tiling: `[antitile, macro, macro size]` (`|antitile=`,
     /// `|macro=`, `|macrosize=`).
     terrain_tex_tile: &'a mut Vec<[f32; 3]>,
+    /// Per-slot border style and height blending (`|border=` and the rest).
+    terrain_tex_border: &'a mut Vec<crate::terrain_edit::SlotBorder>,
+    /// The project's border for a slot that comes into use with no settings
+    /// of its own (Project Settings ▸ Terrain border).
+    terrain_border_default: floptle_scene::TerrainBorderDoc,
     terrain_present: bool,
     /// Terrain stats for the tab: `(volumes, data chunks, resident bytes)`.
     terrain_stats: Option<(usize, usize, usize)>,
@@ -2855,6 +2860,14 @@ struct Editor {
     /// world units (`|macrosize=`, 0 = 60). All zero is the plain tile, as
     /// before. Short of the palette, a slot reads as all zero.
     terrain_tex_tile: Vec<[f32; 3]>,
+    /// Per palette slot, how it meets its neighbours: border style and
+    /// height blending (`|border=`, `|heightblend=` and the rest). Short of
+    /// the palette, the soft fade.
+    terrain_tex_border: Vec<crate::terrain_edit::SlotBorder>,
+    /// Per palette slot, a pixel-art picture's own width in texels (0 for a
+    /// smooth slot or one whose width is not known): the grid a pixel
+    /// border steps on.
+    terrain_slot_texels: Vec<u32>,
     /// Per palette slot, its surface maps (`|normal=`, `|orm=`, `|height=`).
     /// Short of the palette, a slot has none.
     terrain_tex_maps: Vec<crate::terrain_edit::SlotMaps>,

@@ -1796,7 +1796,115 @@ fn splat_slot_at(vi: u32, c: vec3<i32>) -> u32 {
 // DISTINCT slot's triplanar sample by its trilinear weight — smooth transitions
 // between ANY two slots, at any palette size. Fragments outside any resident
 // volume (a skirt sliver, an evicted terrain) fall back to the old behavior.
-fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) -> vec4<f32> {
+// A slot's height at `p`, from the alpha of its ORM-and-height layer (its
+// `|height=` map, or 0.5 where it has none), projected as its colour is but
+// without the hex taps: what the borders below weigh, not what is drawn.
+fn terrain_height(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, dpy_in: vec3<f32>) -> f32 {
+    let rec = slot_rec(slot);
+    if (slot < 0 || rec.layers.z == SLOT_NONE) {
+        return 0.5;
+    }
+    let scale = g.terrain_mask.y * terrain_slot_scale(slot);
+    let an = abs(normalize(n)) + vec3<f32>(0.0001);
+    let w = an / (an.x + an.y + an.z);
+    let nearest = (rec.flags.x & SLOT_NEAREST) != 0u;
+    let mips = (rec.flags.x & SLOT_MIPS) != 0u;
+    let dpx = select(vec3<f32>(0.0), dpx_in, mips) * scale;
+    let dpy = select(vec3<f32>(0.0), dpy_in, mips) * scale;
+    let ol = i32(rec.layers.z);
+    let hx = pal_read(nearest, p.zy * scale, ol, dpx.zy, dpy.zy).a;
+    let hy = pal_read(nearest, p.xz * scale, ol, dpx.xz, dpy.xz).a;
+    let hz = pal_read(nearest, p.xy * scale, ol, dpx.xy, dpy.xy).a;
+    return hx * w.x + hy * w.y + hz * w.z;
+}
+
+// Height-aware blending: given `t`, how far a border has come from `lo` to
+// `hi`, each slot pushes up by its height (centred on 0.5, times its
+// contrast, plus its bias) times the pair's height blend `k`, and the higher
+// one shows. `k` 0 is `t` as given. The sharper the larger `k`; `pixel` steps
+// rather than fading.
+fn terrain_height_t(lo: i32, hi: i32, t: f32, k: f32, pixel: bool, p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> f32 {
+    if (k <= 0.0) {
+        return t;
+    }
+    let rl = slot_rec(lo);
+    let rh = slot_rec(hi);
+    let h_lo = (terrain_height(lo, p, n, dpx, dpy) - 0.5) * rl.tile.w + rl.blend.w;
+    let h_hi = (terrain_height(hi, p, n, dpx, dpy) - 0.5) * rh.tile.w + rh.blend.w;
+    let diff = (t + h_hi * k) - ((1.0 - t) + h_lo * k);
+    if (pixel) {
+        return step(0.0, diff);
+    }
+    let s = 0.5 * (1.0 - min(k, 1.0)) + 0.02;
+    return smoothstep(-s, s, diff);
+}
+
+// The border between slots `lo` and `hi` (0-based) at a pixel the baked edge
+// distance `d` reaches, `dd` its change across the pixel: how far it has come
+// from `lo` to `hi`, 0 to 1. The slot with the wider blend decides the style,
+// its roughness and wobble (equal widths: `lo`):
+//  - soft (0): a fade the width `w` wide, broken up by world noise;
+//  - sharp (1): one pixel wide, anti-aliased, wobbled by `wobble` metres of
+//    noise `wobble size` across;
+//  - pixel (2): on the slot's texel grid, stepped, a dither of up to `dither`
+//    of the width breaking the line into texels.
+// Then the two slots' heights, when the pair blends by height.
+fn terrain_edge_t(lo: i32, hi: i32, d: f32, dd: vec2<f32>, w: f32, p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> f32 {
+    let rl = slot_rec(lo);
+    let rh = slot_rec(hi);
+    let rule = select(lo, hi, rh.blend.x > rl.blend.x);
+    let r = slot_rec(rule);
+    let style = r.flags.w;
+    let k = max(rl.blend.z, rh.blend.z);
+    var t = 0.0;
+    if (style == 1u) {
+        let ws = select(max(w, 0.05), r.border.y, r.border.y > 0.0);
+        let wob = (vnoise(p / ws) - 0.5) * r.border.x;
+        let e = max(abs(dd.x) + abs(dd.y), 1e-4);
+        t = smoothstep(-e, e, d + wob);
+    } else if (style == 2u) {
+        // The texel the pixel is in, on the slot's own grid, and the edge's
+        // distance there: what the whole texel shows.
+        // The art's own texels a tile when the slot knows them (a pixel-art
+        // picture is resized up into the palette's layer), else the layer's.
+        let art = select(f32(textureDimensions(terrain_pal).x), r.classic.w, r.classic.w > 0.0);
+        let texels = art * g.terrain_mask.y * terrain_slot_scale(rule);
+        let pc = (floor(p * texels) + vec3<f32>(0.5)) / texels;
+        // The distance's slope along the surface, from its change across the
+        // pixel and the position's.
+        let a11 = dot(dpx, dpx);
+        let a12 = dot(dpx, dpy);
+        let a22 = dot(dpy, dpy);
+        let det = a11 * a22 - a12 * a12;
+        var grad = vec3<f32>(0.0);
+        if (abs(det) > 1e-12) {
+            let a = (dd.x * a22 - dd.y * a12) / det;
+            let b = (dd.y * a11 - dd.x * a12) / det;
+            grad = dpx * a + dpy * b;
+        }
+        let dc = d + dot(grad, pc - p);
+        let an = abs(n);
+        var cell = vec2<f32>(pc.x, pc.y);
+        if (an.x >= an.y && an.x >= an.z) {
+            cell = pc.zy;
+        } else if (an.y >= an.z) {
+            cell = pc.xz;
+        }
+        let ci = vec2<i32>(floor(cell * texels));
+        let dither = (bayer4(vec2<u32>(bitcast<u32>(ci.x), bitcast<u32>(ci.y))) - 0.5) * r.border.z * w;
+        t = step(0.0, dc + dither);
+    } else {
+        let rough = clamp(max(rl.blend.y, rh.blend.y), 0.0, 1.0);
+        // Two octaves of world noise on the scale of the width, so a wide
+        // seam meanders widely and a narrow one in small steps.
+        let q = p / max(w, 0.05);
+        let nz = vnoise(q) * 0.65 + vnoise(q * 2.7 + vec3<f32>(17.0)) * 0.35 - 0.5;
+        t = smoothstep(-0.5 * w, 0.5 * w, d + nz * rough * 1.5 * w);
+    }
+    return terrain_height_t(lo, hi, t, k, style == 2u, p, n, dpx, dpy);
+}
+
+fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32, dd: vec2<f32>) -> vec4<f32> {
     let tint = in.vcolor.rgb;
     let av = in.vcolor.a * 255.0; // vertex slot: 1-based; 0 untextured, 255 legacy sentinel
     if (av < 0.5 || av > 254.5) {
@@ -1819,12 +1927,7 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
         if (lo >= 1u && hi >= 1u && hi <= 32u) {
             let w = max(slot_rec(i32(lo) - 1).blend.x, slot_rec(i32(hi) - 1).blend.x);
             if (w > 0.0) {
-                let rough = clamp(max(slot_rec(i32(lo) - 1).blend.y, slot_rec(i32(hi) - 1).blend.y), 0.0, 1.0);
-                // Two octaves of world noise on the scale of the width, so a
-                // wide seam meanders widely and a narrow one in small steps.
-                let q = in.lpos / max(w, 0.05);
-                let n = vnoise(q) * 0.65 + vnoise(q * 2.7 + vec3<f32>(17.0)) * 0.35 - 0.5;
-                let t = smoothstep(-0.5 * w, 0.5 * w, in.uv.x + n * rough * 1.5 * w);
+                let t = terrain_edge_t(i32(lo) - 1, i32(hi) - 1, in.uv.x, dd, w, in.lpos, in.lnorm, dpx, dpy);
                 var c = vec3<f32>(0.0);
                 var glow = 0.0;
                 if (t < 0.999) {
@@ -1914,7 +2017,20 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
         }
     }
     if (most > 0.0) {
-        let t = clamp((av - f32(pa)) / (f32(pb) - f32(pa)), 0.0, 1.0);
+        var t = clamp((av - f32(pa)) / (f32(pb) - f32(pa)), 0.0, 1.0);
+        // A border with no width takes its style across the triangle: sharp
+        // or pixel is a crisp line where the triangle is halfway between the
+        // two, and a pair that blends by height lets the higher one through.
+        if (pa > 0u) {
+            let ra = slot_rec(i32(pa) - 1);
+            let rb = slot_rec(i32(pb) - 1);
+            let style = select(ra.flags.w, rb.flags.w, rb.blend.x > ra.blend.x);
+            if (style != 0u) {
+                let e = max(aw / max(f32(pb) - f32(pa), 1.0), 1e-4);
+                t = smoothstep(0.5 - e, 0.5 + e, t);
+            }
+            t = terrain_height_t(i32(pa) - 1, i32(pb) - 1, t, max(ra.blend.z, rb.blend.z), style == 2u, in.lpos, in.lnorm, dpx, dpy);
+        }
         // Untextured (slot 0) blends toward the flat tint, as below.
         var ca = vec3<f32>(1.0);
         var ga = 0.0;
@@ -2069,6 +2185,9 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let tp_dpy = dpdy(in.lpos);
     let tp_aw = fwidth(in.vcolor.a * 255.0);
     let tp_ew = fwidth(in.uv.y);
+    // How the baked edge distance changes across the pixel, for the sharp
+    // and pixel borders.
+    let tp_dd = vec2<f32>(dpdx(in.uv.x), dpdy(in.uv.x));
     var tsplat_val = vec4<f32>(0.0);
     // The terrain Material's own values, which a palette slot without a
     // Material of its own shades with.
@@ -2076,7 +2195,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     TSB_SPEC = vec4<f32>(in.specular.rgb * in.specular.a, in.params.x);
     TSB_RIM = vec4<f32>(in.rim.rgb * in.params.y, in.params.w);
     if (terrain) {
-        tsplat_val = terrain_splat(in, tp_dpx, tp_dpy, tp_aw, tp_ew);
+        tsplat_val = terrain_splat(in, tp_dpx, tp_dpy, tp_aw, tp_ew, tp_dd);
     }
     // The palette slots' surface maps, where the terrain's blended slots
     // have any: their normal and their occlusion, roughness and metalness

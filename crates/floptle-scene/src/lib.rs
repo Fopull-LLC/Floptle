@@ -1534,6 +1534,19 @@ pub enum WheelFrictionDoc {
     Single,
 }
 
+/// How a terrain palette slot meets its neighbours when it comes into use
+/// with no border settings of its own.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TerrainBorderDoc {
+    /// The one-triangle fade, nothing else: how every slot started before
+    /// the setting, which a project from then keeps.
+    Soft,
+    /// A 1 m blend that the slots' heights decide: sand in the cracks,
+    /// grass between the stones. New projects start here.
+    #[default]
+    Natural,
+}
+
 /// How a script's screen draws (`draw.rect`, `draw.circle`, `draw.text`)
 /// stack within a frame.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -3316,6 +3329,11 @@ pub struct ProjectConfigDoc {
     /// [`TextOnTop`](ScreenDrawOrderDoc::TextOnTop).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_draw_order: Option<ScreenDrawOrderDoc>,
+    /// The border a palette slot takes when it comes into use; see
+    /// [`TerrainBorderDoc`]. `None` means the file predates the setting and
+    /// resolves to [`Soft`](TerrainBorderDoc::Soft).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terrain_border: Option<TerrainBorderDoc>,
     /// How wheels take their friction; see [`WheelFrictionDoc`]. `None` means
     /// the file predates the setting and resolves to
     /// [`Classic`](WheelFrictionDoc::Classic).
@@ -3415,6 +3433,7 @@ impl ProjectConfigDoc {
             wheel_friction: Some(WheelFrictionDoc::Single),
             terrain_shape: Some(TerrainShapeDoc::Natural),
             screen_draw_order: Some(ScreenDrawOrderDoc::CallOrder),
+            terrain_border: Some(TerrainBorderDoc::Natural),
             example_scripts: true,
             mixer: floptle_audio::MixerDesc::default(),
             bloom: false,
@@ -3487,6 +3506,13 @@ impl ProjectConfigDoc {
     /// the setting drew every text over every shape, and still does.
     pub fn screen_draw_order_resolved(&self) -> ScreenDrawOrderDoc {
         self.screen_draw_order.unwrap_or(ScreenDrawOrderDoc::TextOnTop)
+    }
+
+    /// The border this project's palette slots take when they come into
+    /// use. A project file from before the setting gave them the plain
+    /// fade, and still does.
+    pub fn terrain_border_resolved(&self) -> TerrainBorderDoc {
+        self.terrain_border.unwrap_or(TerrainBorderDoc::Soft)
     }
 
     /// How this project smooths its edges. A project file from before the

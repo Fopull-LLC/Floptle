@@ -94,6 +94,33 @@ Only ground blends. A layer one voxel under undug ground stays hidden, so the su
 
 A blend, with its noise, reaches at most 2.5 voxels to each side of the edge, which is 3.75 m on a 1.5 m voxel. A width that would reach further is narrowed to fit: at `rough` 0.5 that allows about 4.3 m on a 1.5 m voxel. A wider blend also makes the terrain's meshes a little slower to build, up to about 1.6 times at the widest. A palette with no blend widths costs nothing extra.
 
+### Border styles
+
+A slot's border can be drawn three ways (`|border=`), chosen by whichever of the two slots has the wider blend (the lower slot when they are equal):
+
+- **soft** (the default): the fade described above.
+- **sharp**: a crisp line one pixel wide, anti-aliased, for a hand-painted or cel look. `|wobble=` makes it meander by that many metres of noise, and `|wobblesize=` sets how wide that noise is (the blend width when left out).
+- **pixel**: a stepped line on the slot's own texel grid, with no anti-aliasing, for pixel-art ground. For a pixel-art picture (one set to *Pixelated*), the grid is the picture's own pixels, not the palette's layer size. `|dither=`, from 0 to 1, breaks the line into a 4×4 dither over that much of the width.
+
+A border with no width still takes its style: a sharp or pixel slot draws a crisp edge halfway across the triangle between the two.
+
+### Blending by height
+
+With a height map on a slot (`|height=`, see Surface maps), `|heightblend=` from 0 to 1 lets the slots' heights decide which one shows across the border instead of a plain fade. The higher one comes through, so sand fills the cracks between cobbles and grass grows up between stones. The closer to 1, the crisper the patches.
+
+- `|heightbias=`, from -1 to 1, pushes a slot up or down, so snow with a bias of 0.3 settles over rock first.
+- `|contrast=` (1 by default) is how strongly the slot's height map counts. At 0 only the bias does.
+- A slot with no height map counts as half height.
+
+```
+textures/cobbles.png|blend=1|heightblend=0.8|height=textures/cobbles_h.png
+textures/sand.png|blend=1|heightblend=0.8|heightbias=-0.2
+textures/moss.png|blend=0.5|border=sharp|wobble=0.15
+textures/grass_pixel.png|blend=1|border=pixel|dither=0.4
+```
+
+Projects keep their soft borders exactly as they were until a slot sets any of these.
+
 ## Hiding a texture's repeat
 
 A ground texture usually repeats every couple of metres, which looks right up close. From 30 m up, though, the repeat shows as a grid. Two more settings per slot in the Terrain tab break it up. Both are off by default, so a palette that doesn't use them looks exactly as it did.

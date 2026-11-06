@@ -2302,6 +2302,7 @@ impl Editor {
                         blend: self.terrain_tex_blend.get(i).copied().unwrap_or(0.0),
                         rough: self.terrain_tex_rough.get(i).copied().unwrap_or(0.5),
                         tile: self.terrain_tex_tile.get(i).copied().unwrap_or([0.0; 3]),
+                        border: self.terrain_tex_border.get(i).copied().unwrap_or_default(),
                     };
                     line.push_str(&flags.suffix());
                     if let Some(maps) = self.terrain_tex_maps.get(i) {

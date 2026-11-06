@@ -171,6 +171,8 @@ impl EditorTabViewer<'_> {
         let terrain_tex_blend = &mut *self.terrain_tex_blend;
         let terrain_tex_rough = &mut *self.terrain_tex_rough;
         let terrain_tex_tile = &mut *self.terrain_tex_tile;
+        let terrain_tex_border = &mut *self.terrain_tex_border;
+        let terrain_border_default = self.terrain_border_default;
         let materials = self.materials;
         let asset_tree = self.asset_tree;
         let project_root = self.project_root;
@@ -284,6 +286,9 @@ impl EditorTabViewer<'_> {
             if terrain_tex_tile.len() < terrain_textures.len() {
                 terrain_tex_tile.resize(terrain_textures.len(), [0.0; 3]);
             }
+            if terrain_tex_border.len() < terrain_textures.len() {
+                terrain_tex_border.resize(terrain_textures.len(), crate::terrain_edit::SlotBorder::default());
+            }
             // Every slot setting is saved with the scene, so any change to one
             // leaves the scene unsaved; compared as a whole so a control added
             // later is covered without remembering to.
@@ -294,6 +299,7 @@ impl EditorTabViewer<'_> {
                 terrain_tex_blend.clone(),
                 terrain_tex_rough.clone(),
                 terrain_tex_tile.clone(),
+                terrain_tex_border.clone(),
             );
             for (slot, tex) in terrain_textures.iter_mut().enumerate().take(visible) {
                 ui.horizontal_wrapped(|ui| {
@@ -410,6 +416,49 @@ impl EditorTabViewer<'_> {
                                  a ragged one.",
                             );
                         }
+                        // How the border is drawn, and whether the slots'
+                        // heights decide it. Read every frame, like blend.
+                        let b = &mut terrain_tex_border[slot];
+                        egui::ComboBox::from_id_salt(("terrain-border", slot))
+                            .width(70.0)
+                            .selected_text(match b.style {
+                                1 => "sharp",
+                                2 => "pixel",
+                                _ => "soft",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut b.style, 0, "soft");
+                                ui.selectable_value(&mut b.style, 1, "sharp");
+                                ui.selectable_value(&mut b.style, 2, "pixel");
+                            })
+                            .response
+                            .on_hover_text(
+                                "how this slot's border is drawn where it is the wider of the \
+                                 two: soft fades over the blend width; sharp is a crisp line \
+                                 one pixel wide (hand-painted); pixel steps on the texture's own \
+                                 pixels (pixel art).",
+                            );
+                        if b.style == 1 {
+                            ui.add(egui::DragValue::new(&mut b.wobble).speed(0.01).range(0.0..=16.0).prefix("wobble ").suffix(" m"))
+                                .on_hover_text("how far, in metres, the sharp line meanders.");
+                        }
+                        if b.style == 2 {
+                            ui.add(egui::DragValue::new(&mut b.dither).speed(0.01).range(0.0..=1.0).prefix("dither "))
+                                .on_hover_text("how much of the blend width the pixel line dithers across, 0 to 1.");
+                        }
+                        ui.add(egui::DragValue::new(&mut b.height_blend).speed(0.01).range(0.0..=1.0).prefix("height "))
+                            .on_hover_text(
+                                "how much the two slots' heights decide which shows across the \
+                                 border, 0 to 1: the higher one comes through, so sand fills the \
+                                 cracks between cobbles. Uses the slot's height map; a slot with \
+                                 none counts as half height.",
+                            );
+                        if b.height_blend > 0.0 {
+                            ui.add(egui::DragValue::new(&mut b.height_bias).speed(0.01).range(-1.0..=1.0).prefix("bias "))
+                                .on_hover_text("pushes this slot up (positive) or down across a height-blended border.");
+                            ui.add(egui::DragValue::new(&mut b.contrast).speed(0.02).range(0.0..=8.0).prefix("contrast "))
+                                .on_hover_text("how strongly this slot's height map counts; 0 leaves only the bias.");
+                        }
                         // What breaks the repeat up from far off. Read every
                         // frame, like blend, so dragging them shows at once.
                         let tile = &mut terrain_tex_tile[slot];
@@ -449,9 +498,18 @@ impl EditorTabViewer<'_> {
                     terrain_tex_blend.clone(),
                     terrain_tex_rough.clone(),
                     terrain_tex_tile.clone(),
+                    terrain_tex_border.clone(),
                 )
             {
                 cmd.terrain_palette_edited = true;
+            }
+            // A slot that has just come into use, with no border settings of
+            // its own, takes the project's border.
+            for slot in 0..terrain_textures.len() {
+                let fresh = before.0.get(slot).is_some_and(String::is_empty) && !terrain_textures[slot].is_empty();
+                if fresh && terrain_tex_blend[slot] == 0.0 && terrain_tex_border[slot] == crate::terrain_edit::SlotBorder::default() {
+                    crate::terrain_edit::apply_border_default(terrain_border_default, &mut terrain_tex_blend[slot], &mut terrain_tex_border[slot]);
+                }
             }
             ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture. ▦ sets how often a slot's texture repeats, so a fine texture and a coarse one can share a palette. Blend sets how wide a slot fades into its neighbours. Antitile and macro hide a texture's repeat from far off.");
         }

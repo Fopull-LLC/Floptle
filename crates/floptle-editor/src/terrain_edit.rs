@@ -278,7 +278,9 @@ fn empty_proxy() -> floptle_field::BakedSdf {
 /// mean colour (what an impostor is painted with).
 /// One palette slot read on the worker: its index, its pictures, and its
 /// mean colour.
-pub(crate) type PaletteRead = (usize, floptle_render::SlotPictures, [f32; 3]);
+/// One slot read by the palette worker: its index, its pictures, its mean
+/// colour, and a pixel-art picture's own width in texels (0 when not known).
+pub(crate) type PaletteRead = (usize, floptle_render::SlotPictures, [f32; 3], u32);
 
 /// An occluder bake made off the frame: the bake, its model's triangles, and
 /// the milliseconds it took.
@@ -1300,9 +1302,48 @@ fn edge_reach_for(blend: &[f32], rough: &[f32], voxel: f32) -> u8 {
     ((need / voxel.max(1e-3) + 0.5).ceil() as u8).clamp(1, MAX_EDGE_REACH)
 }
 
+/// How a slot meets its neighbours: the border's style and its height
+/// blending (`terrain_edge_t` in `raster.wgsl`). The default is the soft
+/// fade every terrain drew before, with no height in it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SlotBorder {
+    /// `0` soft (a fade the blend width wide), `1` sharp (one pixel, wobbled),
+    /// `2` pixel (on the slot's texel grid, stepped): `|border=`.
+    pub style: u32,
+    /// Metres of noise a sharp border meanders by (`|wobble=`), and how wide
+    /// that noise is (`|wobblesize=`, 0 = the blend width).
+    pub wobble: f32,
+    pub wobble_size: f32,
+    /// How much of the width a pixel border dithers across, 0..1 (`|dither=`).
+    pub dither: f32,
+    /// How much the slots' heights decide the border, 0..1 (`|heightblend=`),
+    /// this slot's push up or down (`|heightbias=`, -1..1) and how strongly
+    /// its height map counts (`|contrast=`, 1 as drawn).
+    pub height_blend: f32,
+    pub height_bias: f32,
+    pub contrast: f32,
+}
+
+impl Default for SlotBorder {
+    fn default() -> Self {
+        Self { style: 0, wobble: 0.0, wobble_size: 0.0, dither: 0.0, height_blend: 0.0, height_bias: 0.0, contrast: 1.0 }
+    }
+}
+
+/// What a slot that comes into use takes from the project's border
+/// (Project Settings ▸ Terrain border): nothing for `Soft`, and for
+/// `Natural` a 1 m blend whose slots' heights decide it.
+pub(crate) fn apply_border_default(d: floptle_scene::TerrainBorderDoc, blend: &mut f32, border: &mut SlotBorder) {
+    if d == floptle_scene::TerrainBorderDoc::Natural {
+        *blend = 1.0;
+        border.height_blend = 0.6;
+    }
+}
+
 /// One palette slot's settings, as its line in the palette file carries them
 /// after the path: `|glow`, `|scale=`, `|blend=`, `|rough=`, `|antitile=`,
-/// `|macro=`, `|macrosize=`. The default is what a bare path means.
+/// `|macro=`, `|macrosize=`, and the border's ([`SlotBorder`]). The default
+/// is what a bare path means.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PaletteFlags {
     pub glow: bool,
@@ -1311,11 +1352,12 @@ pub(crate) struct PaletteFlags {
     pub rough: f32,
     /// `[antitile, macro, macro size]`, as `terrain_tex_tile`.
     pub tile: [f32; 3],
+    pub border: SlotBorder,
 }
 
 impl Default for PaletteFlags {
     fn default() -> Self {
-        Self { glow: false, scale: 1.0, blend: 0.0, rough: 0.5, tile: [0.0; 3] }
+        Self { glow: false, scale: 1.0, blend: 0.0, rough: 0.5, tile: [0.0; 3], border: SlotBorder::default() }
     }
 }
 
@@ -1348,6 +1390,24 @@ impl PaletteFlags {
                 line.push_str(&format!("|macrosize={size}"));
             }
         }
+        let b = &self.border;
+        match b.style {
+            1 => line.push_str("|border=sharp"),
+            2 => line.push_str("|border=pixel"),
+            _ => {}
+        }
+        for (key, v, default) in [
+            ("wobble", b.wobble, 0.0),
+            ("wobblesize", b.wobble_size, 0.0),
+            ("dither", b.dither, 0.0),
+            ("heightblend", b.height_blend, 0.0),
+            ("heightbias", b.height_bias, 0.0),
+            ("contrast", b.contrast, 1.0),
+        ] {
+            if (v - default).abs() > 1e-4 {
+                line.push_str(&format!("|{key}={v}"));
+            }
+        }
         line
     }
 
@@ -1374,6 +1434,24 @@ impl PaletteFlags {
                 f.tile[2] = v.parse().ok().filter(|x: &f32| x.is_finite() && *x > 0.0).unwrap_or(0.0);
             } else if let Some(v) = flag.strip_prefix("macro=") {
                 f.tile[1] = unit(v);
+            } else if let Some(v) = flag.strip_prefix("border=") {
+                f.border.style = match v {
+                    "sharp" => 1,
+                    "pixel" => 2,
+                    _ => 0,
+                };
+            } else if let Some(v) = flag.strip_prefix("wobblesize=") {
+                f.border.wobble_size = v.parse().ok().filter(|x: &f32| x.is_finite() && *x >= 0.0).unwrap_or(0.0).min(64.0);
+            } else if let Some(v) = flag.strip_prefix("wobble=") {
+                f.border.wobble = v.parse().ok().filter(|x: &f32| x.is_finite() && *x >= 0.0).unwrap_or(0.0).min(16.0);
+            } else if let Some(v) = flag.strip_prefix("dither=") {
+                f.border.dither = unit(v);
+            } else if let Some(v) = flag.strip_prefix("heightblend=") {
+                f.border.height_blend = unit(v);
+            } else if let Some(v) = flag.strip_prefix("heightbias=") {
+                f.border.height_bias = v.parse().ok().filter(|x: &f32| x.is_finite()).unwrap_or(0.0).clamp(-1.0, 1.0);
+            } else if let Some(v) = flag.strip_prefix("contrast=") {
+                f.border.contrast = v.parse().ok().filter(|x: &f32| x.is_finite()).unwrap_or(1.0).clamp(0.0, 8.0);
             }
         }
         f
@@ -1587,7 +1665,13 @@ impl Editor {
                 s.tint_scale[3] = scale[i / 4][i % 4];
                 s.blend[0] = blend[i / 4][i % 4];
                 s.blend[1] = rough[i / 4][i % 4];
-                s.tile = [tile[i][0], tile[i][1], tile[i][2], 1.0];
+                let b = self.terrain_tex_border.get(i).copied().unwrap_or_default();
+                s.tile = [tile[i][0], tile[i][1], tile[i][2], b.contrast];
+                s.blend[2] = b.height_blend;
+                s.blend[3] = b.height_bias;
+                s.border = [b.wobble, b.wobble_size, b.dither, 0.0];
+                s.flags[3] = b.style;
+                s.classic[3] = self.terrain_slot_texels.get(i).copied().unwrap_or(0) as f32;
                 for (mask, f) in [(mips, flag::MIPS), (nearest, flag::NEAREST), (self.terrain_glow_mask, flag::GLOW)] {
                     if mask & bit != 0 {
                         s.flags[0] |= f;
@@ -5352,6 +5436,7 @@ impl Editor {
                 let mut blends: Vec<f32> = Vec::new();
                 let mut roughs: Vec<f32> = Vec::new();
                 let mut tiles: Vec<[f32; 3]> = Vec::new();
+                let mut borders: Vec<SlotBorder> = Vec::new();
                 let mut maps: Vec<SlotMaps> = Vec::new();
                 // One line per slot, `path` plus zero or more `|flag` suffixes
                 // (`PaletteFlags`).
@@ -5374,6 +5459,7 @@ impl Editor {
                             glow |= 1 << i.min(31);
                         }
                         tiles.push(f.tile);
+                        borders.push(f.border);
                         scales.push(f.scale);
                         blends.push(f.blend);
                         roughs.push(f.rough);
@@ -5385,6 +5471,7 @@ impl Editor {
                 blends.resize(slots, 0.0);
                 roughs.resize(slots, 0.5);
                 tiles.resize(slots, [0.0; 3]);
+                borders.resize(slots, SlotBorder::default());
                 maps.resize(slots, SlotMaps::default());
                 self.terrain_tex_maps = maps;
                 let mut materials = materials;
@@ -5395,6 +5482,7 @@ impl Editor {
                 self.terrain_tex_blend = blends;
                 self.terrain_tex_rough = roughs;
                 self.terrain_tex_tile = tiles;
+                self.terrain_tex_border = borders;
                 self.terrain_glow_mask = glow;
                 self.terrain_textures_dirty = true;
             }
@@ -5776,15 +5864,43 @@ mod tests {
     /// before anti-tiling wrote; an older line reads with anti-tiling off;
     /// and a flag this editor doesn't know is passed over, not glued to the
     /// path.
+    /// **A new project's slots come into use with the natural border; an
+    /// old project's keep the plain fade.** A project file without the
+    /// setting reads as soft, so a slot given its first texture there is as
+    /// it always was; a new project's takes a 1 m blend its heights decide.
+    #[test]
+    fn a_new_projects_slots_take_the_natural_border_and_old_ones_do_not() {
+        use floptle_scene::{ProjectConfigDoc, TerrainBorderDoc};
+        let old: ProjectConfigDoc = ron::from_str("(name: \"old\")").unwrap();
+        assert_eq!(old.terrain_border_resolved(), TerrainBorderDoc::Soft, "a project from before the setting is soft");
+        assert_eq!(ProjectConfigDoc::default().terrain_border_resolved(), TerrainBorderDoc::Natural, "a new project is natural");
+        let (mut blend, mut border) = (0.0, super::SlotBorder::default());
+        super::apply_border_default(old.terrain_border_resolved(), &mut blend, &mut border);
+        assert_eq!((blend, border), (0.0, super::SlotBorder::default()), "an old project's slot changed");
+        super::apply_border_default(TerrainBorderDoc::Natural, &mut blend, &mut border);
+        assert_eq!(blend, 1.0);
+        assert!((border.height_blend - 0.6).abs() < 1e-6);
+    }
+
     #[test]
     fn a_palette_slots_flags_round_trip_and_defaults_write_nothing() {
         use super::PaletteFlags;
         let parse = |line: &str| PaletteFlags::parse(line.split('|').skip(1));
         assert_eq!(PaletteFlags::default().suffix(), "");
-        let all = PaletteFlags { glow: true, scale: 2.5, blend: 3.0, rough: 0.8, tile: [0.6, 0.4, 120.0] };
+        let all = PaletteFlags { glow: true, scale: 2.5, blend: 3.0, rough: 0.8, tile: [0.6, 0.4, 120.0], ..Default::default() };
         let line = format!("textures/moss.png{}", all.suffix());
         assert_eq!(line, "textures/moss.png|glow|scale=2.5|blend=3|rough=0.8|antitile=0.6|macro=0.4|macrosize=120");
         assert_eq!(parse(&line), all);
+        // The border: its style and every knob, round trip.
+        let border = PaletteFlags {
+            blend: 1.0,
+            border: super::SlotBorder { style: 2, wobble: 0.3, wobble_size: 4.0, dither: 0.5, height_blend: 0.8, height_bias: -0.2, contrast: 2.0 },
+            ..Default::default()
+        };
+        assert_eq!(border.suffix(), "|blend=1|border=pixel|wobble=0.3|wobblesize=4|dither=0.5|heightblend=0.8|heightbias=-0.2|contrast=2");
+        assert_eq!(parse(&format!("x.png{}", border.suffix())), border);
+        assert_eq!(parse("x.png|border=sharp").border.style, 1);
+        assert_eq!(parse("x.png|border=lumpy").border.style, 0, "an unknown style is the soft fade");
         // Anti-tiling alone; the macro size is written only with a macro.
         let anti = PaletteFlags { tile: [1.0, 0.0, 80.0], ..Default::default() };
         assert_eq!(anti.suffix(), "|antitile=1");

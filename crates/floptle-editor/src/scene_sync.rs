@@ -277,11 +277,16 @@ impl Editor {
                     }
                 })
                 .collect();
+            // A pixel-art slot's own texel grid, for the pixel border, comes
+            // with its picture from the worker (`PaletteRead`); until then the
+            // layer's.
+            self.terrain_slot_texels = vec![0; slots.len()];
             let surfaced = slots.iter().any(|s| s.maps.iter().any(Option::is_some));
             let bit = |i: usize, has: bool| if has { 1u32 << i } else { 0 };
             self.terrain_surface_bits = [
                 slots.iter().enumerate().map(|(i, s)| bit(i, s.maps[0].is_some())).fold(0, |a, b| a | b),
-                slots.iter().enumerate().map(|(i, s)| bit(i, s.maps[1].is_some())).fold(0, |a, b| a | b),
+                // The ORM-and-height layer: either map makes one.
+                slots.iter().enumerate().map(|(i, s)| bit(i, s.maps[1].is_some() || s.maps[2].is_some())).fold(0, |a, b| a | b),
             ];
             // What the ground shows until each picture lands: its cached
             // mean, the mean it last had, or mid grey; nothing at all white.
@@ -339,7 +344,10 @@ impl Editor {
                         size,
                     );
                     // A newer list took over: stop reading for this one.
-                    if tx.send((i, pictures, mean)).is_err() {
+                    // A pixel-art picture's own width: the grid a pixel
+                    // border steps on, not the layer it was resized into.
+                    let texels = if s.nearest { s.colour.as_deref().and_then(png_width).unwrap_or(0) } else { 0 };
+                    if tx.send((i, pictures, mean, texels)).is_err() {
                         return;
                     }
                 }
@@ -364,13 +372,16 @@ impl Editor {
         self.terrain_palette_landed_last = landed.len();
         if let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_ref()) {
             let tex = raster.terrain_palette_texture();
-            for (i, pictures, _) in &landed {
+            for (i, pictures, _, _) in &landed {
                 floptle_render::terrain_palette::write_slot(gpu, tex, *i as u32, pictures);
             }
         }
-        for (i, _, mean) in landed {
+        for (i, _, mean, texels) in landed {
             if let Some(m) = self.terrain_palette_landing.get_mut(i) {
                 *m = mean;
+            }
+            if let Some(t) = self.terrain_slot_texels.get_mut(i) {
+                *t = texels;
             }
         }
         if done {
@@ -663,6 +674,17 @@ pub(crate) fn palette_slots_per_frame(size: u32) -> usize {
         257..=512 => 2,
         _ => 1,
     }
+}
+
+/// A PNG's width from its header, or `None` for anything else: what a
+/// pixel-art slot's texel grid is (`terrain_slot_texels`).
+fn png_width(file: &std::path::Path) -> Option<u32> {
+    if !file.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
+        return None;
+    }
+    let head = floptle_vfs::read(file).ok()?;
+    (head.len() >= 24 && &head[1..4] == b"PNG" && &head[12..16] == b"IHDR")
+        .then(|| u32::from_be_bytes([head[16], head[17], head[18], head[19]]))
 }
 
 #[cfg(test)]
@@ -1004,6 +1026,123 @@ mod shadow_atlas_tests {
         // here), so half a metre is crisper than that and three is wider.
         assert!(narrow * 3 < none * 2, "a 0.5 m blend mixes {narrow} pixels against {none} with none: {counts:?}");
         assert!(wide > narrow, "a 3 m blend mixes no more than a 0.5 m one: {counts:?}");
+    }
+
+    /// **A border takes its slot's style, and height decides who shows
+    /// (stage 2).** The dug pit's rim, red ground over blue subsoil, a 3 m
+    /// blend, from above:
+    ///  - soft (as before) mixes the two across the band;
+    ///  - sharp is a crisp line, a small part of soft's mixed pixels;
+    ///  - pixel steps on the texel grid: as crisp, and not the same picture;
+    ///  - a bumpy height map on the red ground with height blending makes
+    ///    the band pure red and blue patches rather than a fade;
+    ///  - a bias up on the blue gives blue more of the picture.
+    ///
+    /// `FLOPTLE_BORDER_PNG=<dir>` writes the pictures.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn a_border_takes_its_style_and_height_decides_who_shows() {
+        use crate::terrain_edit::SlotBorder;
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_border_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
+        for (name, c) in [("red", [200u8, 40, 40, 255]), ("blue", [40, 40, 200, 255])] {
+            let tex = floptle_render::TextureData { pixels: c.repeat(16 * 16), width: 16, height: 16 };
+            std::fs::write(dir.join(format!("textures/{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        }
+        // Bumps: a checker of high and low, four squares a tile.
+        let mut bumps = Vec::with_capacity(16 * 16 * 4);
+        for i in 0..16 * 16 {
+            let v = if ((i % 16) / 4 + (i / 16) / 4) % 2 == 0 { 255 } else { 0 };
+            bumps.extend_from_slice(&[v, v, v, 255]);
+        }
+        let tex = floptle_render::TextureData { pixels: bumps, width: 16, height: 16 };
+        std::fs::write(dir.join("textures/bumps.png"), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        ed.project_root = dir.clone();
+        ed.terrain_textures = vec!["textures/red.png".into(), "textures/red.png".into(), "textures/blue.png".into()];
+        ed.terrain_tex_maps = vec![
+            crate::terrain_edit::SlotMaps { height: "textures/bumps.png".into(), ..Default::default() },
+            crate::terrain_edit::SlotMaps { height: "textures/bumps.png".into(), ..Default::default() },
+            crate::terrain_edit::SlotMaps::default(),
+        ];
+        ed.terrain_textures_dirty = true;
+        for _ in 0..20_000 {
+            ed.sync_terrain_palette(false);
+            if ed.terrain_palette_job.is_none() && !ed.terrain_textures_dirty {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 8,
+            radius: 120.0,
+            voxel: 1.5,
+            relief: 2.0,
+            cave_depth: 0.0,
+            subsoil_depth: 1.5,
+            subsoil: floptle_field::procgen::LayerPaint { slot: 3, color: [1.0; 3] },
+            ..Default::default()
+        });
+        let top = field.raycast(Vec3::new(0.0, 250.0, 0.0), Vec3::NEG_Y, 250.0).unwrap();
+        for k in 0..4 {
+            field.sculpt(floptle_field::Brush::Lower, top - Vec3::Y * (k as f32 * 0.8), 5.0, 1.0, Default::default());
+        }
+        add_body(&mut ed, 1, DVec3::ZERO, &field);
+        settle(&mut ed);
+        let sun = ed.world.spawn();
+        ed.world.insert(sun, Transform { rotation: floptle_core::math::Quat::from_rotation_x(-1.2), ..Transform::IDENTITY });
+        ed.world.insert(sun, floptle_core::Light { intensity: 1.0, shadows: false, ..Default::default() });
+        ed.camera.position = DVec3::new(top.x as f64, top.y as f64 + 22.0, top.z as f64 + 0.5);
+        ed.camera.pitch = -1.5;
+        ed.camera.yaw = 0.0;
+        let (w, h) = (320u32, 240u32);
+        // Both slots' borders the same; the subsoil's bias apart.
+        let shoot = |ed: &mut crate::Editor, b: SlotBorder, blue_bias: f32| {
+            ed.terrain_tex_blend = vec![3.0, 3.0, 3.0];
+            ed.terrain_tex_rough = vec![0.5; 3];
+            ed.terrain_tex_border = vec![b, b, SlotBorder { height_bias: blue_bias, ..b }];
+            let at = ed.camera.position;
+            ed.terrain_gpu_dirty = true;
+            settle(ed);
+            ed.settle_terrain_meshes(at, std::time::Duration::from_secs(60));
+            let cam = ed.camera.render_camera();
+            crate::shot::render_frame_pixels(ed, &cam, None, w, h, !0, false).expect("a frame")
+        };
+        let soft = shoot(&mut ed, SlotBorder::default(), 0.0);
+        let sharp = shoot(&mut ed, SlotBorder { style: 1, ..Default::default() }, 0.0);
+        let pixel = shoot(&mut ed, SlotBorder { style: 2, ..Default::default() }, 0.0);
+        let height = shoot(&mut ed, SlotBorder { height_blend: 0.9, ..Default::default() }, 0.0);
+        let biased = shoot(&mut ed, SlotBorder { height_blend: 0.9, ..Default::default() }, 0.6);
+        // The same height blend with every height map's contrast at nothing:
+        // what the bumps themselves add.
+        let flat = shoot(&mut ed, SlotBorder { height_blend: 0.9, contrast: 0.0, ..Default::default() }, 0.0);
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Ok(out) = std::env::var("FLOPTLE_BORDER_PNG") {
+            for (name, px) in [("soft", &soft), ("sharp", &sharp), ("pixel", &pixel), ("height", &height), ("biased", &biased)] {
+                let tex = floptle_render::TextureData { pixels: px.clone(), width: w, height: h };
+                std::fs::write(std::path::Path::new(&out).join(format!("border_{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+            }
+        }
+        // Neither the red ground nor the blue subsoil but a mix; and blue.
+        let mixed = |px: &[u8]| {
+            px.as_chunks::<4>().0.iter().filter(|p| {
+                let (r, b) = (p[0] as f32, p[2] as f32);
+                r.max(b) > 30.0 && r / b.max(1.0) > 0.45 && r / b.max(1.0) < 2.2
+            }).count()
+        };
+        let blue = |px: &[u8]| px.as_chunks::<4>().0.iter().filter(|p| p[2] as f32 > 2.2 * p[0].max(1) as f32).count();
+        let m = [mixed(&soft), mixed(&sharp), mixed(&pixel), mixed(&height), mixed(&biased)];
+        assert!(m[0] > 1000, "the fixture: a soft 3 m border should mix a band ({m:?})");
+        assert!(blue(&sharp) > 1000 && blue(&sharp) < (w * h) as usize - 1000, "the fixture: the sharp picture shows both slots");
+        assert!(m[1] * 5 < m[0], "a sharp border mixes {} pixels against soft's {} ({m:?})", m[1], m[0]);
+        assert!(m[2] * 5 < m[0], "a pixel border mixes {} pixels against soft's {} ({m:?})", m[2], m[0]);
+        let differs = pixel.as_chunks::<4>().0.iter().zip(sharp.as_chunks::<4>().0).filter(|(a, b)| a[0].abs_diff(b[0]) > 60).count();
+        assert!(differs > 50, "the pixel border draws the same picture as the sharp one ({differs} pixels differ)");
+        assert!(m[3] * 2 < m[0], "height blending mixes {} pixels against the plain fade's {} ({m:?})", m[3], m[0]);
+        assert!(blue(&biased) > blue(&height) + 200, "a bias up on the blue gave it {} pixels against {} without", blue(&biased), blue(&height));
+        let bumps = height.as_chunks::<4>().0.iter().zip(flat.as_chunks::<4>().0).filter(|(a, b)| a[2].abs_diff(b[2]) > 60).count();
+        assert!(bumps > 50, "the red ground's height map changed {bumps} pixels of the border: it is not being read");
     }
 
     /// **Up close, a blend between two slots shows only those two.** A
