@@ -921,6 +921,32 @@ impl<'a> SettingsCtx<'a> {
                 ui.weak("takes effect on the next Play");
             },
         );
+        row(
+            ui,
+            "Screen draw order",
+            Some("how draw.rect, draw.circle and draw.text stack within a frame. \"call order\": \
+                  in the order the script makes them, so a panel drawn after a label covers it. \
+                  \"text on top\": every text over every shape, whatever the order, which is how \
+                  projects from before this setting drew"),
+            |ui| {
+                use floptle_scene::ScreenDrawOrderDoc as D;
+                let mut d = project.screen_draw_order_resolved();
+                egui::ComboBox::from_id_salt("project-screen-draw-order")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(match d {
+                        D::CallOrder => "call order",
+                        D::TextOnTop => "text on top",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut d, D::CallOrder, "call order");
+                        ui.selectable_value(&mut d, D::TextOnTop, "text on top");
+                    });
+                if d != project.screen_draw_order_resolved() {
+                    project.screen_draw_order = Some(d);
+                    out.save_project = true;
+                }
+            },
+        );
     }
 
     fn settings_rendering(&mut self, ui: &mut egui::Ui, project: &mut floptle_scene::ProjectConfigDoc, out: &mut SettingsOut) {

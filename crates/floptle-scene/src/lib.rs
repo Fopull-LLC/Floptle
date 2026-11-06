@@ -1534,6 +1534,19 @@ pub enum WheelFrictionDoc {
     Single,
 }
 
+/// How a script's screen draws (`draw.rect`, `draw.circle`, `draw.text`)
+/// stack within a frame.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScreenDrawOrderDoc {
+    /// In the order the script made them: a rect drawn after a text covers
+    /// it. New projects start here.
+    #[default]
+    CallOrder,
+    /// Every text over every shape, whatever the order. How screen draws
+    /// stacked before the setting, which a project from then keeps.
+    TextOnTop,
+}
+
 /// How the terrain's dug, raised and sculpted ground is drawn.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TerrainShapeDoc {
@@ -3298,6 +3311,11 @@ pub struct ProjectConfigDoc {
     /// [`Faceted`](TerrainShapeDoc::Faceted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terrain_shape: Option<TerrainShapeDoc>,
+    /// How screen draws stack; see [`ScreenDrawOrderDoc`]. `None` means the
+    /// file predates the setting and resolves to
+    /// [`TextOnTop`](ScreenDrawOrderDoc::TextOnTop).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_draw_order: Option<ScreenDrawOrderDoc>,
     /// How wheels take their friction; see [`WheelFrictionDoc`]. `None` means
     /// the file predates the setting and resolves to
     /// [`Classic`](WheelFrictionDoc::Classic).
@@ -3396,6 +3414,7 @@ impl ProjectConfigDoc {
             antialias: Some(AntialiasDoc::Fxaa),
             wheel_friction: Some(WheelFrictionDoc::Single),
             terrain_shape: Some(TerrainShapeDoc::Natural),
+            screen_draw_order: Some(ScreenDrawOrderDoc::CallOrder),
             example_scripts: true,
             mixer: floptle_audio::MixerDesc::default(),
             bloom: false,
@@ -3462,6 +3481,12 @@ impl ProjectConfigDoc {
     /// from before the setting drew it faceted, and still does.
     pub fn terrain_shape_resolved(&self) -> TerrainShapeDoc {
         self.terrain_shape.unwrap_or(TerrainShapeDoc::Faceted)
+    }
+
+    /// How this project stacks its screen draws. A project file from before
+    /// the setting drew every text over every shape, and still does.
+    pub fn screen_draw_order_resolved(&self) -> ScreenDrawOrderDoc {
+        self.screen_draw_order.unwrap_or(ScreenDrawOrderDoc::TextOnTop)
     }
 
     /// How this project smooths its edges. A project file from before the

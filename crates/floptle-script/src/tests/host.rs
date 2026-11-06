@@ -2193,3 +2193,43 @@ fn scroll_to_leaves_its_ask_on_the_view() {
     assert!(said.iter().any(|l| l.contains("middle") && l.contains("nearest")), "{said:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Screen draws carry one count across rects, circles and text, in the
+/// order the script made them, so the engine can stack them that way.
+#[test]
+fn screen_draws_are_numbered_in_call_order() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_draw_seq_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "hud",
+        "function update()\n\
+           draw.text(10, 10, 'a', 16, 1, 1, 1)\n\
+           draw.rect(0, 0, 50, 50, 1, 0, 0)\n\
+           draw.circle(20, 20, 5, 0, 1, 0)\n\
+           draw.text(10, 30, 'b', 16, 1, 1, 1)\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+        kind: "hud".into(),
+        enabled: true,
+        params: Vec::new(),
+        refs: Vec::new(),
+        strs: Vec::new(),
+        pinned_bools: None,
+    }]));
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let texts: Vec<u64> = host.take_draw_texts().iter().map(|t| t.seq).collect();
+    let rects: Vec<u64> = host.take_draw_rects().iter().map(|r| r.seq).collect();
+    assert_eq!(texts.len(), 2);
+    assert_eq!(rects.len(), 2);
+    assert!(texts[0] < rects[0] && rects[0] < rects[1] && rects[1] < texts[1], "texts {texts:?}, rects {rects:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

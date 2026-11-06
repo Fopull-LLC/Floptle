@@ -850,21 +850,44 @@ impl Editor {
         // they sit over the HUD — a selection marquee is drawn on top of
         // everything, by definition. Their pixels are `input.mouse()`'s (window
         // space); the UI pass works in the viewport's own, hence the offset.
+        // They composite in the order the script made them: a list draws
+        // its shapes, then its text, so a shape that comes after text starts
+        // the next list. A frame that never puts a shape over text is one
+        // list, as it always was.
+        // A project from before the setting keeps every text over every
+        // shape (`ScreenDrawOrderDoc::TextOnTop`).
+        let call_order = self.project.screen_draw_order_resolved() == floptle_scene::ScreenDrawOrderDoc::CallOrder;
         if !self.script_rects.is_empty() || !self.script_texts.is_empty() {
-            let mut dl = floptle_ui::DrawList::default();
-            for r in &self.script_rects {
-                let outline = r.outline;
-                dl.quads.push(floptle_ui::Quad {
-                    rect: [(r.rect[0] - o[0]) * sx, (r.rect[1] - o[1]) * sy, r.rect[2] * sx, r.rect[3] * sy],
-                    color: if outline > 0.0 { [0.0; 4] } else { r.color },
-                    border: [outline; 4],
-                    border_color: r.color,
-                    radius: [r.radius; 4],
-                    ..Default::default()
-                });
+            let mut lists = vec![floptle_ui::DrawList::default()];
+            let mut texts = self.script_texts.iter().map(|t| t.seq).zip(script_text_runs).peekable();
+            let mut rects = self.script_rects.iter().peekable();
+            loop {
+                let rect_next = match (rects.peek(), texts.peek()) {
+                    (Some(r), Some((t, _))) => !call_order || r.seq < *t,
+                    (Some(_), None) => true,
+                    (None, Some(_)) => false,
+                    (None, None) => break,
+                };
+                if rect_next {
+                    let r = rects.next().expect("peeked");
+                    if !lists.last().expect("one list").texts.is_empty() {
+                        lists.push(floptle_ui::DrawList::default());
+                    }
+                    let outline = r.outline;
+                    lists.last_mut().expect("one list").quads.push(floptle_ui::Quad {
+                        rect: [(r.rect[0] - o[0]) * sx, (r.rect[1] - o[1]) * sy, r.rect[2] * sx, r.rect[3] * sy],
+                        color: if outline > 0.0 { [0.0; 4] } else { r.color },
+                        border: [outline; 4],
+                        border_color: r.color,
+                        radius: [r.radius; 4],
+                        ..Default::default()
+                    });
+                } else {
+                    let (_, run) = texts.next().expect("peeked");
+                    lists.last_mut().expect("one list").texts.push(run);
+                }
             }
-            dl.texts.extend(script_text_runs);
-            out.push((dl, 1.0));
+            out.extend(lists.into_iter().map(|dl| (dl, 1.0)));
         }
         // A scene fade covers everything the game draws, HUD included.
         if let Some(c) = fade {
@@ -4331,6 +4354,7 @@ mod script_draw_scale_tests {
             color: [1.0; 4],
             align: 1,
             font: String::new(),
+            seq: 1,
         });
         let layer = |ed: &mut crate::Editor, vp: [f32; 2]| {
             let layers = ed.gather_game_ui(vp);
@@ -4362,8 +4386,9 @@ mod script_draw_scale_tests {
             color: [1.0; 4],
             align: 1,
             font: String::new(),
+            seq: 1,
         });
-        ed.script_rects.push(floptle_script::DrawRect { rect: [380.0, 360.0, 40.0, 40.0], color: [1.0, 0.3, 0.2, 1.0], outline: 0.0, radius: 0.0 });
+        ed.script_rects.push(floptle_script::DrawRect { rect: [380.0, 360.0, 40.0, 40.0], color: [1.0, 0.3, 0.2, 1.0], outline: 0.0, radius: 0.0, seq: 0 });
         let cam = floptle_render::RenderCamera::new(
             floptle_core::math::DVec3::ZERO,
             floptle_core::math::Quat::IDENTITY,
@@ -4385,7 +4410,7 @@ mod script_draw_scale_tests {
         let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
         ed.script_host.set_view(floptle_script::ViewInfo { vp_w: 200.0, vp_h: 100.0, valid: true, ..Default::default() });
         ed.game_view_origin = [0.0, 0.0];
-        ed.script_rects.push(floptle_script::DrawRect { rect: [0.0, 0.0, 100.0, 100.0], color: [1.0, 0.0, 0.0, 1.0], outline: 0.0, radius: 0.0 });
+        ed.script_rects.push(floptle_script::DrawRect { rect: [0.0, 0.0, 100.0, 100.0], color: [1.0, 0.0, 0.0, 1.0], outline: 0.0, radius: 0.0, seq: 0 });
         ed.script_texts.push(floptle_script::DrawText {
             pos: [150.0, 50.0],
             text: "HELLO".into(),
@@ -4393,6 +4418,7 @@ mod script_draw_scale_tests {
             color: [0.0, 1.0, 0.0, 1.0],
             align: 1,
             font: String::new(),
+            seq: 1,
         });
         let cam = floptle_render::RenderCamera::new(
             floptle_core::math::DVec3::ZERO,
@@ -4410,5 +4436,54 @@ mod script_draw_scale_tests {
         assert!(red > 5000 && green > 100, "the fixture: with ui = true the rect ({red} px) and the text ({green} px) should show");
         let (red, green) = shot(false);
         assert!(red == 0 && green == 0, "with ui = false the picture still has the rect ({red} px) or the text ({green} px)");
+    }
+
+    /// **Screen draws stack in the order a script makes them.** Every
+    /// `draw.text` composited after every `draw.rect`, so a filled pop-out
+    /// drawn over a map's labels showed the labels through it. Green text,
+    /// then a red rect over it: no green may show. Blue text drawn after the
+    /// rect sits on top of it.
+    #[test]
+    fn screen_draws_stack_in_the_order_they_are_made() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.script_host.set_view(floptle_script::ViewInfo { vp_w: 200.0, vp_h: 100.0, valid: true, ..Default::default() });
+        ed.game_view_origin = [0.0, 0.0];
+        let text = |y: f32, color: [f32; 4], seq: u64| floptle_script::DrawText {
+            pos: [60.0, y],
+            text: "HELLO".into(),
+            size: 40.0,
+            color,
+            align: 1,
+            font: String::new(),
+            seq,
+        };
+        // Two lines, so neither text can hide the other.
+        ed.script_texts.push(text(5.0, [0.0, 1.0, 0.0, 1.0], 0));
+        ed.script_rects.push(floptle_script::DrawRect { rect: [0.0, 0.0, 120.0, 100.0], color: [1.0, 0.0, 0.0, 1.0], outline: 0.0, radius: 0.0, seq: 1 });
+        ed.script_texts.push(text(52.0, [0.0, 0.0, 1.0, 1.0], 2));
+        let cam = floptle_render::RenderCamera::new(
+            floptle_core::math::DVec3::ZERO,
+            floptle_core::math::Quat::IDENTITY,
+            floptle_render::Projection::Perspective { fov_y: 1.0, near: 0.05, far: 1000.0 },
+        );
+        let shot = |ed: &mut crate::Editor| {
+            let tex = crate::capture::render_frame_texture(ed, &cam, None, 200, 100, u32::MAX, true, false).expect("a frame");
+            let px = crate::offscreen::read_back_frame(ed.gpu.as_ref().unwrap(), &tex).expect("the frame reads back");
+            let count = |f: fn(&[u8]) -> bool| px.chunks(4).filter(|p| f(p)).count();
+            (
+                count(|p| p[0] > 200 && p[1] < 60 && p[2] < 60),
+                count(|p| p[1] > 150 && p[0] < 100 && p[2] < 100),
+                count(|p| p[2] > 150 && p[0] < 100 && p[1] < 100),
+            )
+        };
+        assert_eq!(ed.project.screen_draw_order_resolved(), floptle_scene::ScreenDrawOrderDoc::CallOrder, "the fixture: a new project");
+        let (red, green, blue) = shot(&mut ed);
+        assert!(red > 5000, "the fixture: the rect should show ({red} px)");
+        assert!(blue > 100, "the text drawn after the rect is hidden under it ({blue} px)");
+        assert_eq!(green, 0, "the text drawn before the rect shows through it ({green} px)");
+        // A project from before the setting keeps every text on top.
+        ed.project.screen_draw_order = None;
+        let (_, green, blue) = shot(&mut ed);
+        assert!(green > 100 && blue > 100, "an old project's text went under its rect: green {green} px, blue {blue} px");
     }
 }

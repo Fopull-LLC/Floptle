@@ -2164,7 +2164,7 @@ end
 
 ### `draw.rect`
 
-draw.rect(x, y, w, h, r,g,b [,a] [,radius]) — a filled rectangle in SCREEN PIXELS, in input.mouse()'s space. An RTS marquee is just the two corners you dragged between — the 3D version has to be projected onto a ground plane, which fights the camera angle and misses whatever the plane doesn't cross.
+draw.rect(x, y, w, h, r,g,b [,a] [,radius]) — a filled rectangle in SCREEN PIXELS, in input.mouse()'s space. An RTS marquee is just the two corners you dragged between — the 3D version has to be projected onto a ground plane, which fights the camera angle and misses whatever the plane doesn't cross. Screen draws stack in the order you make them: a draw.rect after a draw.text covers it, and a draw.text after a draw.rect sits on it, so a pop-out drawn last hides the labels under it. That is Project Settings ▸ Scripting ▸ Screen draw order; a project from before the setting keeps every text over every shape until it is changed there.
 
 ### `draw.rectOutline`
 
@@ -2184,7 +2184,7 @@ draw.sphere(cx,cy,cz, radius, r,g,b [,a]) — three rings, i.e. a wireframe ball
 
 ### `draw.text`
 
-draw.text(x, y, s, size, r,g,b [, a] [, align] [, font]) — a string on the SCREEN, in the pixels input.mouse() reports, without building a UI tree: a damage number, a frame-time readout, the count under a selection box. The engine measures and lays out the glyphs with the same font stack ui.make uses — and measures with the SAME font it draws, so a centred run lands where you asked. align is "left" (default) | "center" | "right", and x is that edge. font is a project-relative .ttf/.otf/.ttc/.woff/.woff2, or a BMFont .fnt (a bitmap font, drawn exactly at whole multiples of its size); leave it out and you get the project's UI font (Project Settings ▸ UI font), which is where to set it once rather than at forty call sites. Immediate mode: re-draw it every frame you want it.
+draw.text(x, y, s, size, r,g,b [, a] [, align] [, font]) — a string on the SCREEN, in the pixels input.mouse() reports, without building a UI tree: a damage number, a frame-time readout, the count under a selection box. The engine measures and lays out the glyphs with the same font stack ui.make uses — and measures with the SAME font it draws, so a centred run lands where you asked. align is "left" (default) | "center" | "right", and x is that edge. font is a project-relative .ttf/.otf/.ttc/.woff/.woff2, or a BMFont .fnt (a bitmap font, drawn exactly at whole multiples of its size); leave it out and you get the project's UI font (Project Settings ▸ UI font), which is where to set it once rather than at forty call sites. Immediate mode: re-draw it every frame you want it. Stacks with draw.rect and draw.circle in call order (see draw.rect).
 
 ```lua
 -- a HUD with no UI tree; align says which edge x is

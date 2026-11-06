@@ -102,6 +102,9 @@ pub struct DrawRect {
     pub outline: f32,
     /// Corner radius in px.
     pub radius: f32,
+    /// Where it falls among this frame's screen draws, shared with
+    /// [`DrawText::seq`]: later draws composite over earlier ones.
+    pub seq: u64,
 }
 
 /// One screen-space string a script queued via `draw.text` this tick.
@@ -129,6 +132,8 @@ pub struct DrawText {
     /// spaced, because a layout built on a monospace grid is being handed a
     /// proportional font.
     pub font: String,
+    /// Where it falls among this frame's screen draws (see [`DrawRect::seq`]).
+    pub seq: u64,
 }
 
 /// One world-space filled triangle a script queued via `draw.tri` / `draw.cone`

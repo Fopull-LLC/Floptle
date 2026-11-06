@@ -2569,6 +2569,9 @@ fn install_draw(lua: &Lua, current: Rc<RefCell<Option<(u32, String)>>>) -> DrawC
                 }
             }
             // ---- screen space -------------------------------------
+            // One count across rects, circles and text, so the frame's screen
+            // draws composite in the order the script made them.
+            let draw_seq: Rc<std::cell::Cell<u64>> = Rc::default();
             // `draw.rect(x, y, w, h, r,g,b[,a][,radius])` — a filled
             // rectangle in pixels, and `draw.rectOutline(..., [thickness])`
             // its hollow twin. The pixels are `input.mouse()`'s, so an RTS
@@ -2578,6 +2581,7 @@ fn install_draw(lua: &Lua, current: Rc<RefCell<Option<(u32, String)>>>) -> DrawC
             // plane doesn't pass through.
             for (name, outline_default) in [("rect", 0.0f32), ("rectOutline", 2.0f32)] {
                 let q = draw_rects.clone();
+                let seq = draw_seq.clone();
                 type RectArgs =
                     (f32, f32, f32, f32, f32, f32, f32, Option<f32>, Option<f32>);
                 if let Ok(f) = lua.create_function(
@@ -2589,7 +2593,9 @@ fn install_draw(lua: &Lua, current: Rc<RefCell<Option<(u32, String)>>>) -> DrawC
                         } else {
                             (0.0, extra.unwrap_or(0.0).max(0.0))
                         };
+                        seq.set(seq.get() + 1);
                         q.borrow_mut().push(crate::DrawRect {
+                            seq: seq.get(),
                             rect: [x, y, w, h],
                             color: [r, g, b, a.unwrap_or(1.0)],
                             outline,
@@ -2608,6 +2614,7 @@ fn install_draw(lua: &Lua, current: Rc<RefCell<Option<(u32, String)>>>) -> DrawC
             // anyone drawing a circle has in hand.
             for (name, outline_default) in [("circle", 0.0f32), ("circleOutline", 2.0f32)] {
                 let q = draw_rects.clone();
+                let seq = draw_seq.clone();
                 type CircleArgs = (f32, f32, f32, f32, f32, f32, Option<f32>, Option<f32>);
                 if let Ok(f) = lua.create_function(
                     move |_, (x, y, rad, r, g, b, a, extra): CircleArgs| {
@@ -2617,7 +2624,9 @@ fn install_draw(lua: &Lua, current: Rc<RefCell<Option<(u32, String)>>>) -> DrawC
                         } else {
                             0.0
                         };
+                        seq.set(seq.get() + 1);
                         q.borrow_mut().push(crate::DrawRect {
+                            seq: seq.get(),
                             rect: [x - rad, y - rad, rad * 2.0, rad * 2.0],
                             color: [r, g, b, a.unwrap_or(1.0)],
                             outline,
@@ -2638,6 +2647,7 @@ fn install_draw(lua: &Lua, current: Rc<RefCell<Option<(u32, String)>>>) -> DrawC
             // and x is that edge.
             {
                 let q = draw_texts.clone();
+                let seq = draw_seq.clone();
                 type TextArgs = (
                     f32,
                     f32,
@@ -2652,7 +2662,9 @@ fn install_draw(lua: &Lua, current: Rc<RefCell<Option<(u32, String)>>>) -> DrawC
                 );
                 if let Ok(f) = lua.create_function(
                     move |_, (x, y, s, size, r, g, b, a, align, font): TextArgs| {
+                        seq.set(seq.get() + 1);
                         q.borrow_mut().push(crate::DrawText {
+                            seq: seq.get(),
                             pos: [x, y],
                             text: s,
                             size: size.unwrap_or(16.0).max(1.0),
