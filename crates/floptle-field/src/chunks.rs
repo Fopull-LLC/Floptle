@@ -74,12 +74,15 @@ pub struct FieldMemory {
     /// whether or not their bytes were counted here.
     pub data_chunks: usize,
     pub stand_in_chunks: usize,
+    /// Fine paint: the sub-voxel slot pages of the chunks at full detail
+    /// that have any ([`ChunkField::set_fine_paint`]). Not in `data`.
+    pub fine: usize,
 }
 
 impl FieldMemory {
     /// Everything counted.
     pub fn total(&self) -> usize {
-        self.data + self.stand_ins + self.tables
+        self.data + self.stand_ins + self.tables + self.fine
     }
 }
 
@@ -248,6 +251,95 @@ const DECODE_PER_THREAD: usize = 64;
 /// Decode every data record of `records` from `data`, in order, `None` for the
 /// uniform ones; `None` overall when any data record is malformed. Several
 /// threads share the work where there are threads and enough of it.
+/// One chunk's entry in the `FINE` section: its coordinate, how many of its
+/// blocks have a page, and each such block's number and page, run-length
+/// coded as (u16 run, u8 slot).
+fn encode_fine(out: &mut Vec<u8>, c: [i32; 3], d: &ChunkData) {
+    for k in c {
+        out.extend_from_slice(&k.to_le_bytes());
+    }
+    let mask = d.fine_mask();
+    out.push(mask.count_ones() as u8);
+    for b in 0..64usize {
+        let Some(page) = d.fine_page(b) else { continue };
+        out.push(b as u8);
+        let mut runs: Vec<(u16, u8)> = Vec::new();
+        for &v in page {
+            match runs.last_mut() {
+                Some((n, lv)) if *lv == v && *n < u16::MAX => *n += 1,
+                _ => runs.push((1, v)),
+            }
+        }
+        out.extend_from_slice(&(runs.len() as u32).to_le_bytes());
+        for (n, v) in runs {
+            out.extend_from_slice(&n.to_le_bytes());
+            out.push(v);
+        }
+    }
+}
+
+/// Read a `FINE` section (its tag already read) into `f`'s chunks. A section
+/// of a version this does not know is passed over; one that does not parse
+/// fails the whole read, as any other malformed record does. A page for a
+/// chunk the file holds no voxels of is dropped: there is nothing to show it.
+fn decode_fine(data: &[u8], at: &mut usize, f: &mut ChunkField) -> Option<()> {
+    let mut take = |n: usize| -> Option<&[u8]> {
+        let s = data.get(*at..*at + n)?;
+        *at += n;
+        Some(s)
+    };
+    let version = u16::from_le_bytes(take(2)?.try_into().ok()?);
+    if version != FINE_VERSION {
+        return Some(());
+    }
+    let factor = take(2)?[0];
+    if factor != 2 && factor != 4 {
+        return None;
+    }
+    let count = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+    if count > 4_000_000 {
+        return None;
+    }
+    let size = (8 * factor as usize).pow(3);
+    for _ in 0..count {
+        let mut c = [0i32; 3];
+        for k in &mut c {
+            *k = i32::from_le_bytes(take(4)?.try_into().ok()?);
+        }
+        let blocks = take(1)?[0];
+        if blocks > 64 {
+            return None;
+        }
+        for _ in 0..blocks {
+            let b = take(1)?[0] as usize;
+            if b >= 64 {
+                return None;
+            }
+            let runs = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+            if runs > size {
+                return None;
+            }
+            let mut page = Vec::with_capacity(size);
+            for _ in 0..runs {
+                let r = take(3)?;
+                let n = u16::from_le_bytes([r[0], r[1]]) as usize;
+                if page.len() + n > size {
+                    return None;
+                }
+                page.resize(page.len() + n, r[2]);
+            }
+            if page.len() != size {
+                return None;
+            }
+            if let Some(Chunk::Data(d)) = f.chunks.get_mut(&c) {
+                std::sync::Arc::make_mut(d).set_fine_page(factor, b, page.into_boxed_slice());
+            }
+        }
+    }
+    f.fine_factor = factor;
+    Some(())
+}
+
 fn decode_records(data: &[u8], records: &[([i32; 3], Record)], band: f32) -> Option<Vec<Option<crate::chunk_data::ChunkData>>> {
     let one = |r: &Record| -> Option<Option<crate::chunk_data::ChunkData>> {
         match *r {
@@ -352,6 +444,16 @@ pub struct ChunkField {
     /// How many times a full-detail chunk's surface is subdivided onto the
     /// field ([`Self::set_mesh_refine`]); 0 meshes one vertex a cell.
     mesh_refine: u8,
+    /// Sub-voxels per voxel per axis a texture brush paints at
+    /// ([`Self::set_fine_paint`]); 0 paints voxels only.
+    fine_paint: u8,
+    /// Sub-voxels per voxel of the fine pages the chunks hold, which stay
+    /// when the fine paint is turned off: set when it is turned on or a
+    /// file's pages are read, 0 before either.
+    fine_factor: u8,
+    /// Per chunk, the blocks whose fine paint changed since
+    /// [`Self::take_fine_dirty`] last asked, one bit a block.
+    fine_dirty: HashMap<[i32; 3], u64>,
     /// Default colour for voxels in chunks that have never been painted.
     base_color: [u8; 4],
     /// The box of voxels written since [`Self::take_changed`] last asked.
@@ -645,6 +747,10 @@ impl Default for ChunkField {
     }
 }
 
+/// Version of the `.cfield` `FINE` section. A reader skips a section of a
+/// version it does not know, and the field reads with its voxels' slots.
+const FINE_VERSION: u16 = 1;
+
 /// In-progress incremental `.cfield` serialization — see [`ChunkField::begin_save`].
 /// Holds the chunk worklist and the growing blob; the field it came from does the
 /// encoding ([`ChunkField::save_step`]), a budget of chunks per call.
@@ -659,6 +765,11 @@ pub struct FieldSaver {
     count_pos: usize,
     buf: Vec<u8>,
     pending: Vec<[i32; 3]>,
+    /// The fine paint's pages, at `fine_factor`, of the chunks written so
+    /// far: the `FINE` section [`Self::finish`] puts after everything else.
+    fine_factor: u8,
+    fine: Vec<u8>,
+    fine_chunks: u32,
 }
 
 impl FieldSaver {
@@ -695,6 +806,16 @@ impl FieldSaver {
                 }
             }
         }
+        // The fine paint, last of all, where a reader that does not know it
+        // has stopped already and reads the voxels' slots alone.
+        if self.fine_chunks > 0 {
+            self.buf.extend_from_slice(b"FINE");
+            self.buf.extend_from_slice(&FINE_VERSION.to_le_bytes());
+            self.buf.push(self.fine_factor);
+            self.buf.push(0);
+            self.buf.extend_from_slice(&self.fine_chunks.to_le_bytes());
+            self.buf.extend_from_slice(&self.fine);
+        }
         self.buf
     }
 }
@@ -709,6 +830,9 @@ impl ChunkField {
             voxel: voxel.max(1e-3),
             slot_edge_reach: 0,
             mesh_refine: 0,
+            fine_paint: 0,
+            fine_factor: 0,
+            fine_dirty: HashMap::new(),
             base_color: [128, 128, 128, 255],
             changed: None,
             pending: std::collections::HashSet::new(),
@@ -754,6 +878,111 @@ impl ChunkField {
 
     pub fn mesh_refine(&self) -> u8 {
         self.mesh_refine
+    }
+
+    /// Paint texture slots finer than a voxel: `factor` sub-voxels a voxel
+    /// per axis, 2 or 4 (anything else from 1 up is the nearer of them), or
+    /// 0, the default, for voxels only, as ever.
+    ///
+    /// On, a texture brush ([`Self::paint_texture`]) also paints the
+    /// sub-voxels of its ball, into pages kept only for the 8³ blocks it
+    /// painted finer than their voxels can say, and [`Self::slot_at`] reads
+    /// them. A dab smaller than half a voxel then paints the pages alone.
+    /// Off again, the pages are kept (and saved) but not read, and a brush
+    /// keeps the ones there are in step with what it paints. A new factor
+    /// resamples every page to it, nearest: going coarser loses what was
+    /// finer, and going back does not bring it back.
+    pub fn set_fine_paint(&mut self, factor: u8) {
+        let factor = match factor {
+            0 => 0,
+            1..=2 => 2,
+            _ => 4,
+        };
+        self.fine_paint = factor;
+        if factor == 0 || factor == self.fine_factor {
+            return;
+        }
+        if self.fine_factor != 0 {
+            let mut dirty = Vec::new();
+            for (c, ch) in self.chunks.iter_mut() {
+                if let Chunk::Data(d) = ch
+                    && d.fine_factor() != 0
+                {
+                    let d = std::sync::Arc::make_mut(d);
+                    d.resample_fine(factor);
+                    dirty.push((*c, d.fine_mask()));
+                }
+            }
+            for (c, m) in dirty {
+                self.note_fine(c, m);
+            }
+        }
+        self.fine_factor = factor;
+    }
+
+    /// Sub-voxels per voxel a texture brush paints at; 0 when off.
+    pub fn fine_paint(&self) -> u8 {
+        self.fine_paint
+    }
+
+    /// Sub-voxels per voxel of the fine pages the field holds, whether or
+    /// not the fine paint is on; 0 when it has never had any.
+    pub fn fine_factor(&self) -> u8 {
+        self.fine_factor
+    }
+
+    /// Every block whose fine paint changed since the last call, as
+    /// (chunk, block within it, 0..64, x fastest in 4×4×4), and start again.
+    /// A block listed may have lost its page.
+    pub fn take_fine_dirty(&mut self) -> Vec<([i32; 3], u8)> {
+        let mut out: Vec<([i32; 3], u8)> = self
+            .fine_dirty
+            .drain()
+            .flat_map(|(c, m)| (0..64u8).filter(move |b| m >> b & 1 == 1).map(move |b| (c, b)))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// The fine page of block `block` of chunk `c` at full detail, if it has
+    /// one: `(8·factor)³` slots, x fastest. Factor as [`Self::fine_factor`].
+    pub fn fine_page(&self, c: [i32; 3], block: u8) -> Option<&[u8]> {
+        match self.chunks.get(&c) {
+            Some(Chunk::Data(d)) => d.fine_page(block as usize),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn note_fine(&mut self, c: [i32; 3], mask: u64) {
+        if mask != 0 {
+            *self.fine_dirty.entry(c).or_insert(0) |= mask;
+        }
+    }
+
+    /// A chunk changed hands whole (undo, a copy): every block holding a
+    /// page on either side changed, unless the two are the same chunk.
+    fn note_fine_swap(&mut self, c: [i32; 3], old: Option<&Chunk>, new: Option<&Chunk>) {
+        let mask = |ch: Option<&Chunk>| match ch {
+            Some(Chunk::Data(d)) => d.fine_mask(),
+            _ => 0,
+        };
+        if let (Some(Chunk::Data(a)), Some(Chunk::Data(b))) = (old, new)
+            && std::sync::Arc::ptr_eq(a, b)
+        {
+            return;
+        }
+        let m = mask(old) | mask(new);
+        self.note_fine(c, m);
+    }
+
+    /// The fine slot sub-voxel `sub` (chunk-local) of chunk `c` reads.
+    fn fine_read(&self, c: [i32; 3], sub: [usize; 3], factor: u8) -> u8 {
+        match self.chunks.get(&c) {
+            Some(Chunk::Data(d)) => d.fine_read(sub, factor),
+            Some(Chunk::Lattice(l)) => l.color(ChunkData::fine_nearest_li(sub, factor))[3],
+            _ => self.base_color[3],
+        }
     }
 
     pub fn slot_edge_reach(&self) -> u8 {
@@ -804,7 +1033,9 @@ impl ChunkField {
                 Chunk::Data(d) => {
                     m.data_chunks += 1;
                     if seen.insert(std::sync::Arc::as_ptr(d) as usize) {
-                        m.data += d.heap_bytes();
+                        let fine = d.fine_bytes();
+                        m.data += d.heap_bytes() - fine;
+                        m.fine += fine;
                     }
                 }
                 Chunk::Lattice(l) => {
@@ -819,7 +1050,8 @@ impl ChunkField {
         // The tables themselves: a slot per entry each, plus a control byte.
         let key = std::mem::size_of::<[i32; 3]>();
         m.tables = self.chunks.capacity() * (key + std::mem::size_of::<Chunk>() + 1)
-            + (self.pending.capacity() + self.edited.capacity()) * (key + 1);
+            + (self.pending.capacity() + self.edited.capacity()) * (key + 1)
+            + self.fine_dirty.capacity() * (key + 8 + 1);
         m
     }
 
@@ -889,6 +1121,9 @@ impl ChunkField {
         base.generated = true;
         base.spec = self.spec;
         base.changed = None;
+        if self.fine_factor != 0 {
+            base.fine_factor = self.fine_factor;
+        }
         base
     }
 
@@ -938,6 +1173,10 @@ impl ChunkField {
                 base.chunks.get(&c)
             };
             let ours = self.chunks.get(&c);
+            // Fine paint is no generator's.
+            if matches!(ours, Some(Chunk::Data(d)) if d.fine_mask() != 0) {
+                return true;
+            }
             !(0..CHUNK_VOXELS).all(|li| {
                 q(dist(ours, li)) == q(dist(theirs, li))
                     && (dist(ours, li) >= band - 1e-6 || color(ours, li, self.base_color) == color(theirs, li, base.base_color))
@@ -962,6 +1201,10 @@ impl ChunkField {
         out.generated = true;
         out.spec = self.spec.take().or_else(|| base.spec.clone());
         out.converted = true;
+        out.fine_paint = self.fine_paint;
+        if self.fine_factor != 0 {
+            out.fine_factor = self.fine_factor;
+        }
         *self = out;
     }
 
@@ -1028,7 +1271,26 @@ impl ChunkField {
     /// `None` for untextured voxels (slot 0, and the legacy 255 sentinel), so a
     /// caller can tell "plain rock" from "slot 255". The read half of what
     /// `paint_texture` writes, so a mining game can ask what it has just dug.
+    ///
+    /// With the fine paint on ([`Self::set_fine_paint`]), the slot of the
+    /// nearest sub-voxel where its block was painted finer than a voxel.
     pub fn slot_at(&self, p: Vec3) -> Option<u8> {
+        let f = self.fine_paint;
+        if f != 0 && f == self.fine_factor {
+            let g = p / self.voxel * f as f32;
+            let s = [g.x.round() as i32, g.y.round() as i32, g.z.round() as i32];
+            let n = CHUNK * f as i32;
+            let c = [s[0].div_euclid(n), s[1].div_euclid(n), s[2].div_euclid(n)];
+            let sub = [s[0].rem_euclid(n) as usize, s[1].rem_euclid(n) as usize, s[2].rem_euclid(n) as usize];
+            if let Some(Chunk::Data(d)) = self.chunks.get(&c)
+                && let Some(slot) = d.fine_slot(sub, f)
+            {
+                return match slot {
+                    0 | 255 => None,
+                    s => Some(s),
+                };
+            }
+        }
         match self.color(p)[3] {
             0 | 255 => None,
             s => Some(s),
@@ -1280,11 +1542,16 @@ impl ChunkField {
     fn set_voxel(&mut self, i: [i32; 3], d: f32, color: Option<[u8; 4]>) {
         self.note_changed(i);
         let band = BAND_VOXELS * self.voxel;
-        let li = local_of(i);
-        let data = self.data_mut(chunk_of(i));
+        let (li, c) = (local_of(i), chunk_of(i));
+        let data = self.data_mut(c);
         data.set_dist(li, d.clamp(-band, band));
-        if let Some(c) = color {
-            data.set_color(li, c);
+        if let Some(col) = color {
+            data.set_color(li, col);
+            // The colour wrote through to the block's fine page, if it has one.
+            let b = ChunkData::block_of(li);
+            if data.fine_factor() != 0 && data.fine_page(b).is_some() {
+                self.note_fine(c, 1 << b);
+            }
         }
     }
 
@@ -1499,9 +1766,16 @@ impl ChunkField {
 
     /// Collapse chunks whose voxels are all one value back to a sentinel — this is what
     /// keeps a large map's memory proportional to its surface rather than its volume.
+    ///
+    /// A chunk collapsed takes its fine paint with it: it has no ground left
+    /// to show it on.
     fn compact(&mut self, coords: &[[i32; 3]]) {
         let band = BAND_VOXELS * self.voxel;
         for c in coords {
+            let before = match self.chunks.get(c) {
+                Some(Chunk::Data(d)) => d.fine_mask(),
+                _ => 0,
+            };
             let uniform = match self.chunks.get_mut(c) {
                 Some(Chunk::Data(d)) => {
                     // Only collapse fully-saturated chunks: an interior value would lose
@@ -1524,6 +1798,13 @@ impl ChunkField {
             if let Some(v) = uniform {
                 self.chunks.insert(*c, Chunk::Uniform(v));
             }
+            if before != 0 {
+                let after = match self.chunks.get(c) {
+                    Some(Chunk::Data(d)) => d.fine_mask(),
+                    _ => 0,
+                };
+                self.note_fine(*c, before & !after);
+            }
         }
     }
 
@@ -1542,14 +1823,14 @@ impl ChunkField {
             } else {
                 self.pending.remove(c);
             }
-            match src.chunks.get(c) {
-                Some(chunk) => {
-                    self.chunks.insert(*c, chunk.clone());
-                }
-                None => {
-                    self.chunks.remove(c);
-                }
-            }
+            let old = match src.chunks.get(c) {
+                Some(chunk) => self.chunks.insert(*c, chunk.clone()),
+                None => self.chunks.remove(c),
+            };
+            self.note_fine_swap(*c, old.as_ref(), src.chunks.get(c));
+        }
+        if src.fine_factor != 0 {
+            self.fine_factor = src.fine_factor;
         }
     }
 
@@ -3055,9 +3336,13 @@ impl ChunkField {
         ];
         self.base_color = [rgb[0], rgb[1], rgb[2], self.base_color[3]];
         self.edited.extend(self.chunks.keys().copied());
-        for c in self.chunks.values_mut() {
-            if let Chunk::Data(d) = c {
+        for (c, ch) in self.chunks.iter_mut() {
+            if let Chunk::Data(d) = ch {
+                let before = d.fine_mask();
                 std::sync::Arc::make_mut(d).map_colors(|v| [rgb[0], rgb[1], rgb[2], v[3]]);
+                if before != 0 {
+                    *self.fine_dirty.entry(*c).or_insert(0) |= before;
+                }
             }
         }
     }
@@ -3068,9 +3353,14 @@ impl ChunkField {
     pub fn fill_texture(&mut self, slot: u8) {
         self.base_color[3] = slot;
         self.edited.extend(self.chunks.keys().copied());
-        for c in self.chunks.values_mut() {
-            if let Chunk::Data(d) = c {
+        // Every sub-voxel takes the slot too, so every page folds away.
+        for (c, ch) in self.chunks.iter_mut() {
+            if let Chunk::Data(d) = ch {
+                let before = d.fine_mask();
                 std::sync::Arc::make_mut(d).map_colors(|v| [v[0], v[1], v[2], slot]);
+                if before != 0 {
+                    *self.fine_dirty.entry(*c).or_insert(0) |= before;
+                }
             }
         }
     }
@@ -3091,12 +3381,28 @@ impl ChunkField {
         self.paint_slot(center, radius, slot, Some(profile))
     }
 
+    /// The one write path of both texture brushes. With the fine paint on
+    /// ([`Self::set_fine_paint`]) it paints the voxels as ever, so meshes,
+    /// edges and every coarse reader agree with it, unless the dab is under
+    /// half a voxel across, and then the sub-voxels of the ball
+    /// ([`Self::paint_fine`]). The chunks returned are those whose voxels
+    /// it wrote: a dab that painted only sub-voxels re-meshes nothing, and
+    /// says what it did through [`Self::take_fine_dirty`].
     fn paint_slot(&mut self, center: Vec3, radius: f32, slot: u8, profile: Option<crate::BrushProfile>) -> Vec<[i32; 3]> {
         let (lo, hi) = self.voxel_range(center, radius);
         self.realize_voxels(lo, hi);
         let band = self.band();
         let mut touched = Vec::new();
+        let voxels = self.fine_paint == 0 || radius >= 0.5 * self.voxel;
+        let fine = self.fine_paint != 0 || self.fine_factor != 0;
+        // What the sub-voxels the brush leaves alone read now: each voxel it
+        // paints writes through to its whole cube of them, and those outside
+        // the dab's own shape are given this back.
+        let kept = if fine && voxels { self.fine_misses(center, radius, profile) } else { Vec::new() };
         for iz in lo[2]..=hi[2] {
+            if !voxels {
+                break;
+            }
             for iy in lo[1]..=hi[1] {
                 for ix in lo[0]..=hi[0] {
                     let p = Vec3::new(ix as f32, iy as f32, iz as f32) * self.voxel;
@@ -3124,9 +3430,108 @@ impl ChunkField {
                 }
             }
         }
+        if fine {
+            self.paint_fine(center, radius, slot, profile, &kept);
+        }
         touched.sort_unstable();
         touched.dedup();
         touched
+    }
+
+    /// The sub-voxels a fine dab weighs, and how: within `radius` plus a
+    /// voxel of `center` and in the band, each is `Some(true)` where the dab
+    /// paints it (inside the radius and, past the profile's hard core, by the
+    /// same chance a voxel takes, drawn from the sub-voxel's own position)
+    /// and `Some(false)` where it does not; `None` is not the dab's at all.
+    #[inline]
+    fn fine_hit(&self, j: [i32; 3], step: f32, center: Vec3, radius: f32, profile: Option<crate::BrushProfile>) -> Option<bool> {
+        let p = Vec3::new(j[0] as f32, j[1] as f32, j[2] as f32) * step;
+        let dist = (p - center).length();
+        if dist > radius + self.voxel || self.d(p).abs() > self.band() {
+            return None;
+        }
+        Some(dist <= radius && profile.is_none_or(|profile| voxel_chance(j) < profile.weight(dist, radius)))
+    }
+
+    /// The box of sub-voxels at `step` a fine dab weighs.
+    fn fine_box(&self, center: Vec3, radius: f32, step: f32) -> ([i32; 3], [i32; 3]) {
+        let r = radius + self.voxel;
+        let (lo, hi) = ((center - Vec3::splat(r)) / step, (center + Vec3::splat(r)) / step);
+        (
+            [lo.x.floor() as i32, lo.y.floor() as i32, lo.z.floor() as i32],
+            [hi.x.ceil() as i32, hi.y.ceil() as i32, hi.z.ceil() as i32],
+        )
+    }
+
+    /// The factor a fine dab paints at: the field's, on; its pages', off.
+    fn fine_dab_factor(&self) -> u8 {
+        if self.fine_paint != 0 { self.fine_paint } else { self.fine_factor }
+    }
+
+    /// Every sub-voxel a dab weighs and leaves alone, with what it reads
+    /// before the dab: what [`Self::paint_fine`] gives back to any the
+    /// dab's voxels spill onto.
+    fn fine_misses(&self, center: Vec3, radius: f32, profile: Option<crate::BrushProfile>) -> Vec<([i32; 3], u8)> {
+        let f = self.fine_dab_factor();
+        let step = self.voxel / f as f32;
+        let n = CHUNK * f as i32;
+        let (lo, hi) = self.fine_box(center, radius, step);
+        let mut out = Vec::new();
+        for jz in lo[2]..=hi[2] {
+            for jy in lo[1]..=hi[1] {
+                for jx in lo[0]..=hi[0] {
+                    let j = [jx, jy, jz];
+                    if self.fine_hit(j, step, center, radius, profile) == Some(false) {
+                        let c = [jx.div_euclid(n), jy.div_euclid(n), jz.div_euclid(n)];
+                        let sub = [jx.rem_euclid(n) as usize, jy.rem_euclid(n) as usize, jz.rem_euclid(n) as usize];
+                        out.push((j, self.fine_read(c, sub, f)));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The fine half of a texture dab. Every sub-voxel the dab paints
+    /// ([`Self::fine_hit`]) takes the slot, and every one it weighs and
+    /// leaves alone reads what it did before the dab (`kept`, from
+    /// [`Self::fine_misses`]), so the painted shape is the sub-voxels' and
+    /// not the cubes of the voxels painted beside it. The same dab twice
+    /// paints the same sub-voxels. A block gets a page only where one of its
+    /// sub-voxels has to differ from what its voxels say; with the fine
+    /// paint off, only the pages there already are kept in step.
+    fn paint_fine(&mut self, center: Vec3, radius: f32, slot: u8, profile: Option<crate::BrushProfile>, kept: &[([i32; 3], u8)]) {
+        let make = self.fine_paint != 0;
+        let f = self.fine_dab_factor();
+        let step = self.voxel / f as f32;
+        let n = CHUNK * f as i32;
+        let (lo, hi) = self.fine_box(center, radius, step);
+        let set = |field: &mut Self, j: [i32; 3], want: u8| {
+            let c = [j[0].div_euclid(n), j[1].div_euclid(n), j[2].div_euclid(n)];
+            let sub = [j[0].rem_euclid(n) as usize, j[1].rem_euclid(n) as usize, j[2].rem_euclid(n) as usize];
+            if field.fine_read(c, sub, f) == want {
+                return;
+            }
+            if !make && !matches!(field.chunks.get(&c), Some(Chunk::Data(d)) if d.fine_slot(sub, f).is_some()) {
+                return;
+            }
+            if field.data_mut(c).set_fine_slot(f, sub, want) {
+                field.note_fine(c, 1 << crate::chunk_data::fine_block(sub, f));
+            }
+        };
+        for jz in lo[2]..=hi[2] {
+            for jy in lo[1]..=hi[1] {
+                for jx in lo[0]..=hi[0] {
+                    let j = [jx, jy, jz];
+                    if self.fine_hit(j, step, center, radius, profile) == Some(true) {
+                        set(self, j, slot);
+                    }
+                }
+            }
+        }
+        for &(j, was) in kept {
+            set(self, j, was);
+        }
     }
 
     /// Lay flat ground across the field's current bounds ("fill bounds"): a solid slab
@@ -3219,19 +3624,20 @@ impl ChunkField {
             self.note_changed([c[0] * CHUNK, c[1] * CHUNK, c[2] * CHUNK]);
             self.note_changed([c[0] * CHUNK + CHUNK - 1, c[1] * CHUNK + CHUNK - 1, c[2] * CHUNK + CHUNK - 1]);
             self.edited.insert(*c);
-            match ch {
+            let old = match ch {
                 Some(ch) => {
                     if matches!(ch, Chunk::Lattice(_)) {
                         self.pending.insert(*c);
                     } else {
                         self.pending.remove(c);
                     }
-                    self.chunks.insert(*c, ch.clone());
+                    self.chunks.insert(*c, ch.clone())
                 }
-                None => {
-                    self.chunks.remove(c);
-                }
-            }
+                None => self.chunks.remove(c),
+            };
+            // Fine pages come back with their chunk; whoever draws them
+            // hears which blocks did.
+            self.note_fine_swap(*c, old.as_ref(), ch.as_ref());
         }
         inverse
     }
@@ -3293,7 +3699,19 @@ impl ChunkField {
         let mut pending: Vec<[i32; 3]> = if delta { Vec::new() } else { self.pending.iter().copied().collect() };
         pending.sort_unstable();
         let spec = if delta { self.spec.clone() } else { None };
-        FieldSaver { delta, spec, coords, at: 0, written: 0, count_pos, buf, pending }
+        FieldSaver {
+            delta,
+            spec,
+            coords,
+            at: 0,
+            written: 0,
+            count_pos,
+            buf,
+            pending,
+            fine_factor: self.fine_factor,
+            fine: Vec::new(),
+            fine_chunks: 0,
+        }
     }
 
     /// Encode up to `max_chunks` more chunks into `s`. Returns `true` once the
@@ -3354,6 +3772,21 @@ impl ChunkField {
                     for (n, v) in cruns {
                         s.buf.extend_from_slice(&n.to_le_bytes());
                         s.buf.extend_from_slice(&v);
+                    }
+                    if d.fine_mask() != 0 && s.fine_factor != 0 {
+                        // Resampled since the save began: written at the
+                        // factor the section says.
+                        let resampled;
+                        let d: &ChunkData = if d.fine_factor() == s.fine_factor {
+                            d
+                        } else {
+                            let mut r = (**d).clone();
+                            r.resample_fine(s.fine_factor);
+                            resampled = r;
+                            &resampled
+                        };
+                        encode_fine(&mut s.fine, c, d);
+                        s.fine_chunks += 1;
                     }
                 }
             }
@@ -3453,6 +3886,10 @@ impl ChunkField {
                 }
                 f.pending.insert(c);
             }
+        }
+        if data.get(at..at + 4) == Some(b"FINE".as_slice()) {
+            at += 4;
+            decode_fine(data, &mut at, &mut f)?;
         }
         Some(f)
     }
@@ -4734,5 +5171,262 @@ mod yield_tests {
         let (hcore, _, hrim, _, houtside) = survey(&hard);
         assert_eq!(houtside, 0);
         assert!(hcore == core_n && hrim as f32 > rim_want * 1.5, "no brush paints the whole ball: {hrim} rim voxels");
+    }
+}
+
+#[cfg(test)]
+mod fine_paint_tests {
+    use super::*;
+
+    /// Flat ground with its top at y = 0.3, between two voxel layers, every
+    /// voxel of it slot 1.
+    fn ground() -> ChunkField {
+        let mut f = ChunkField::new(1.0);
+        f.fill_with(Vec3::splat(-24.0), Vec3::splat(24.0), |p: Vec3| p.y - 0.3, |_| [0.5, 0.5, 0.5]);
+        f.fill_texture(1);
+        f.take_changed();
+        f.take_fine_dirty();
+        f
+    }
+
+    fn mem(f: &ChunkField) -> FieldMemory {
+        f.memory(&mut std::collections::HashSet::new())
+    }
+
+    /// The slot `slot_at` reads at global sub-voxel `j` of a field at `factor`.
+    fn sub_slot(f: &ChunkField, j: [i32; 3], factor: u8) -> Option<u8> {
+        f.slot_at(Vec3::new(j[0] as f32, j[1] as f32, j[2] as f32) * (f.voxel() / factor as f32))
+    }
+
+    /// Every sub-voxel of the two layers the surface lies between, within
+    /// `reach` of `centre`, painted exactly where it is within `radius`.
+    fn assert_ball(f: &ChunkField, factor: u8, centre: Vec3, radius: f32, slot: u8, reach: f32) {
+        let step = f.voxel() / factor as f32;
+        let n = (reach / step).ceil() as i32 + 1;
+        let (cx, cz) = ((centre.x / step).round() as i32, (centre.z / step).round() as i32);
+        let (mut inside, mut outside) = (0, 0);
+        for jy in [0, 1] {
+            for jz in cz - n..=cz + n {
+                for jx in cx - n..=cx + n {
+                    let j = [jx, jy, jz];
+                    let p = Vec3::new(jx as f32, jy as f32, jz as f32) * step;
+                    let dist = (p - centre).length();
+                    if dist > reach {
+                        continue;
+                    }
+                    let got = sub_slot(f, j, factor);
+                    if dist <= radius {
+                        inside += 1;
+                        assert_eq!(got, Some(slot), "sub-voxel {j:?}, {dist:.3} from the centre of a dab {radius} across, is not painted");
+                    } else {
+                        outside += 1;
+                        assert_eq!(got, Some(1), "sub-voxel {j:?}, {dist:.3} from the centre of a dab {radius} across, is painted");
+                    }
+                }
+            }
+        }
+        assert!(inside > 0 && outside > 0, "the fixture: {inside} inside, {outside} outside");
+    }
+
+    /// **A fine dab paints a shape finer than a voxel.** Under half a voxel
+    /// across it paints sub-voxels alone, so nothing re-meshes; across many
+    /// voxels it paints the voxels too, but the shape `slot_at` reads is the
+    /// ball of sub-voxels, not the cubes of the voxels painted beside it.
+    #[test]
+    fn a_fine_stroke_paints_a_shape_narrower_than_a_voxel() {
+        for factor in [2u8, 4] {
+            let mut f = ground();
+            f.set_fine_paint(factor);
+            let centre = Vec3::new(4.13, 0.3, 4.07);
+            let touched = f.paint_texture(centre, 0.4, 5);
+            assert!(touched.is_empty(), "{factor}×: a dab under half a voxel wrote voxels of {touched:?}");
+            assert_eq!(f.take_changed(), None, "{factor}×: and changed no voxel");
+            assert!(!f.take_fine_dirty().is_empty(), "{factor}×: it says which blocks it painted");
+            assert_ball(&f, factor, centre, 0.4, 5, 2.0);
+            // A voxel away, the voxels' slot as ever.
+            assert_eq!(f.slot_at(centre + Vec3::X), Some(1));
+
+            let mut f = ground();
+            f.set_fine_paint(factor);
+            let centre = Vec3::new(-3.11, 0.3, 2.93);
+            assert!(!f.paint_texture(centre, 2.3, 5).is_empty(), "a dab of voxels writes them");
+            assert_ball(&f, factor, centre, 2.3, 5, 4.5);
+            // The voxels took it as ever, for the meshes and every coarse reader.
+            f.set_fine_paint(0);
+            assert_eq!(f.slot_at(centre), Some(5));
+        }
+    }
+
+    /// **Off, nothing changes.** The voxels paint as they always did and no
+    /// page is made: the same dabs give the same field, byte for byte.
+    #[test]
+    fn fine_paint_off_paints_as_ever() {
+        let (mut a, mut b) = (ground(), ground());
+        b.set_fine_paint(2);
+        b.set_fine_paint(0);
+        for (c, r) in [(Vec3::new(1.2, 0.3, -2.0), 2.7), (Vec3::new(-5.0, 0.3, 3.3), 0.4)] {
+            assert_eq!(a.paint_texture(c, r, 6), b.paint_texture(c, r, 6));
+        }
+        assert_eq!(mem(&b).fine, 0);
+        assert!(b.take_fine_dirty().is_empty());
+        assert_eq!(a.to_bytes(), b.to_bytes());
+    }
+
+    /// **A page costs its block and no more.** On with nothing painted
+    /// fine costs nothing; a dab inside one block makes one page of
+    /// (8·factor)³ bytes there and leaves the voxels' bytes as they were; a
+    /// dab across a block's edge makes two.
+    #[test]
+    fn a_fine_page_costs_its_block_and_no_more() {
+        for (factor, page) in [(2u8, 16usize * 16 * 16), (4, 32 * 32 * 32)] {
+            let mut f = ground();
+            let before = mem(&f);
+            assert_eq!(before.fine, 0);
+            f.set_fine_paint(factor);
+            assert_eq!(mem(&f), before, "{factor}×: turned on, with nothing painted fine");
+            f.paint_texture(Vec3::new(4.1, 0.3, 4.1), 0.3, 5);
+            let m = mem(&f);
+            assert_eq!(m.data, before.data, "{factor}×: the voxels cost what they did");
+            // Its page, and the chunk's table of them (128 B of block entries).
+            assert!((page..page + 256).contains(&m.fine), "{factor}×: one block's page is {page} bytes; the fine paint holds {}", m.fine);
+            assert_eq!((m.stand_ins, m.total() - m.tables), (before.stand_ins, before.total() - before.tables + m.fine));
+            assert_eq!(f.take_fine_dirty(), vec![([0, 0, 0], 0)]);
+            // Across the edge between blocks 0 and 1 of the chunk.
+            let mut f = ground();
+            f.set_fine_paint(factor);
+            f.paint_texture(Vec3::new(7.9, 0.3, 4.1), 0.49, 5);
+            let m = mem(&f);
+            assert!((2 * page..2 * page + 256).contains(&m.fine), "{factor}×: two pages, {}", m.fine);
+            assert_eq!(f.take_fine_dirty(), vec![([0, 0, 0], 0), ([0, 0, 0], 1)]);
+        }
+    }
+
+    /// **Fine paint is saved, and an older engine reads the coarse paint.**
+    /// The pages go in a section after every other, so the bytes before it
+    /// are exactly the save of the same voxels with no fine paint, which is
+    /// all a reader that does not know the section reads.
+    #[test]
+    fn fine_paint_round_trips_and_an_older_reader_ignores_it() {
+        let plain = ground();
+        let mut f = ground();
+        f.set_fine_paint(4);
+        let centre = Vec3::new(-6.2, 0.3, 1.1);
+        f.paint_texture(centre, 0.45, 5);
+        f.paint_texture(Vec3::new(30.0, 0.3, 0.2), 0.45, 9);
+        let bytes = f.to_bytes();
+        let coarse = plain.to_bytes();
+        assert!(bytes.len() > coarse.len() && bytes.starts_with(&coarse), "the fine paint is a section after the rest");
+        assert_eq!(&bytes[coarse.len()..coarse.len() + 4], b"FINE");
+
+        let mut back = ChunkField::from_bytes(&bytes).expect("reads");
+        assert_eq!(back.fine_factor(), 4);
+        assert_eq!(back.slot_at(centre), Some(1), "read, the fine paint is off until its terrain turns it on");
+        back.set_fine_paint(4);
+        assert_eq!(mem(&back).fine, mem(&f).fine);
+        assert_ball(&back, 4, centre, 0.45, 5, 1.5);
+        assert_eq!(back.slot_at(Vec3::new(30.0, 0.3, 0.2)), Some(9));
+        assert_eq!(back.to_bytes(), bytes, "and saves the same again");
+
+        // What an older engine reads: the voxels' paint, whole.
+        let old = ChunkField::from_bytes(&coarse).expect("the prefix is a whole field");
+        assert_eq!(old.to_bytes(), coarse);
+
+        // A section of a version this does not know is passed over.
+        let mut future = bytes.clone();
+        future[coarse.len() + 4] = 9;
+        let read = ChunkField::from_bytes(&future).expect("a newer section is passed over");
+        assert_eq!((read.fine_factor(), mem(&read).fine), (0, 0));
+        // One that does not parse fails the read, as any malformed record does.
+        assert!(ChunkField::from_bytes(&bytes[..bytes.len() - 1]).is_none());
+    }
+
+    /// **A chunk painted only finer than a voxel is an edit.** A generated
+    /// field saves its edits alone; a dab that changed no voxel still put
+    /// its chunk among them, and laid back over the generator's ground it
+    /// reads as painted.
+    #[test]
+    fn an_edited_fine_chunk_is_in_a_delta_save() {
+        let mut f = ground();
+        f.generated = true;
+        f.edited.clear();
+        f.set_spec("test".into());
+        let base = f.clone();
+        f.set_fine_paint(2);
+        let centre = Vec3::new(40.3, 0.3, -12.6);
+        assert!(f.paint_texture(centre, 0.4, 5).is_empty());
+        assert_eq!(f.edited_count(), 1);
+        assert!(f.is_edited(chunk_of([40, 0, -13])));
+        let edits = ChunkField::from_bytes(&f.to_bytes()).expect("reads");
+        assert!(edits.is_delta());
+        let mut back = edits.lay_over(base);
+        back.set_fine_paint(2);
+        assert_ball(&back, 2, centre, 0.4, 5, 1.5);
+    }
+
+    /// **Undo takes the fine paint back, and redo brings it again**, and
+    /// each time says which blocks changed, for whatever draws them.
+    #[test]
+    fn an_undo_restores_fine_paint() {
+        let mut f = ground();
+        f.set_fine_paint(2);
+        let centre = Vec3::new(2.2, 0.3, 2.2);
+        let coords = f.chunks_in_box(centre, 1.7);
+        let undo = f.snapshot_chunks(&coords);
+        f.paint_texture(centre, 1.7, 5);
+        f.paint_texture(centre + Vec3::X * 0.6, 0.45, 7);
+        let painted = f.take_fine_dirty();
+        assert!(!painted.is_empty());
+        let after = f.to_bytes();
+        let redo = f.apply_undo(&undo);
+        assert_eq!(f.slot_at(centre), Some(1));
+        assert_eq!(f.take_fine_dirty(), painted, "undo names the blocks it took the pages from");
+        assert_eq!(f.to_bytes(), ground().to_bytes(), "and leaves the field as it was");
+        f.apply_undo(&redo);
+        assert_eq!(f.take_fine_dirty(), painted);
+        assert_eq!(f.to_bytes(), after);
+        assert_eq!(f.slot_at(centre + Vec3::X * 0.6), Some(7));
+    }
+
+    /// **Off, a brush keeps the pages there are in step.** Pages stay when
+    /// the fine paint is turned off, unread; ground painted over meanwhile
+    /// shows what was painted when it is turned on again, not the page.
+    #[test]
+    fn pages_kept_while_off_follow_what_is_painted() {
+        let mut f = ground();
+        f.set_fine_paint(2);
+        let centre = Vec3::new(-1.3, 0.3, -1.3);
+        f.paint_texture(centre, 0.4, 5);
+        f.set_fine_paint(0);
+        assert_eq!(f.slot_at(centre), Some(1), "off, the voxels are read");
+        f.paint_texture(centre, 3.0, 7);
+        f.set_fine_paint(2);
+        // Where the page is: off, no page was made, so past it the
+        // voxels' shape is what was painted.
+        for j in [[-3, 0, -3], [-2, 0, -3], [-3, 1, -2], [-2, 1, -2]] {
+            assert_eq!(sub_slot(&f, j, 2), Some(7), "sub-voxel {j:?} shows the page from before");
+        }
+        // A whole-field retexture leaves no page.
+        f.fill_texture(3);
+        assert_eq!(mem(&f).fine, 0);
+        assert_eq!(f.slot_at(centre), Some(3));
+        assert!(!f.take_fine_dirty().is_empty());
+    }
+
+    /// **A new factor resamples the pages**: from 2× to 4× every painted
+    /// sub-voxel keeps its slot.
+    #[test]
+    fn a_new_factor_resamples_the_pages() {
+        let mut f = ground();
+        f.set_fine_paint(2);
+        let centre = Vec3::new(5.4, 0.3, -7.7);
+        f.paint_texture(centre, 0.9, 5);
+        let at2: Vec<Option<u8>> = (-4..=4).flat_map(|z| (-4..=4).map(move |x| [11 + x, 0, -15 + z])).map(|j| sub_slot(&f, j, 2)).collect();
+        assert!(at2.contains(&Some(5)) && at2.contains(&Some(1)));
+        f.set_fine_paint(4);
+        assert_eq!(f.fine_factor(), 4);
+        let at4: Vec<Option<u8>> =
+            (-4..=4).flat_map(|z| (-4..=4).map(move |x| [2 * (11 + x), 0, 2 * (-15 + z)])).map(|j| sub_slot(&f, j, 4)).collect();
+        assert_eq!(at2, at4);
+        assert_eq!(ChunkField::from_bytes(&f.to_bytes()).unwrap().fine_factor(), 4);
     }
 }

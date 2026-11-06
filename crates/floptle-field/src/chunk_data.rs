@@ -21,6 +21,7 @@ const BE: usize = CHUNK_U / B;
 const BLOCKS: usize = BE * BE * BE;
 /// "No page: the block holds its fill value throughout."
 const FILL: u16 = u16::MAX;
+const _: () = assert!(BLOCKS == 64, "a chunk's paged blocks are one u64 mask");
 
 /// Which block a voxel is in, and where in it.
 #[inline]
@@ -38,6 +39,55 @@ pub(crate) struct ChunkData {
     /// Per block: its page in the colour pages, or [`FILL`].
     color_slot: [u16; BLOCKS],
     colors: Colors,
+    /// The fine paint: palette slots finer than a voxel, in the blocks a
+    /// brush painted finer than one. Boxed, so a chunk with none holds one
+    /// empty pointer and nothing on the heap.
+    fine: Option<Box<Fine>>,
+}
+
+/// A chunk's sub-voxel slots ([`ChunkData::set_fine_slot`]): per block,
+/// either nothing (read the voxels' slots) or a page of `(8·factor)³` slots,
+/// x fastest, the slot as the voxel colour's alpha holds it.
+///
+/// A page overrides its block's voxel slots wherever it is read, so it is
+/// made from them (each sub-voxel the slot of the nearest voxel in the block)
+/// and then written, and a page that holds nothing but that again is
+/// dropped when the chunk is packed down.
+#[derive(Clone)]
+struct Fine {
+    /// Sub-voxels per voxel per axis: 2 or 4.
+    factor: u8,
+    /// Per block: its page in `pages`, or [`FILL`].
+    slot: [u16; BLOCKS],
+    pages: Vec<Box<[u8]>>,
+}
+
+impl Fine {
+    fn edge(&self) -> usize {
+        B * self.factor as usize
+    }
+}
+
+/// The voxel of a block nearest sub-voxel `j` of it (per axis), at `factor`
+/// sub-voxels a voxel: `round(j / factor)`, halves up, and kept inside the
+/// block, so a page is made from its own block alone.
+#[inline]
+fn nearest_voxel(j: usize, factor: usize) -> usize {
+    ((2 * j + factor) / (2 * factor)).min(B - 1)
+}
+
+/// The block holding chunk-local sub-voxel `sub` at `factor`.
+pub(crate) fn fine_block(sub: [usize; 3], factor: u8) -> usize {
+    split_fine(sub, factor as usize).0
+}
+
+/// The block holding chunk-local sub-voxel `sub` at `factor`, and the
+/// sub-voxel's index in that block's page.
+#[inline]
+fn split_fine(sub: [usize; 3], factor: usize) -> (usize, usize) {
+    let n = B * factor;
+    let b = ((sub[2] / n) * BE + sub[1] / n) * BE + sub[0] / n;
+    (b, ((sub[2] % n) * n + sub[1] % n) * n + sub[0] % n)
 }
 
 /// A chunk's colours: palette indices while it has 256 or fewer, and the
@@ -67,6 +117,7 @@ impl ChunkData {
             dist_pages: Vec::new(),
             color_slot: [FILL; BLOCKS],
             colors: Colors::Palette { palette: vec![color], fill: [0; BLOCKS], pages: Vec::new() },
+            fine: None,
         }
     }
 
@@ -158,7 +209,45 @@ impl ChunkData {
         self.dist_pages[s as usize][i] = v;
     }
 
+    /// Set a voxel's colour. Where its block has a fine page and the slot
+    /// changes, the page's sub-voxels nearest the voxel take the new slot
+    /// too, so ground a sculpt lays down in a finely painted block shows
+    /// the slot it was laid with rather than what the page held before.
     pub(crate) fn set_color(&mut self, li: usize, c: [u8; 4]) {
+        let old = if self.fine.is_some() { Some(self.color(li)[3]) } else { None };
+        self.set_color_voxel(li, c);
+        if let Some(old) = old
+            && old != c[3]
+        {
+            self.write_through(li, c[3]);
+        }
+    }
+
+    /// The sub-voxels of voxel `li`'s block page that read it as their
+    /// nearest voxel take `slot`. Nothing where the block has no page.
+    fn write_through(&mut self, li: usize, slot: u8) {
+        let Some(fine) = self.fine.as_deref_mut() else { return };
+        let (b, _) = split(li);
+        let p = fine.slot[b];
+        if p == FILL {
+            return;
+        }
+        let (f, n) = (fine.factor as usize, fine.edge());
+        let v = [li % CHUNK_U % B, (li / CHUNK_U) % CHUNK_U % B, li / (CHUNK_U * CHUNK_U) % B];
+        // The sub-voxels whose nearest voxel is `v`: from half a voxel
+        // below it to half one above, the block's edges taking the rest.
+        let span = |v: usize| ((v * f).saturating_sub(f / 2), if v == B - 1 { n } else { v * f + f / 2 });
+        let ((x0, x1), (y0, y1), (z0, z1)) = (span(v[0]), span(v[1]), span(v[2]));
+        let page = &mut fine.pages[p as usize];
+        for z in z0..z1 {
+            for y in y0..y1 {
+                page[(z * n + y) * n + x0..(z * n + y) * n + x1].fill(slot);
+            }
+        }
+    }
+
+    /// [`Self::set_color`] without touching the fine paint.
+    fn set_color_voxel(&mut self, li: usize, c: [u8; 4]) {
         let (b, i) = split(li);
         if let Colors::Palette { palette, .. } = &self.colors
             && palette.len() >= 256
@@ -209,6 +298,187 @@ impl ChunkData {
         let fill = Box::new(std::array::from_fn(|b| palette[fill[b] as usize]));
         let pages = pages.iter().map(|p| std::array::from_fn(|i| palette[p[i] as usize])).collect();
         self.colors = Colors::Raw { fill, pages };
+    }
+
+    // ---- fine paint ------------------------------------------------------------
+
+    /// Sub-voxels per voxel per axis of this chunk's fine pages; 0 with none.
+    pub(crate) fn fine_factor(&self) -> u8 {
+        self.fine.as_ref().map_or(0, |f| f.factor)
+    }
+
+    /// One bit per block holding a fine page, block `b` at bit `b`.
+    pub(crate) fn fine_mask(&self) -> u64 {
+        let Some(fine) = &self.fine else { return 0 };
+        (0..BLOCKS).filter(|b| fine.slot[*b] != FILL).fold(0, |m, b| m | 1 << b)
+    }
+
+    /// Which block voxel `li` is in.
+    pub(crate) fn block_of(li: usize) -> usize {
+        split(li).0
+    }
+
+    /// The fine slot at chunk-local sub-voxel `sub` (each axis in
+    /// `0 .. 32·factor`), where its block has a page at `factor`.
+    pub(crate) fn fine_slot(&self, sub: [usize; 3], factor: u8) -> Option<u8> {
+        let fine = self.fine.as_deref().filter(|f| f.factor == factor)?;
+        let (b, i) = split_fine(sub, factor as usize);
+        match fine.slot[b] {
+            FILL => None,
+            p => Some(fine.pages[p as usize][i]),
+        }
+    }
+
+    /// The chunk-local voxel a page made in sub-voxel `sub`'s block takes it
+    /// from: the nearest one in that block.
+    pub(crate) fn fine_nearest_li(sub: [usize; 3], factor: u8) -> usize {
+        let f = factor as usize;
+        let n = B * f;
+        let v = |k: usize| (sub[k] / n) * B + nearest_voxel(sub[k] % n, f);
+        (v(2) * CHUNK_U + v(1)) * CHUNK_U + v(0)
+    }
+
+    /// The slot sub-voxel `sub` reads: its page's where its block has one,
+    /// else that of the voxel of its block nearest it, which is what a page
+    /// made there would start with.
+    pub(crate) fn fine_read(&self, sub: [usize; 3], factor: u8) -> u8 {
+        match self.fine_slot(sub, factor) {
+            Some(s) => s,
+            None => self.color(Self::fine_nearest_li(sub, factor))[3],
+        }
+    }
+
+    /// Block `b`'s voxel slots, upsampled nearest into a page at `factor`.
+    fn upsample(&self, b: usize, factor: usize) -> Box<[u8]> {
+        let (bx, by, bz) = (b % BE * B, b / BE % BE * B, b / (BE * BE) * B);
+        let mut voxels = [0u8; BV];
+        for (i, v) in voxels.iter_mut().enumerate() {
+            let (x, y, z) = (i % B, i / B % B, i / (B * B));
+            *v = self.color(((bz + z) * CHUNK_U + by + y) * CHUNK_U + bx + x)[3];
+        }
+        let n = B * factor;
+        let mut page = vec![0u8; n * n * n].into_boxed_slice();
+        for z in 0..n {
+            for y in 0..n {
+                let row = (nearest_voxel(z, factor) * B + nearest_voxel(y, factor)) * B;
+                for x in 0..n {
+                    page[(z * n + y) * n + x] = voxels[row + nearest_voxel(x, factor)];
+                }
+            }
+        }
+        page
+    }
+
+    /// Paint sub-voxel `sub` with `slot` at `factor`, making its block's
+    /// page first if it has none. Pages at another factor are resampled to
+    /// this one first ([`Self::resample_fine`]). Whether anything changed.
+    pub(crate) fn set_fine_slot(&mut self, factor: u8, sub: [usize; 3], slot: u8) -> bool {
+        if self.fine_factor() != factor {
+            self.resample_fine(factor);
+        }
+        let f = factor as usize;
+        let (b, i) = split_fine(sub, f);
+        let has_page = self.fine.as_ref().is_some_and(|fine| fine.slot[b] != FILL);
+        if !has_page {
+            if self.fine_read(sub, factor) == slot {
+                return false;
+            }
+            let page = self.upsample(b, f);
+            let fine = self.fine.get_or_insert_with(|| Box::new(Fine { factor, slot: [FILL; BLOCKS], pages: Vec::new() }));
+            fine.pages.push(page);
+            fine.slot[b] = (fine.pages.len() - 1) as u16;
+        }
+        let fine = self.fine.as_deref_mut().expect("made above");
+        let cell = &mut fine.pages[fine.slot[b] as usize][i];
+        let changed = *cell != slot;
+        *cell = slot;
+        changed
+    }
+
+    /// Bring every fine page to `factor` sub-voxels a voxel, each new
+    /// sub-voxel taking the slot of the old one nearest it. A coarser factor
+    /// loses what was finer than it; going back does not bring it back.
+    pub(crate) fn resample_fine(&mut self, factor: u8) {
+        let Some(fine) = self.fine.as_deref_mut() else { return };
+        if fine.factor == factor {
+            return;
+        }
+        let (old_n, new_n) = (fine.edge(), B * factor as usize);
+        // Sub-voxel j at j/new voxels; the old sub-voxel nearest it.
+        let near = |j: usize| ((2 * j * fine.factor as usize + factor as usize) / (2 * factor as usize)).min(old_n - 1);
+        for page in &mut fine.pages {
+            let mut out = vec![0u8; new_n * new_n * new_n].into_boxed_slice();
+            for z in 0..new_n {
+                for y in 0..new_n {
+                    let row = (near(z) * old_n + near(y)) * old_n;
+                    for x in 0..new_n {
+                        out[(z * new_n + y) * new_n + x] = page[row + near(x)];
+                    }
+                }
+            }
+            *page = out;
+        }
+        fine.factor = factor;
+    }
+
+    /// Block `b`'s fine page, if it has one.
+    pub(crate) fn fine_page(&self, b: usize) -> Option<&[u8]> {
+        let fine = self.fine.as_deref()?;
+        match fine.slot[b] {
+            FILL => None,
+            p => Some(&fine.pages[p as usize]),
+        }
+    }
+
+    /// Give block `b` this page at `factor` (what a file held), replacing
+    /// any it had. Pages at another factor are resampled to this one first.
+    pub(crate) fn set_fine_page(&mut self, factor: u8, b: usize, page: Box<[u8]>) {
+        debug_assert_eq!(page.len(), (B * factor as usize).pow(3));
+        if self.fine_factor() != factor {
+            self.resample_fine(factor);
+        }
+        let fine = self.fine.get_or_insert_with(|| Box::new(Fine { factor, slot: [FILL; BLOCKS], pages: Vec::new() }));
+        match fine.slot[b] {
+            FILL => {
+                fine.pages.push(page);
+                fine.slot[b] = (fine.pages.len() - 1) as u16;
+            }
+            p => fine.pages[p as usize] = page,
+        }
+    }
+
+    /// Bytes the fine paint holds: its table and its pages.
+    pub(crate) fn fine_bytes(&self) -> usize {
+        self.fine.as_deref().map_or(0, |f| {
+            std::mem::size_of::<Fine>()
+                + f.pages.capacity() * std::mem::size_of::<Box<[u8]>>()
+                + f.pages.iter().map(|p| p.len()).sum::<usize>()
+        })
+    }
+
+    /// Drop every fine page that holds just what its block's voxels say,
+    /// and the table once no page is left: what a page reads then is what
+    /// the voxels read.
+    fn shrink_fine(&mut self) {
+        let Some(fine) = self.fine.take() else { return };
+        let f = fine.factor as usize;
+        let mut kept = Fine { factor: fine.factor, slot: [FILL; BLOCKS], pages: Vec::new() };
+        let mut pages: Vec<Option<Box<[u8]>>> = fine.pages.into_iter().map(Some).collect();
+        for b in 0..BLOCKS {
+            let p = fine.slot[b];
+            if p == FILL {
+                continue;
+            }
+            let page = pages[p as usize].take().expect("one block a page");
+            if *page != *self.upsample(b, f) {
+                kept.pages.push(page);
+                kept.slot[b] = (kept.pages.len() - 1) as u16;
+            }
+        }
+        if !kept.pages.is_empty() {
+            kept.pages.shrink_to_fit();
+            self.fine = Some(Box::new(kept));
+        }
     }
 
     /// Copy the box of voxels `s ..= e` (chunk-local, per axis) into flat buffers
@@ -303,6 +573,12 @@ impl ChunkData {
                 fill.iter_mut().for_each(|c| *c = f(*c));
                 pages.iter_mut().flatten().for_each(|c| *c = f(*c));
             }
+        }
+        // A fine page holds slots, the colours' alpha: what `f` makes of a
+        // slot it makes of every sub-voxel holding it.
+        if let Some(fine) = self.fine.as_deref_mut() {
+            let map: [u8; 256] = std::array::from_fn(|s| f([0, 0, 0, s as u8])[3]);
+            fine.pages.iter_mut().flat_map(|p| p.iter_mut()).for_each(|s| *s = map[*s as usize]);
         }
         self.shrink();
     }
@@ -399,9 +675,11 @@ impl ChunkData {
                 *pages = kept;
             }
         }
+        // Last, against the voxel slots as they now are.
+        self.shrink_fine();
     }
 
-    /// Bytes this chunk holds, its fixed tables included.
+    /// Bytes this chunk holds, its fixed tables and its fine paint included.
     pub(crate) fn heap_bytes(&self) -> usize {
         // Capacity, not length: a page vector that grew holds room for more,
         // and that room is memory as much as the pages are.
@@ -410,7 +688,11 @@ impl ChunkData {
             Colors::Raw { pages, .. } => pages.capacity() * BV * 4 + BLOCKS * 4,
         };
         // The Arc that holds it: two counts beside the data.
-        2 * std::mem::size_of::<usize>() + std::mem::size_of::<Self>() + self.dist_pages.capacity() * BV * 4 + pages
+        2 * std::mem::size_of::<usize>()
+            + std::mem::size_of::<Self>()
+            + self.dist_pages.capacity() * BV * 4
+            + pages
+            + self.fine_bytes()
     }
 }
 
@@ -474,5 +756,52 @@ mod tests {
         let u = ChunkData::from_flat(&vec![-6.0; CHUNK_VOXELS], &vec![[4, 4, 4, 4]; CHUNK_VOXELS]);
         assert_eq!(u.uniform_dist(), Some(-6.0));
         assert!(u.heap_bytes() < 8 * 1024, "a uniform chunk costs its tables, not its voxels: {}", u.heap_bytes());
+    }
+
+    /// **A fine page follows the voxels written into its block, and goes
+    /// once it says nothing they do not.** A voxel's new slot writes through
+    /// to the sub-voxels nearest it, and only those; a page holding just
+    /// what its voxels say is dropped when the chunk is packed, and the
+    /// chunk then holds nothing of the fine paint at all.
+    #[test]
+    fn a_fine_page_follows_its_voxels_and_folds_away() {
+        for factor in [2u8, 4] {
+            let f = factor as usize;
+            let n = B * f;
+            let mut d = ChunkData::new(0.0, [9, 9, 9, 1]);
+            let bare = d.heap_bytes();
+            assert_eq!((d.fine_factor(), d.fine_mask(), d.fine_bytes()), (0, 0, 0));
+            // One sub-voxel of block 0 painted: a page, all 1 but it.
+            assert!(d.set_fine_slot(factor, [3, 2, 1], 5));
+            assert!(!d.set_fine_slot(factor, [3, 2, 1], 5), "the same paint twice changes nothing");
+            assert_eq!(d.fine_mask(), 1);
+            assert_eq!(d.fine_page(0).map(|p| p.len()), Some(n * n * n));
+            // Voxel (4, 4, 4) of block 0 takes slot 7: the sub-voxels whose
+            // nearest voxel it is take it, from half a voxel below to half one above.
+            d.set_color((4 * CHUNK_U + 4) * CHUNK_U + 4, [9, 9, 9, 7]);
+            for z in 0..n {
+                for y in 0..n {
+                    for x in 0..n {
+                        let near = |j: usize| nearest_voxel(j, f) == 4;
+                        let want = if near(x) && near(y) && near(z) {
+                            7
+                        } else if [x, y, z] == [3, 2, 1] {
+                            5
+                        } else {
+                            1
+                        };
+                        assert_eq!(d.fine_read([x, y, z], factor), want, "{factor}×: sub-voxel {x} {y} {z}");
+                    }
+                }
+            }
+            // Painting over the one sub-voxel and packing: nothing the voxels
+            // do not say, so no page and no table.
+            d.set_fine_slot(factor, [3, 2, 1], 1);
+            d.shrink();
+            assert_eq!((d.fine_mask(), d.fine_bytes()), (0, 0));
+            d.set_color((4 * CHUNK_U + 4) * CHUNK_U + 4, [9, 9, 9, 1]);
+            d.shrink();
+            assert_eq!(d.heap_bytes(), bare, "{factor}×: back to what it cost before any fine paint");
+        }
     }
 }
