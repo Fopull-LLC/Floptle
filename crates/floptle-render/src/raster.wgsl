@@ -255,7 +255,16 @@ fn ext_at(idx: u32) -> Ext {
 // shadow map does not, because the wall is still there.
 // A `.flsl` surface's near fade: its fragment entry asks this.
 fn surface_fade_cut(in: VsOut, pix: vec2<u32>) -> bool {
-    return near_fade_cut(ext_at(u32(in.imeta.y)), in.view_pos, pix);
+    return near_fade_cut(ext_at(imeta_ext(in)), in.view_pos, pix);
+}
+
+// The instance's surface extras index, and whether it is a meshed terrain
+// chunk (see `VsOut.imeta`).
+fn imeta_ext(in: VsOut) -> u32 {
+    return in.imeta.x & 0x7fffffffu;
+}
+fn imeta_terrain(in: VsOut) -> bool {
+    return (in.imeta.x >> 31u) != 0u;
 }
 
 // Whether a band cross-fading (EXT_DISSOLVE) drops this pixel: gradient
@@ -1014,13 +1023,17 @@ struct VsOut {
     // `params`, this SHOULD interpolate — that gradient across the triangle is the
     // whole point of vertex painting.
     @location(11) vcolor: vec4<f32>,
-    // Two per-instance constants that must NOT interpolate: x = the meshed-terrain
-    // splat flag (0/1, from `n2.w`) — interpolating it would make the fs threshold
-    // wrong at triangle edges — and y = this instance's SURFACE EXTRAS index,
-    // where interpolating a ~16.7M integer could land one entry over and read
-    // another material's roughness. They share one varying because the raster's
-    // inter-stage budget is nearly as tight as its attribute budget.
-    @location(12) @interpolate(flat) imeta: vec2<f32>,
+    // Constants that must NOT interpolate, in one varying because the
+    // raster's inter-stage budget is full (16 with `front_facing`):
+    //  - x: this instance's SURFACE EXTRAS index, where interpolating a
+    //    ~16.7M integer could land one entry over and read another
+    //    material's roughness, and in its top bit the meshed-terrain splat
+    //    flag (from `n2.w`), which interpolated would make the fs threshold
+    //    wrong at triangle edges (`imeta_ext`, `imeta_terrain`);
+    //  - yzw: on a terrain triangle where three materials meet, what its
+    //    three corners baked (`floptle_field::mesher::split_junctions`), and
+    //    zero on every other triangle.
+    @location(12) @interpolate(flat) imeta: vec4<u32>,
     // The SAME UVs, interpolated WITHOUT the perspective divide — the PS1's
     // affine texture mapping, and the swimming it produces on big near-camera
     // polygons. Always emitted (a varying costs nothing to write); `surface_uv`
@@ -1114,7 +1127,7 @@ fn build_vs(in: VsIn, pos: vec3<f32>, normal: vec3<f32>, tbase_in: u32, tsplat_i
     let modul = (nw & 1u) != 0u;
     let ext_index = nw >> 1u;
     let ext = ext_at(ext_index);
-    out.imeta = vec2<f32>(tsplat_in, f32(ext_index));
+    out.imeta = vec4<u32>(ext_index | select(0u, 0x80000000u, tsplat_in > 0.5), 0u, 0u, 0u);
 
     var view_pos = model * vec4<f32>(pos, 1.0);
     // SWAY — the game's wind bends the surface. Measured from the node's own
@@ -1201,6 +1214,17 @@ fn build_vs(in: VsIn, pos: vec3<f32>, normal: vec3<f32>, tbase_in: u32, tsplat_i
     let tbase = tbase_in;
     let tidx = min(tbase + in.vid, arrayLength(&tpaint) - 1u);
     out.vcolor = select(vc, unpack4x8unorm(tpaint[tidx]), tbase != 0u);
+    // A vertex of a triangle where three materials meet: its edge lane points
+    // at the triangle's three words in the same store and says which corner
+    // it is (`split_junctions`). The words go to every pixel of the triangle
+    // unchanged, and the lane becomes the pixel's place in the triangle.
+    if (tbase != 0u && in.uv.y < -0.5) {
+        let corner = u32(round(-in.uv.y)) - 1u;
+        let at = u32(max(i32(tidx) + i32(round(in.uv.x)), 0));
+        let last = arrayLength(&tpaint) - 1u;
+        out.imeta = vec4<u32>(out.imeta.x, tpaint[min(at, last)], tpaint[min(at + 1u, last)], tpaint[min(at + 2u, last)]);
+        out.uv = vec2<f32>(select(0.0, 1.0, corner == 0u), select(0.0, 1.0, corner == 1u));
+    }
 
     // RETRO — per-vertex (Gouraud) lighting. Only the group(0) globals are
     // vertex-visible, so this is the key light + the placeable point lights and
@@ -1219,7 +1243,7 @@ fn build_vs(in: VsIn, pos: vec3<f32>, normal: vec3<f32>, tbase_in: u32, tsplat_i
 // The UVs this material actually samples with: affine (no perspective divide) on
 // a retro surface, perspective-correct everywhere else.
 fn surface_uv(in: VsOut) -> vec2<f32> {
-    let ext = ext_at(u32(in.imeta.y));
+    let ext = ext_at(imeta_ext(in));
     return select(in.uv, in.uv_affine, ext_has(ext, EXT_AFFINE_UV));
 }
 
@@ -1904,7 +1928,120 @@ fn terrain_edge_t(lo: i32, hi: i32, d: f32, dd: vec2<f32>, w: f32, p: vec3<f32>,
     return terrain_height_t(lo, hi, t, k, style == 2u, p, n, dpx, dpy);
 }
 
-fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32, dd: vec2<f32>) -> vec4<f32> {
+// A slot's colour for the splat (before the tint), its knobs weighed in by
+// `wt`: plain white for untextured ground (slot 0).
+fn terrain_slot_color(slot: u32, p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>, wt: f32) -> vec3<f32> {
+    if (slot == 0u || slot > 32u) {
+        terrain_surface_plain(n, wt);
+        return vec3<f32>(1.0);
+    }
+    return terrain_triplanar(i32(slot) - 1, p, n, dpx, dpy, wt) * 1.6;
+}
+
+// `n` bits of the 96 a junction triangle carries in `imeta.yzw`, from `at`.
+fn junction_bits(in: VsOut, at: u32, n: u32) -> u32 {
+    let words = array<u32, 3>(in.imeta.y, in.imeta.z, in.imeta.w);
+    let w = at / 32u;
+    let o = at % 32u;
+    var v = words[w] >> o;
+    if (o + n > 32u && w < 2u) {
+        v = v | (words[w + 1u] << (32u - o));
+    }
+    return v & ((1u << n) - 1u);
+}
+
+// A junction distance: an f16 without its three lowest mantissa bits,
+// decoded by hand (`unpack2x16float` is GLSL 4.20, past the GL floor), as
+// the mesher's own test reads it. Only positive normals are ever written.
+fn junction_half(q: u32) -> f32 {
+    let h = q << 3u;
+    let e = (h >> 10u) & 31u;
+    if (e == 0u) {
+        return 0.0;
+    }
+    return (1.0 + f32(h & 1023u) / 1024.0) * exp2(f32(e) - 15.0);
+}
+
+// A triangle where three materials meet (`VsOut.imeta`, `split_junctions`):
+// its corners baked different pairs, so no one border is the triangle's.
+// It carries its materials (up to three) and each corner's distance to
+// each; interpolated (`in.uv` is where the pixel lies in the triangle,
+// perspective-correct, `duvx`/`duvy` its change across the pixel) they give
+// the pixel's distance to each material. The border of each two is drawn
+// from the difference, as a triangle between that pair draws it from the
+// distance it baked, and each material shows by how far it wins against
+// both others. Two materials are exactly the pair's border; along an edge
+// whose corners lie far from the third, that is what the triangle beyond
+// draws, and the borders run through and meet inside.
+fn terrain_junction(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, duvx: vec2<f32>, duvy: vec2<f32>) -> vec4<f32> {
+    let slots = array<u32, 3>(junction_bits(in, 0u, 6u), junction_bits(in, 6u, 6u), junction_bits(in, 12u, 6u));
+    let n = select(2, 3, slots[2] != 0u);
+    let b = array<f32, 3>(in.uv.x, in.uv.y, 1.0 - in.uv.x - in.uv.y);
+    let bx = array<f32, 3>(duvx.x, duvx.y, -duvx.x - duvx.y);
+    let by = array<f32, 3>(duvy.x, duvy.y, -duvy.x - duvy.y);
+    // Each material's distance at the pixel, and its change across it.
+    var dm = array<f32, 3>(0.0, 0.0, 0.0);
+    var dmx = array<f32, 3>(0.0, 0.0, 0.0);
+    var dmy = array<f32, 3>(0.0, 0.0, 0.0);
+    for (var k = 0u; k < 3u; k = k + 1u) {
+        let stand = junction_bits(in, 18u + 2u * k, 2u);
+        var at = 24u + 24u * k;
+        for (var j = 0u; j < 3u; j = j + 1u) {
+            if (j == stand || i32(j) >= n) {
+                continue;
+            }
+            let d = junction_half(junction_bits(in, at, 12u));
+            at = at + 12u;
+            dm[j] += b[k] * d;
+            dmx[j] += bx[k] * d;
+            dmy[j] += by[k] * d;
+        }
+    }
+    // How far each pair's higher slot shows over its lower.
+    var t = array<f32, 3>(0.0, 0.0, 0.0); // pairs (0,1), (0,2), (1,2)
+    for (var q = 0; q < 3; q = q + 1) {
+        let i = select(0, 1, q == 2);
+        let j = select(1, 2, q != 0);
+        if (j >= n) {
+            continue;
+        }
+        let a = i32(slots[i]) - 1;
+        let z = i32(slots[j]) - 1;
+        // Positive on the higher slot's side, as `ChunkMesh::edges` bakes it.
+        let d = dm[i] - dm[j];
+        let dd = vec2<f32>(dmx[i] - dmx[j], dmy[i] - dmy[j]);
+        let w = max(slot_rec(a).blend.x, slot_rec(z).blend.x);
+        if (w > 0.0) {
+            t[q] = terrain_edge_t(a, z, d, dd, w, in.lpos, in.lnorm, dpx, dpy);
+        } else {
+            let e = max(abs(dd.x) + abs(dd.y), 1e-4);
+            t[q] = smoothstep(-e, e, d);
+        }
+    }
+    var wt = array<f32, 3>((1.0 - t[0]) * (1.0 - t[1]), t[0] * (1.0 - t[2]), t[1] * t[2]);
+    if (n == 2) {
+        wt = array<f32, 3>(1.0 - t[0], t[0], 0.0);
+    }
+    let ws = wt[0] + wt[1] + wt[2];
+    var c = vec3<f32>(0.0);
+    var glow = 0.0;
+    for (var k = 0; k < 3; k = k + 1) {
+        // Three borders that disagree (each slot beaten by another) leave no
+        // winner: the three share it.
+        let w = select(1.0 / f32(n), wt[k] / ws, ws > 1e-4);
+        if (k >= n || w < 1e-4) {
+            continue;
+        }
+        c += terrain_slot_color(slots[k], in.lpos, in.lnorm, dpx, dpy, w) * w;
+        glow += slot_glow(i32(slots[k]) - 1) * w;
+    }
+    return vec4<f32>(c * in.vcolor.rgb, glow);
+}
+
+fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32, dd: vec2<f32>, duvx: vec2<f32>, duvy: vec2<f32>) -> vec4<f32> {
+    if (in.imeta.y != 0u) {
+        return terrain_junction(in, dpx, dpy, duvx, duvy);
+    }
     let tint = in.vcolor.rgb;
     let av = in.vcolor.a * 255.0; // vertex slot: 1-based; 0 untextured, 255 legacy sentinel
     if (av < 0.5 || av > 254.5) {
@@ -2143,7 +2280,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // Everything that needs implicit derivatives happens up here, in uniform
     // control flow, BEFORE any discard or branch on per-instance data: the
     // surface maps, the tangent frame, and `base_texel`'s own sampling.
-    let ext = ext_at(u32(in.imeta.y));
+    let ext = ext_at(imeta_ext(in));
     let muv = map_uv(in);
     let geo_n = facing_normal(normalize(in.normal), front);
     // How fast the surface turns, per metre, for glass that reads its own
@@ -2173,7 +2310,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         ao_s = hex_map(ao_tex, ao_samp, mh).r;
         emit_s = hex_map(emit_tex, emit_samp, mh).rgb;
     }
-    let terrain = in.imeta.x > 0.5;
+    let terrain = imeta_terrain(in);
     // Vertex paint MULTIPLIES — it tints the textured surface rather than replacing
     // it, which is what lets painted color stand in for baked lighting/AO. "Replace"
     // needs no mode of its own: it's this multiply against a white texture.
@@ -2187,7 +2324,9 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let tp_ew = fwidth(in.uv.y);
     // How the baked edge distance changes across the pixel, for the sharp
     // and pixel borders.
-    let tp_dd = vec2<f32>(dpdx(in.uv.x), dpdy(in.uv.x));
+    let tp_duvx = dpdx(in.uv);
+    let tp_duvy = dpdy(in.uv);
+    let tp_dd = vec2<f32>(tp_duvx.x, tp_duvy.x);
     var tsplat_val = vec4<f32>(0.0);
     // The terrain Material's own values, which a palette slot without a
     // Material of its own shades with.
@@ -2195,7 +2334,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     TSB_SPEC = vec4<f32>(in.specular.rgb * in.specular.a, in.params.x);
     TSB_RIM = vec4<f32>(in.rim.rgb * in.params.y, in.params.w);
     if (terrain) {
-        tsplat_val = terrain_splat(in, tp_dpx, tp_dpy, tp_aw, tp_ew, tp_dd);
+        tsplat_val = terrain_splat(in, tp_dpx, tp_dpy, tp_aw, tp_ew, tp_dd, tp_duvx, tp_duvy);
     }
     // The palette slots' surface maps, where the terrain's blended slots
     // have any: their normal and their occlusion, roughness and metalness
@@ -2432,7 +2571,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
 // together. Glass (transmission) is left out: a custom surface draws in the
 // pass it asks for, not the refraction pass.
 fn surface_pbr(in: VsOut, front: bool, albedo: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
-    let ext = ext_at(u32(in.imeta.y));
+    let ext = ext_at(imeta_ext(in));
     let muv = map_uv(in);
     let geo_n = facing_normal(normalize(normal), front);
     let uv0 = surface_uv(in);
@@ -2506,14 +2645,14 @@ fn fs_depth(in: VsOut, @builtin(front_facing) front: bool) {
     // The one exception is a chunk still dissolving in: priming depth for a
     // pixel the color pass then discards would punch a hole in whatever is behind it, so the
     // SAME test runs here. Identical inputs, identical result — see `fs`.
-    if (in.imeta.x > 0.5) {
+    if (imeta_terrain(in)) {
         if (in.color.a < 0.999 && ign(vec2<u32>(u32(in.clip.x), u32(in.clip.y))) > in.color.a) {
             discard;
         }
         return;
     }
     let a = texel_a * in.color.a * in.vcolor.a;
-    let ext = ext_at(u32(in.imeta.y));
+    let ext = ext_at(imeta_ext(in));
     let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
     // The sun's shadow map draws through here too (`sun_extra.y` set). What
     // fades a surface for the CAMERA, its screen door and its near fade, does

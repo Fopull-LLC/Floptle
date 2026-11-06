@@ -1222,6 +1222,132 @@ mod shadow_atlas_tests {
         assert_eq!(lines, 0, "slot 2 drew between slots 1 and 3 (red, blue, green px per view): {seen:?}");
     }
 
+    /// **Where three slots meet, every border keeps its width.** Grass with
+    /// a red and a blue square painted on it, each pair meeting along a
+    /// straight line and all three at corners, every slot a Natural 1 m
+    /// border. `FLOPTLE_THREE_PNG=<dir>` writes the pictures.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn where_three_slots_meet_every_border_keeps_its_width() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_three_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
+        for (name, c) in [("green", [40u8, 200, 40, 255]), ("red", [200, 40, 40, 255]), ("blue", [40, 40, 200, 255])] {
+            let tex = floptle_render::TextureData { pixels: c.repeat(16 * 16), width: 16, height: 16 };
+            std::fs::write(dir.join(format!("textures/{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        }
+        ed.project_root = dir.clone();
+        ed.terrain_textures = vec!["textures/green.png".into(), "textures/red.png".into(), "textures/blue.png".into()];
+        // `FLOPTLE_THREE_TEX=<solar>` draws the pictures with Solar's soil,
+        // slate and flagstone and their maps instead: what the borders look
+        // like on real ground. The checks below are for the flat colours.
+        let real = std::env::var("FLOPTLE_THREE_TEX").ok();
+        if let Some(root) = &real {
+            ed.project_root = root.into();
+            let t = |n: &str| format!("textures/env/terrain/{n}");
+            let maps = |m: &str| crate::terrain_edit::SlotMaps {
+                normal: t(&format!("maps/{m}_normal.png")),
+                orm: t(&format!("maps/{m}_orm.png")),
+                height: t(&format!("maps/{m}_height.png")),
+            };
+            ed.terrain_textures = vec![t("02_soil.png"), t("09_slate.png"), t("03_flagstone.png")];
+            ed.terrain_tex_maps = vec![maps("Ground039"), maps("Rock058"), maps("Rocks011")];
+        }
+        ed.terrain_textures_dirty = true;
+        for _ in 0..20_000 {
+            ed.sync_terrain_palette(false);
+            if ed.terrain_palette_job.is_none() && !ed.terrain_textures_dirty {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut field = floptle_field::ChunkField::new(1.5);
+        field.fill_with_rgba(Vec3::new(-60.0, -10.0, -60.0), Vec3::new(60.0, 10.0, 60.0), |p: Vec3| p.y - 0.2, |_| [255, 255, 255, 1]);
+        let top = Vec3::new(0.0, 0.2, 0.0);
+        // Red left of x = 0 and blue right of it, both north of z = 0: the
+        // two meet along x = 0 and each meets the grass along z = 0.
+        for (slot, x0, x1) in [(2u8, -12, 0), (3, 0, 12)] {
+            for x in x0..x1 {
+                for z in -14..0 {
+                    let p = Vec3::new(x as f32 + 0.5, 0.0, z as f32 + 0.5);
+                    let g = field.raycast(top + p + Vec3::Y * 10.0, Vec3::NEG_Y, 20.0).unwrap_or(top + p);
+                    field.paint_texture(g, 0.75, slot);
+                }
+            }
+        }
+        add_body(&mut ed, 1, DVec3::ZERO, &field);
+        let sun = ed.world.spawn();
+        ed.world.insert(sun, Transform { rotation: floptle_core::math::Quat::from_rotation_x(-1.2), ..Transform::IDENTITY });
+        ed.world.insert(sun, floptle_core::Light { intensity: 1.0, shadows: false, ..Default::default() });
+        let (w, h) = (480u32, 320u32);
+        let views = [("low", Vec3::new(0.0, 2.5, 6.0), -0.5f32), ("above", Vec3::new(0.0, 9.0, -1.0), -1.5), ("corner", Vec3::new(0.0, 2.0, 0.5), -1.5)];
+        let shoot = |ed: &mut crate::Editor, border: crate::terrain_edit::SlotBorder, blend: f32, tag: &str| -> Vec<Vec<u8>> {
+            ed.terrain_tex_blend = vec![blend; 3];
+            ed.terrain_tex_rough = vec![0.5; 3];
+            ed.terrain_tex_border = vec![border; 3];
+            ed.terrain_gpu_dirty = true;
+            settle(ed);
+            let mut shots = Vec::new();
+            for (name, pos, pitch) in views {
+                ed.camera.position = DVec3::new((top.x + pos.x) as f64, (top.y + pos.y) as f64, (top.z + pos.z) as f64);
+                ed.camera.pitch = pitch;
+                ed.camera.yaw = 0.0;
+                let at = ed.camera.position;
+                ed.settle_terrain_meshes(at, std::time::Duration::from_secs(60));
+                let cam = ed.camera.render_camera();
+                let px = crate::shot::render_frame_pixels(ed, &cam, None, w, h, !0, false).expect("a frame");
+                if let Ok(out) = std::env::var("FLOPTLE_THREE_PNG") {
+                    let tex = floptle_render::TextureData { pixels: px.clone(), width: w, height: h };
+                    std::fs::write(std::path::Path::new(&out).join(format!("three_{tag}{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+                }
+                shots.push(px);
+            }
+            shots
+        };
+        let mut natural = crate::terrain_edit::SlotBorder::default();
+        let mut blend = 0.0;
+        crate::terrain_edit::apply_border_default(floptle_scene::TerrainBorderDoc::Natural, &mut blend, &mut natural);
+        shoot(&mut ed, natural, blend, "");
+        // A plain soft fade a metre wide: on flat ground under an even sun
+        // every border near the camera is a ramp across many pixels, so a
+        // step between two neighbouring pixels is a border cut off. The low
+        // view from its 100th row down: above that the squares' far edge is
+        // twenty metres off, where a metre is under a pixel.
+        let soft = shoot(&mut ed, crate::terrain_edit::SlotBorder::default(), 1.0, "soft_");
+        let _ = std::fs::remove_dir_all(&dir);
+        if real.is_some() {
+            return;
+        }
+        let steps: Vec<(usize, u8)> = soft
+            .iter()
+            .zip([100u32, 0, 0])
+            .map(|(px, from)| {
+                let at = |x: u32, y: u32| &px[((y * w + x) * 4) as usize..((y * w + x) * 4 + 3) as usize];
+                let (mut cuts, mut most) = (0, 0u8);
+                for y in from..h - 1 {
+                    for x in 0..w - 1 {
+                        let a = at(x, y);
+                        for b in [at(x + 1, y), at(x, y + 1)] {
+                            let d = (0..3).map(|k| a[k].abs_diff(b[k])).max().unwrap_or(0);
+                            most = most.max(d);
+                            cuts += usize::from(d > 48);
+                        }
+                    }
+                }
+                (cuts, most)
+            })
+            .collect();
+        let colours = |px: &[u8]| {
+            let n = |f: &dyn Fn(&[u8]) -> bool| px.as_chunks::<4>().0.iter().filter(|p| f(&p[..])).count();
+            (n(&|p| p[0] > 120 && p[1] < 100), n(&|p| p[1] > 120 && p[0] < 100 && p[2] < 100), n(&|p| p[2] > 120 && p[0] < 100))
+        };
+        let (r, g, b) = colours(&soft[2]);
+        assert!(r > 2000 && g > 2000 && b > 2000, "the fixture: the corner view shows all three ({r} red, {g} green, {b} blue)");
+        assert!(steps.iter().all(|(cuts, _)| *cuts == 0), "a soft border was cut off where three slots meet: (steps over 48, largest step) per view {steps:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **Anti-tiling hides a texture's repeat from far off (0626).** One slot
     /// of light noise with one dark disc per tile, so the picture's structure
     /// is the tile's own period, a grid of dots, seen straight down from 60 m. Plain, the picture correlates

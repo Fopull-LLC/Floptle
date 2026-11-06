@@ -266,6 +266,37 @@ impl MeshScratch {
         [if own == hi { to_edge } else { -to_edge }, lo as f32 + hi as f32 * 256.0]
     }
 
+    /// How far `p` is from ground of `slot`, as [`Self::slot_edge`] measures
+    /// it to the other material of a pair: to halfway between the nearest
+    /// such voxel and the voxel before it, and never under 0. Past the
+    /// reach, the reach and a voxel more: too far for any blend to show.
+    fn slot_dist(&self, p: Vec3, slot: u8) -> f32 {
+        let r = self.edge_reach as i32;
+        let far = (r as f32 + 1.0) * self.voxel;
+        let g = p / self.voxel;
+        let c = [g.x.round() as i32, g.y.round() as i32, g.z.round() as i32];
+        let ground = 0.75 * self.voxel;
+        let mut best = f32::MAX;
+        for dz in -r..=r {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let i = [c[0] + dx, c[1] + dy, c[2] + dz];
+                    let (x, y, z) = (i[0] - self.lo[0], i[1] - self.lo[1], i[2] - self.lo[2]);
+                    if x < 0 || y < 0 || z < 0 || x as usize >= self.dim || y as usize >= self.dim || z as usize >= self.dim {
+                        continue;
+                    }
+                    let k = (z as usize * self.dim + y as usize) * self.dim + x as usize;
+                    if self.color[k][3] != slot || self.dist[k].abs() > ground {
+                        continue;
+                    }
+                    let at = Vec3::new(i[0] as f32, i[1] as f32, i[2] as f32) * self.voxel;
+                    best = best.min((at - p).length());
+                }
+            }
+        }
+        if best == f32::MAX { far } else { (best - 0.5 * self.voxel).max(0.0) }
+    }
+
     /// Trilinear distance at a world position — identical maths to `ChunkField::d`.
     fn d(&self, p: Vec3) -> f32 {
         let g = p / self.voxel;
@@ -1206,7 +1237,124 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
     if skirt {
         add_skirt(&mut m, s, &rim);
     }
+    split_junctions(&mut m, s);
     m
+}
+
+/// A triangle where three materials meet carries two or three different
+/// pairs at its corners ([`ChunkMesh::edges`]), and a pair interpolated
+/// with another means nothing: such a triangle drew no border at all, and
+/// the borders round it stopped at its edges, hard, in straight lines.
+///
+/// So each such triangle gets three vertices of its own, which share
+/// nothing with its neighbours, and three words after the mesh's vertices
+/// (as the colours of three vertices no triangle uses) holding the
+/// triangle's materials, up to three, and each corner's distance to each
+/// of them, measured as [`MeshScratch::slot_edge`] measures a vertex's
+/// distance to its pair's other side. Each of its own vertices points at
+/// the words, and says which corner it is, in its `edges` lane:
+/// `[words − this vertex, −1 − corner]`. The renderer interpolates the three
+/// distances, draws the border of each two materials from the difference
+/// of theirs, as a triangle with that pair draws it, and weighs the three
+/// materials by those borders: the borders meet in the triangle, and along
+/// an edge it shares with a triangle of one pair it draws what that one does.
+///
+/// The words, as one 96-bit number, least significant bit first: the three
+/// slots (6 bits each, 0 for none), which of them each corner stands on
+/// (2 bits each), then for each corner its distances to the other two in
+/// slot order (12 bits each: an f16 without its three lowest mantissa bits).
+fn split_junctions(m: &mut ChunkMesh, s: &MeshScratch) {
+    if m.edges.is_empty() {
+        return;
+    }
+    m.edges.resize(m.positions.len(), [0.0, 0.0]);
+    let origin = Vec3::from(m.origin);
+    let tris = m.indices.len() / 3;
+    for t in 0..tris {
+        let c = [m.indices[3 * t], m.indices[3 * t + 1], m.indices[3 * t + 2]];
+        let codes = c.map(|i| m.edges[i as usize][1].round().max(0.0) as u32);
+        let mut pairs = codes.iter().filter(|k| **k != 0);
+        let Some(first) = pairs.next() else { continue };
+        if pairs.all(|k| k == first) {
+            continue;
+        }
+        let own = |k: usize| match m.colors[c[k] as usize][3] {
+            255 => 0,
+            o => o,
+        };
+        // The materials: each corner's own, then its pair's, the first
+        // three met. A fourth (two pairs with nothing in common) is the
+        // rare corner of four, and is left out.
+        let mut slots: Vec<u8> = Vec::with_capacity(3);
+        for (k, code) in codes.iter().enumerate() {
+            for sl in [own(k), (code & 255) as u8, (code >> 8) as u8] {
+                if sl != 0 && sl != 255 && !slots.contains(&sl) && slots.len() < 3 {
+                    slots.push(sl);
+                }
+            }
+        }
+        if slots.len() < 2 {
+            continue;
+        }
+        slots.sort_unstable();
+        let mut bits: u128 = 0;
+        for (k, sl) in slots.iter().enumerate() {
+            bits |= u128::from(*sl & 63) << (6 * k);
+        }
+        let mut at = 24;
+        for (k, &ck) in c.iter().enumerate() {
+            let p = Vec3::from(m.positions[ck as usize]) + origin;
+            // The corner stands on its own material, or on the nearest of
+            // them when its own is the left-out fourth.
+            let dists: Vec<f32> = slots.iter().map(|sl| if *sl == own(k) { 0.0 } else { s.slot_dist(p, *sl) }).collect();
+            let stand = (0..slots.len()).min_by(|a, b| dists[*a].total_cmp(&dists[*b])).unwrap_or(0);
+            bits |= (stand as u128) << (18 + 2 * k);
+            for (j, d) in dists.iter().enumerate() {
+                if j != stand && j < 3 {
+                    bits |= u128::from(f16_bits(d.max(0.0)) >> 3 & 0xfff) << at;
+                    at += 12;
+                }
+            }
+            // Two materials leave one distance a corner: the slot after it is skipped.
+            if slots.len() == 2 {
+                at += 12;
+            }
+        }
+        let words = [bits as u32, (bits >> 32) as u32, (bits >> 64) as u32];
+        let fresh = m.positions.len() as u32;
+        let data = fresh + 3;
+        for (k, &v) in c.iter().enumerate() {
+            let v = v as usize;
+            m.positions.push(m.positions[v]);
+            m.normals.push(m.normals[v]);
+            m.colors.push(m.colors[v]);
+            m.edges.push([(data as i64 - (fresh + k as u32) as i64) as f32, -1.0 - k as f32]);
+            m.indices[3 * t + k] = fresh + k as u32;
+        }
+        for w in words {
+            m.positions.push(m.positions[c[0] as usize]);
+            m.normals.push(m.normals[c[0] as usize]);
+            m.colors.push(w.to_le_bytes());
+            m.edges.push([0.0, 0.0]);
+        }
+    }
+}
+
+/// `x` as IEEE half-precision bits, rounded to nearest; magnitudes under
+/// half's smallest normal read as zero, over its largest as infinity.
+fn f16_bits(x: f32) -> u16 {
+    let b = x.to_bits();
+    let sign = ((b >> 16) & 0x8000) as u16;
+    let exp = ((b >> 23) & 0xff) as i32 - 127 + 15;
+    let mant = b & 0x7f_ffff;
+    if exp <= 0 {
+        return sign;
+    }
+    if exp >= 31 {
+        return sign | 0x7c00;
+    }
+    let v = ((exp as u32) << 10 | mant >> 13) + ((mant >> 12) & 1);
+    sign | v.min(0x7c00) as u16
 }
 
 /// Subdivide the surface triangles (not the skirt) up to `levels` times
@@ -1520,6 +1668,116 @@ mod tests {
     /// differ is blended from the shadow atlas, whose cells are two or three
     /// voxels across and reached the subsoil through undug ground. So the
     /// corners must not reach it either.
+    /// Flat ground of slot 1 with squares of 2 and 3 painted on it, side by
+    /// side: two borders of two materials each, and corners where all three meet.
+    fn three_slot_ground(reach: u8) -> ChunkField {
+        let mut f = ChunkField::new(1.5);
+        f.fill_with_rgba(Vec3::new(-40.0, -8.0, -40.0), Vec3::new(40.0, 8.0, 40.0), |p: Vec3| p.y - 0.2, |_| [255, 255, 255, 1]);
+        for (slot, x0, x1) in [(2u8, -12, 0), (3, 0, 12)] {
+            for x in x0..x1 {
+                for z in -14..0 {
+                    f.paint_texture(Vec3::new(x as f32 + 0.5, 0.2, z as f32 + 0.5), 0.75, slot);
+                }
+            }
+        }
+        f.set_slot_edge_reach(reach);
+        f
+    }
+
+    /// A junction triangle's words as the renderer reads them: its slots,
+    /// and per corner which it stands on and its distance to each.
+    fn decode_junction(words: [u32; 3]) -> ([u8; 3], [[f32; 3]; 3]) {
+        let bits = u128::from(words[0]) | u128::from(words[1]) << 32 | u128::from(words[2]) << 64;
+        let get = |at: u32, n: u32| ((bits >> at) & ((1u128 << n) - 1)) as u32;
+        let slots = [get(0, 6) as u8, get(6, 6) as u8, get(12, 6) as u8];
+        let n = if slots[2] != 0 { 3 } else { 2 };
+        let half = |q: u32| {
+            let h = (q << 3) as u16;
+            let (e, m) = ((h >> 10) & 31, h & 1023);
+            if e == 0 { 0.0 } else { (1.0 + m as f32 / 1024.0) * 2f32.powi(e as i32 - 15) }
+        };
+        let mut d = [[0.0f32; 3]; 3];
+        for k in 0..3u32 {
+            let stand = get(18 + 2 * k, 2) as usize;
+            let mut at = 24 + 24 * k;
+            for (j, dj) in d[k as usize].iter_mut().enumerate().take(n) {
+                if j != stand {
+                    *dj = half(get(at, 12));
+                    at += 12;
+                }
+            }
+        }
+        (slots, d)
+    }
+
+    /// **Where three materials meet, each triangle carries all three.** A
+    /// triangle whose corners baked different pairs gets vertices of its
+    /// own, pointing at words that hold its materials and each corner's
+    /// distance to each; ground of two materials gets none. Read back, each
+    /// corner's two distances for its own pair differ by exactly the
+    /// distance it baked for that pair, which is what lets the border drawn
+    /// from them run on into the triangle next door; and the extra
+    /// vertices are a small share of the mesh.
+    #[test]
+    fn where_three_materials_meet_each_triangle_carries_all_three() {
+        let f = three_slot_ground(2);
+        let (mut junctions, mut verts) = (0usize, 0usize);
+        for c in f.chunk_coords() {
+            let s = scratch_for_chunk(&f, c, 1);
+            let m = mesh_scratch(&s, false);
+            verts += m.positions.len();
+            let origin = Vec3::from(m.origin);
+            for t in 0..m.tri_count() {
+                let tri = [m.indices[3 * t], m.indices[3 * t + 1], m.indices[3 * t + 2]];
+                if m.edges[tri[0] as usize][1] >= -0.5 {
+                    // An ordinary triangle: never one whose corners baked two pairs.
+                    let mut pairs: Vec<u32> = tri.iter().map(|i| m.edges[*i as usize][1].round() as u32).filter(|k| *k != 0).collect();
+                    pairs.dedup();
+                    pairs.sort_unstable();
+                    pairs.dedup();
+                    assert!(pairs.len() <= 1, "a triangle with corners of pairs {pairs:?} was left to share its vertices");
+                    continue;
+                }
+                junctions += 1;
+                for (k, &i) in tri.iter().enumerate() {
+                    let e = m.edges[i as usize];
+                    assert_eq!(e[1], -1.0 - k as f32, "corner {k} says which it is");
+                    let data = (i as i64 + e[0] as i64) as usize;
+                    assert!(data + 2 < m.positions.len() && !m.indices.contains(&(data as u32)), "points at words no triangle draws");
+                    let words = [0, 1, 2].map(|w| u32::from_le_bytes(m.colors[data + w]));
+                    let (slots, d) = decode_junction(words);
+                    assert!(slots[0] != 0 && slots[0] < slots[1], "slots in order: {slots:?}");
+                    // What this corner bakes as an ordinary vertex.
+                    let p = Vec3::from(m.positions[i as usize]) + origin;
+                    let own = m.colors[i as usize][3];
+                    let [dist, code] = s.slot_edge(p, own);
+                    let code = code.round() as u32;
+                    if code == 0 {
+                        continue;
+                    }
+                    let (lo, hi) = ((code & 255) as u8, (code >> 8) as u8);
+                    let (Some(a), Some(b)) = (slots.iter().position(|x| *x == lo), slots.iter().position(|x| *x == hi)) else {
+                        panic!("corner {k}'s pair ({lo}, {hi}) is not among the triangle's slots {slots:?}");
+                    };
+                    let read = d[k][a] - d[k][b];
+                    assert!((read - dist).abs() <= 0.005 * dist.abs() + 1e-3, "corner {k} baked {dist} for ({lo}, {hi}) and reads {read}");
+                }
+            }
+        }
+        assert!(junctions > 4, "the fixture: corners where three meet ({junctions} triangles)");
+        assert!(junctions * 6 * 20 < verts, "{junctions} junction triangles cost {} of {verts} vertices", junctions * 6);
+
+        // Two materials only: nothing changes.
+        let mut two = ChunkField::new(1.5);
+        two.fill_with_rgba(Vec3::new(-40.0, -8.0, -40.0), Vec3::new(40.0, 8.0, 40.0), |p: Vec3| p.y - 0.2, |_| [255, 255, 255, 1]);
+        two.paint_texture(Vec3::new(0.0, 0.2, 0.0), 6.0, 2);
+        two.set_slot_edge_reach(2);
+        for c in two.chunk_coords() {
+            let m = mesh_chunk(&two, c, 1, false);
+            assert!(m.edges.iter().all(|e| e[1] >= 0.0), "ground of two materials split a triangle");
+        }
+    }
+
     #[test]
     fn the_corners_of_undug_ground_carry_its_own_slot() {
         let f = crate::procgen::generate_planet(&crate::procgen::PlanetFill {
