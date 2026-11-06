@@ -381,6 +381,7 @@ mod assembly_api;
 mod space_api;
 mod steam_api;
 mod terrain_api;
+pub mod terrain_slot_api;
 pub mod ui_make;
 pub mod vm;
 mod view_api;
@@ -798,6 +799,9 @@ pub struct ScriptHost {
     /// The ground not made yet, published by the engine each frame for
     /// `terrain.ready` and `terrain.raycast`.
     terrain_unmade: Rc<RefCell<Vec<terrain_api::UnmadeRegion>>>,
+    /// The palette slots' Materials for `terrain.slotMaterial`, and the sets
+    /// scripts made (`terrain.setSlotMaterial`).
+    terrain_slots: Rc<RefCell<terrain_slot_api::SlotMaterials>>,
     /// Terrain edits refused for a full queue since the host was made.
     terrain_dropped: Rc<std::cell::Cell<u64>>,
     /// `terrain.prepare` asks waiting for the engine.

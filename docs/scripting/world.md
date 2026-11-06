@@ -220,6 +220,9 @@ end
 | `terrain.paintTexture(x,y,z, radius, slot)` | paint a palette texture slot (1-based; 0 clears) |
 | `terrain.query(x,y,z)` → `d` | signed distance to the nearest terrain surface (negative = inside rock); `nil` with no terrain |
 | `terrain.slotAt(x,y,z)` → `slot` | the texture-palette slot at a point — *what the rock is made of*; `nil` where untextured |
+| `terrain.slotCount()` → `n` | how many slots the texture palette has |
+| `terrain.slotMaterial(slot)` → `table` | the slot's own Material, in `node:setMaterial`'s keys; `nil` when it draws with its terrain's |
+| `terrain.setSlotMaterial(slot, opts)` | give a slot a Material of its own (keys laid over the one it has); `nil` gives it back to its terrain's. A run's sets are undone on Stop |
 | `terrain.height(x, z)` → `y` | world Y of the highest surface under (x,z); `nil` if none |
 | `terrain.yields()` → `list` | the reports for edits that have **landed** since the last call (drained) |
 

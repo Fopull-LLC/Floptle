@@ -2826,6 +2826,51 @@ impl Editor {
     pub(crate) fn drain_script_terrain_ops(&mut self) {
         let ops = self.script_host.take_terrain_ops();
         self.apply_script_terrain_ops(ops);
+        self.apply_slot_material_sets();
+    }
+
+    /// The palette slots' Materials, for `terrain.slotMaterial`: one entry
+    /// per slot of the palette. Published each frame beside
+    /// [`Self::publish_terrain_busy`]'s answers, so a slot set from the
+    /// Inspector or a scene load reads the same frame.
+    pub(crate) fn publish_slot_materials(&mut self) {
+        let view = (0..self.terrain_textures.len())
+            .map(|i| self.terrain_tex_materials.get(i).and_then(Option::as_ref).map(floptle_scene::MaterialDoc::to_material))
+            .collect();
+        self.script_host.set_terrain_slot_materials(view);
+    }
+
+    /// Take the slot Materials scripts set (`terrain.setSlotMaterial`) into
+    /// the palette. The slot's knobs reach the shaders on the next frame's
+    /// slot store; a changed picture or map is read again, into the palette
+    /// already drawn. A run's sets are the run's: Stop puts the palette's
+    /// Materials back as they were (`play_terrains`), and only a set made
+    /// outside Play leaves the scene unsaved.
+    pub(crate) fn apply_slot_material_sets(&mut self) {
+        let sets = self.script_host.take_terrain_slot_sets();
+        if sets.is_empty() {
+            return;
+        }
+        let pictures = |m: Option<&floptle_scene::MaterialDoc>| {
+            m.map(|m| [m.texture.clone(), m.normal_map.clone(), m.roughness_map.clone(), m.ao_map.clone(), m.metallic_map.clone()])
+        };
+        for (i, m) in sets {
+            if i >= self.terrain_textures.len() {
+                continue;
+            }
+            if self.terrain_tex_materials.len() <= i {
+                self.terrain_tex_materials.resize(i + 1, None);
+            }
+            let next = m.as_ref().map(floptle_scene::MaterialDoc::from_material);
+            if pictures(self.terrain_tex_materials[i].as_ref()) != pictures(next.as_ref()) {
+                self.terrain_textures_dirty = true;
+            }
+            self.terrain_tex_materials[i] = next;
+        }
+        if !self.playing {
+            self.scene_dirty = true;
+        }
+        self.publish_slot_materials();
     }
 
     /// Take a frame's script terrain ops, and apply this frame's share of
@@ -4320,6 +4365,7 @@ impl Editor {
         self.script_host.set_terrain_unmade(unmade);
         let in_use = self.terrain_save_slot_in_use();
         self.script_host.set_terrain_save_dir_in_use(in_use);
+        self.publish_slot_materials();
     }
 
     /// Could anything still read or write the save slot? A terrain body in the
@@ -6378,6 +6424,66 @@ mod residency_tests {
             assert!(std::time::Instant::now() < until, "the world never finished meshing");
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+    }
+
+    /// **A script sets a terrain slot's Material, and Stop puts it back.**
+    /// `terrain.setSlotMaterial` lands in the palette after the pass, the
+    /// slot store draws the slot with its own Material from then on, and the
+    /// run's sets are the run's: Stop restores the Materials Play started with.
+    #[test]
+    fn a_script_sets_a_slots_material_for_the_run() {
+        use floptle_core::{Matter, Name, ScriptInst, Scripts, Transform};
+        use floptle_render::terrain_slots::flag;
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_slot_material_run_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("scripts/painter.lua"),
+            "function start()\n\
+               log('SLOT ' .. string.format('%.2f', terrain.slotMaterial(2).roughness))\n\
+               terrain.setSlotMaterial(1, { emissive = {1, 0, 0}, emissiveStrength = 2 })\n\
+               terrain.setSlotMaterial(2, nil)\n\
+             end\n",
+        )
+        .unwrap();
+        ed.project_root = dir.clone();
+        ed.terrain_textures = vec![String::new(), String::new()];
+        let wet = floptle_scene::MaterialDoc { roughness: 0.9, ..Default::default() };
+        ed.terrain_tex_materials = vec![None, Some(wet.clone())];
+        let driver = ed.world.spawn();
+        ed.world.insert(driver, Transform::IDENTITY);
+        ed.world.insert(driver, Name("Painter".into()));
+        ed.world.insert(driver, Matter::Empty);
+        ed.world.insert(
+            driver,
+            Scripts(vec![ScriptInst {
+                kind: "painter".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+                pinned_bools: None,
+            }]),
+        );
+        ed.toggle_play();
+        for _ in 0..4 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        ed.drain_script_logs();
+        let said: Vec<String> = ed.console.entries.iter().filter_map(|e| e.msg.strip_prefix("SLOT ").map(str::to_string)).collect();
+        assert_eq!(said, vec!["0.90".to_string()], "the script should read slot 2's own Material");
+        let first = ed.terrain_tex_materials[0].clone().expect("slot 1 should have the Material the script set");
+        assert!((first.emissive_strength - 2.0).abs() < 1e-6 && first.emissive == [1.0, 0.0, 0.0], "{first:?}");
+        assert!(ed.terrain_tex_materials[1].is_none(), "nil should give slot 2 back to its terrain's Material");
+        let store = ed.terrain_slot_store();
+        assert!(store[0].flags[0] & flag::OWN_MATERIAL != 0, "slot 1 does not draw with its own Material");
+        assert!(store[0].emissive[0] > 0.5 && store[0].emissive[1] < 0.1, "slot 1's glow did not reach the store: {:?}", store[0].emissive);
+        assert!(store[1].flags[0] & flag::OWN_MATERIAL == 0, "slot 2 still draws with a Material of its own");
+        ed.toggle_play();
+        assert_eq!(ed.terrain_tex_materials, vec![None, Some(wet)], "Stop should put the run's slot Materials back");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The ground still to come can be counted** (`perf.counts().meshesPending`).

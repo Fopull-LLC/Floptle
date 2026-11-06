@@ -3290,6 +3290,10 @@ impl ScriptHost {
                 dropped: terrain_dropped.clone(),
             },
         );
+        let terrain_slots: Rc<RefCell<crate::terrain_slot_api::SlotMaterials>> = Rc::default();
+        if let Err(e) = crate::terrain_slot_api::install(&lua, terrain_slots.clone()) {
+            floptle_say::say_err!("[lua] failed to install terrain slot materials: {e}");
+        }
         let terrain_stats: Rc<RefCell<crate::terrain_stats_api::Counted>> = Rc::default();
         if let Err(e) = crate::terrain_stats_api::install(&lua, terrain_stats.clone()) {
             floptle_say::say_err!("[lua] failed to install terrain.stats: {e}");
@@ -3503,6 +3507,7 @@ impl ScriptHost {
             terrain_busy,
             terrain_save_dir_in_use,
             terrain_unmade,
+            terrain_slots,
             terrain_dropped,
             terrain_prepare,
             create_requests,
@@ -4809,6 +4814,27 @@ impl ScriptHost {
     /// [`Self::set_terrain_busy`].
     pub fn set_terrain_unmade(&self, regions: Vec<crate::terrain_api::UnmadeRegion>) {
         *self.terrain_unmade.borrow_mut() = regions;
+    }
+
+    /// Publish the palette slots' Materials for `terrain.slotMaterial`, one
+    /// entry per slot (`None`: the slot draws with its terrain's). Sets a
+    /// script has made and the engine not yet taken stay laid over it, so
+    /// a read never goes back on what the script just set.
+    pub fn set_terrain_slot_materials(&self, view: Vec<Option<floptle_core::Material>>) {
+        let mut s = self.terrain_slots.borrow_mut();
+        s.view = view;
+        let sets = s.sets.clone();
+        for (i, m) in sets {
+            if let Some(v) = s.view.get_mut(i) {
+                *v = m;
+            }
+        }
+    }
+
+    /// The slot Materials scripts set since the last take, in order, 0-based
+    /// (`None`: the slot's Material taken away).
+    pub fn take_terrain_slot_sets(&self) -> Vec<(usize, Option<floptle_core::Material>)> {
+        std::mem::take(&mut self.terrain_slots.borrow_mut().sets)
     }
 
     /// The `terrain.prepare` asks since the last take: world-space spheres

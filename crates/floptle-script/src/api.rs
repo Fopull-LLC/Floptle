@@ -2360,6 +2360,252 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
     }
 }
 
+/// Every spelling of a three-component value the docs promise: a `vec3`, an
+/// `{x=,y=,z=}` table, an array `{1,2,3}`, and — for colours, which is what most
+/// of these fields are — `{r=,g=,b=}`. `{r,g,b}` was documented in `floptle.lua`
+/// and named in this function's own error message while being the one shape it
+/// refused.
+fn triple_of(v: &Value) -> Option<[f64; 3]> {
+    if let Some(p) = crate::math_api::vec3_of(v) {
+        return Some([p.x, p.y, p.z]);
+    }
+    if let Value::Table(t) = v {
+        if let (Ok(Some(r)), Ok(Some(g)), Ok(Some(b))) = (
+            t.get::<Option<f64>>("r"),
+            t.get::<Option<f64>>("g"),
+            t.get::<Option<f64>>("b"),
+        ) {
+            // Alpha is accepted and dropped: these fields are all three-component.
+            return Some([r, g, b]);
+        }
+        let a = t.raw_get::<Option<f64>>(1).ok().flatten()?;
+        let b = t.raw_get::<Option<f64>>(2).ok().flatten()?;
+        let c = t.raw_get::<Option<f64>>(3).ok().flatten()?;
+        return Some([a, b, c]);
+    }
+    None
+}
+
+/// A rich write's fields (`node:setMaterial{...}` and friends): numbers,
+/// bools, strings and 3-vectors, by key.
+pub(crate) fn rich_fields(t: &Table) -> mlua::Result<Vec<(String, crate::CompVal)>> {
+    let mut out = Vec::new();
+    for pair in t.pairs::<String, Value>() {
+        let (k, v) = pair?;
+        let cv = match &v {
+            Value::Number(n) => crate::CompVal::Num(*n),
+            Value::Integer(n) => crate::CompVal::Num(*n as f64),
+            Value::Boolean(b) => crate::CompVal::Num(if *b { 1.0 } else { 0.0 }),
+            Value::String(st) => crate::CompVal::Str(st.to_string_lossy().to_string()),
+            other => match triple_of(other) {
+                Some(p) => crate::CompVal::Vec3(p),
+                None => {
+                    return Err(mlua::Error::runtime(format!(
+                        "set*: field '{k}' must be a number, bool, string, vec3/{{x,y,z}} or {{r,g,b}}"
+                    )))
+                }
+            },
+        };
+        out.push((k, cv));
+    }
+    Ok(out)
+}
+
+/// Lay `fields` (the keys `node:setMaterial{...}` takes) over Material `m`:
+/// each key given changes its value, the rest keep theirs, and an unknown
+/// key or a value of the wrong kind changes nothing. True when an `alpha`
+/// with no `blend` named turned blending on or off, which a patch has to
+/// record as a key of its own.
+pub(crate) fn apply_material_fields(m: &mut floptle_core::Material, fields: &[(String, crate::CompVal)]) -> bool {
+    use crate::CompVal;
+    let num = |v: &CompVal| match v {
+        CompVal::Num(n) => Some(*n),
+        _ => None,
+    };
+    let v3 = |v: &CompVal| match v {
+        CompVal::Vec3(a) => Some([a[0] as f32, a[1] as f32, a[2] as f32]),
+        _ => None,
+    };
+    for (k, v) in fields {
+        match k.as_str() {
+            "color" => m.color = v3(v).unwrap_or(m.color),
+            "emissive" => m.emissive = v3(v).unwrap_or(m.emissive),
+            "emissiveStrength" => {
+                m.emissive_strength =
+                    num(v).map(|n| n as f32).unwrap_or(m.emissive_strength)
+            }
+            "specular" => m.specular = v3(v).unwrap_or(m.specular),
+            "shininess" => {
+                m.shininess = num(v).map(|n| n as f32).unwrap_or(m.shininess)
+            }
+            "specularStrength" => {
+                m.specular_strength =
+                    num(v).map(|n| n as f32).unwrap_or(m.specular_strength)
+            }
+            "rim" => m.rim = v3(v).unwrap_or(m.rim),
+            "rimStrength" => {
+                m.rim_strength = num(v).map(|n| n as f32).unwrap_or(m.rim_strength)
+            }
+            "unlit" => m.unlit = num(v).map(|n| n != 0.0).unwrap_or(m.unlit),
+            // `fog = false` exempts the surface from the scene's fog.
+            "fog" => m.fog = num(v).map(|n| n != 0.0).unwrap_or(m.fog),
+            "ambient" => m.ambient = num(v).map(|n| n as f32).unwrap_or(m.ambient),
+            "alpha" => m.alpha = num(v).map(|n| n as f32).unwrap_or(m.alpha),
+            // Where an opaque surface's texture alpha cuts holes
+            // (0 cuts none), and whether a face is drawn from behind.
+            "alphaCutoff" => {
+                m.alpha_cutoff = num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.alpha_cutoff)
+            }
+            "doubleSided" => m.double_sided = num(v).map(|n| n != 0.0).unwrap_or(m.double_sided),
+            // "opaque", "cutout" or "blend": how alpha is drawn.
+            "blend" => {
+                if let CompVal::Str(b) = v
+                    && let Some(b) = floptle_core::BlendMode::from_name(b)
+                {
+                    m.blend = b;
+                }
+            }
+            "texture" => {
+                if let CompVal::Str(t) = v {
+                    m.texture = (!t.is_empty()).then(|| t.clone());
+                }
+            }
+            // Spritesheet: slice the base texture into a grid and pick
+            // a cell. `sheetCols`/`sheetRows` are usually authored in
+            // the Inspector (inherited from the texture's own asset
+            // settings) and only `cell` moves at runtime.
+            "cell" => m.cell = num(v).unwrap_or(m.cell as f64).max(0.0) as u32,
+            "sheetCols" => {
+                m.sheet_cols = num(v).unwrap_or(m.sheet_cols as f64).max(0.0) as u32
+            }
+            "sheetRows" => {
+                m.sheet_rows = num(v).unwrap_or(m.sheet_rows as f64).max(0.0) as u32
+            }
+            // A 9-slice border, in texture pixels, the same on all
+            // four sides; 0 turns it off. The Inspector sets the
+            // four sides apart.
+            "slice" => {
+                if let Some(n) = num(v) {
+                    m.slice = [n.max(0.0) as f32; 4];
+                }
+            }
+            // --- the surface maps + the two lighting models. An
+            // empty string clears a map slot, the same spelling
+            // `texture` uses.
+            "normalMap" => {
+                if let CompVal::Str(t) = v {
+                    m.normal_map = (!t.is_empty()).then(|| t.clone());
+                }
+            }
+            "normalStrength" => {
+                m.normal_strength =
+                    num(v).map(|n| n as f32).unwrap_or(m.normal_strength)
+            }
+            "roughnessMap" => {
+                if let CompVal::Str(t) = v {
+                    m.roughness_map = (!t.is_empty()).then(|| t.clone());
+                }
+            }
+            "roughness" => {
+                m.roughness = num(v).map(|n| n as f32).unwrap_or(m.roughness)
+            }
+            "metallicMap" => {
+                if let CompVal::Str(t) = v {
+                    m.metallic_map = (!t.is_empty()).then(|| t.clone());
+                }
+            }
+            "metallic" => {
+                m.metallic = num(v).map(|n| n as f32).unwrap_or(m.metallic)
+            }
+            "occlusionMap" => {
+                if let CompVal::Str(t) = v {
+                    m.ao_map = (!t.is_empty()).then(|| t.clone());
+                }
+            }
+            "occlusionStrength" => {
+                m.occlusion_strength =
+                    num(v).map(|n| n as f32).unwrap_or(m.occlusion_strength)
+            }
+            "emissiveMap" => {
+                if let CompVal::Str(t) = v {
+                    m.emissive_map = (!t.is_empty()).then(|| t.clone());
+                }
+            }
+            "reflectivity" => {
+                m.reflectivity = num(v).map(|n| n as f32).unwrap_or(m.reflectivity)
+            }
+            "transmission" => {
+                m.transmission =
+                    num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.transmission)
+            }
+            "ior" => m.ior = num(v).map(|n| (n as f32).clamp(1.0, 3.0)).unwrap_or(m.ior),
+            "thickness" => {
+                m.thickness =
+                    num(v).map(|n| (n as f32).clamp(0.0, 100.0)).unwrap_or(m.thickness)
+            }
+            "sway" => m.sway = num(v).map(|n| (n as f32).clamp(0.0, 100.0)).unwrap_or(m.sway),
+            "backlight" => {
+                m.backlight = num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.backlight)
+            }
+            "nearFadeStart" => m.near_fade[0] = num(v).map(|n| (n as f32).max(0.0)).unwrap_or(m.near_fade[0]),
+            "nearFadeEnd" => m.near_fade[1] = num(v).map(|n| (n as f32).max(0.0)).unwrap_or(m.near_fade[1]),
+            // A bad name here would silently pick a lighting model,
+            // so an unparseable one leaves the material alone and the
+            // key check (`MATERIAL_KEYS`) is what reports the typo.
+            "shading" => {
+                if let CompVal::Str(t) = v
+                    && let Some(sh) = floptle_core::Shading::parse(t)
+                {
+                    m.shading = sh;
+                }
+            }
+            // "project", "auto", "solid" or "thin": how glass bends
+            // the view. An unknown name changes nothing, as above.
+            "refraction" => {
+                if let CompVal::Str(t) = v
+                    && let Some(r) = floptle_core::Refraction::parse(t)
+                {
+                    m.refraction = r;
+                }
+            }
+            // --- the deliberate PS1/N64 artefacts.
+            "jitter" => {
+                m.retro.jitter = num(v).map(|n| n as f32).unwrap_or(m.retro.jitter)
+            }
+            "affineUv" => {
+                m.retro.affine_uv = num(v).map(|n| n != 0.0).unwrap_or(m.retro.affine_uv)
+            }
+            "vertexLit" => {
+                m.retro.vertex_lit =
+                    num(v).map(|n| n != 0.0).unwrap_or(m.retro.vertex_lit)
+            }
+            "ditherAlpha" => {
+                m.retro.dither_alpha =
+                    num(v).map(|n| n != 0.0).unwrap_or(m.retro.dither_alpha)
+            }
+            // …and the opt-out from the project'S artefacts, so a
+            // script that spawns a viewmodel can hold it steady in a
+            // world the project has wobbling.
+            "retroExempt" => {
+                m.retro.exempt = num(v).map(|n| n != 0.0).unwrap_or(m.retro.exempt)
+            }
+            _ => {}
+        }
+    }
+    // Fading a solid surface is asking to see through it: an alpha
+    // below 1 with no blend named turns blend on, which is what
+    // `setMaterial{ alpha = … }` has always done, and back at 1 it
+    // draws as it did before. A blend named is the script's own.
+    let names_blend = fields.iter().any(|(k, _)| k == "blend");
+    let was = m.blend;
+    if names_blend {
+        m.faded_from = None;
+    } else if fields.iter().any(|(k, _)| k == "alpha") {
+        m.fade_to(m.alpha);
+    }
+    m.blend != was && !names_blend
+}
+
 /// Apply the construction-API writes (`RichSet`) queued this pass: whole
 /// component field-sets — the component is inserted with defaults when the
 /// node doesn't carry it — and Matter swaps. Unknown field names apply
@@ -2454,184 +2700,7 @@ pub(crate) fn apply_rich_sets(
                         None => continue,
                     },
                 };
-                for (k, v) in &fields {
-                    match k.as_str() {
-                        "color" => m.color = v3(v).unwrap_or(m.color),
-                        "emissive" => m.emissive = v3(v).unwrap_or(m.emissive),
-                        "emissiveStrength" => {
-                            m.emissive_strength =
-                                num(v).map(|n| n as f32).unwrap_or(m.emissive_strength)
-                        }
-                        "specular" => m.specular = v3(v).unwrap_or(m.specular),
-                        "shininess" => {
-                            m.shininess = num(v).map(|n| n as f32).unwrap_or(m.shininess)
-                        }
-                        "specularStrength" => {
-                            m.specular_strength =
-                                num(v).map(|n| n as f32).unwrap_or(m.specular_strength)
-                        }
-                        "rim" => m.rim = v3(v).unwrap_or(m.rim),
-                        "rimStrength" => {
-                            m.rim_strength = num(v).map(|n| n as f32).unwrap_or(m.rim_strength)
-                        }
-                        "unlit" => m.unlit = num(v).map(|n| n != 0.0).unwrap_or(m.unlit),
-                        // `fog = false` exempts the surface from the scene's fog.
-                        "fog" => m.fog = num(v).map(|n| n != 0.0).unwrap_or(m.fog),
-                        "ambient" => m.ambient = num(v).map(|n| n as f32).unwrap_or(m.ambient),
-                        "alpha" => m.alpha = num(v).map(|n| n as f32).unwrap_or(m.alpha),
-                        // Where an opaque surface's texture alpha cuts holes
-                        // (0 cuts none), and whether a face is drawn from behind.
-                        "alphaCutoff" => {
-                            m.alpha_cutoff = num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.alpha_cutoff)
-                        }
-                        "doubleSided" => m.double_sided = num(v).map(|n| n != 0.0).unwrap_or(m.double_sided),
-                        // "opaque", "cutout" or "blend": how alpha is drawn.
-                        "blend" => {
-                            if let CompVal::Str(b) = v
-                                && let Some(b) = floptle_core::BlendMode::from_name(b)
-                            {
-                                m.blend = b;
-                            }
-                        }
-                        "texture" => {
-                            if let CompVal::Str(t) = v {
-                                m.texture = (!t.is_empty()).then(|| t.clone());
-                            }
-                        }
-                        // Spritesheet: slice the base texture into a grid and pick
-                        // a cell. `sheetCols`/`sheetRows` are usually authored in
-                        // the Inspector (inherited from the texture's own asset
-                        // settings) and only `cell` moves at runtime.
-                        "cell" => m.cell = num(v).unwrap_or(m.cell as f64).max(0.0) as u32,
-                        "sheetCols" => {
-                            m.sheet_cols = num(v).unwrap_or(m.sheet_cols as f64).max(0.0) as u32
-                        }
-                        "sheetRows" => {
-                            m.sheet_rows = num(v).unwrap_or(m.sheet_rows as f64).max(0.0) as u32
-                        }
-                        // A 9-slice border, in texture pixels, the same on all
-                        // four sides; 0 turns it off. The Inspector sets the
-                        // four sides apart.
-                        "slice" => {
-                            if let Some(n) = num(v) {
-                                m.slice = [n.max(0.0) as f32; 4];
-                            }
-                        }
-                        // --- the surface maps + the two lighting models. An
-                        // empty string clears a map slot, the same spelling
-                        // `texture` uses.
-                        "normalMap" => {
-                            if let CompVal::Str(t) = v {
-                                m.normal_map = (!t.is_empty()).then(|| t.clone());
-                            }
-                        }
-                        "normalStrength" => {
-                            m.normal_strength =
-                                num(v).map(|n| n as f32).unwrap_or(m.normal_strength)
-                        }
-                        "roughnessMap" => {
-                            if let CompVal::Str(t) = v {
-                                m.roughness_map = (!t.is_empty()).then(|| t.clone());
-                            }
-                        }
-                        "roughness" => {
-                            m.roughness = num(v).map(|n| n as f32).unwrap_or(m.roughness)
-                        }
-                        "metallicMap" => {
-                            if let CompVal::Str(t) = v {
-                                m.metallic_map = (!t.is_empty()).then(|| t.clone());
-                            }
-                        }
-                        "metallic" => {
-                            m.metallic = num(v).map(|n| n as f32).unwrap_or(m.metallic)
-                        }
-                        "occlusionMap" => {
-                            if let CompVal::Str(t) = v {
-                                m.ao_map = (!t.is_empty()).then(|| t.clone());
-                            }
-                        }
-                        "occlusionStrength" => {
-                            m.occlusion_strength =
-                                num(v).map(|n| n as f32).unwrap_or(m.occlusion_strength)
-                        }
-                        "emissiveMap" => {
-                            if let CompVal::Str(t) = v {
-                                m.emissive_map = (!t.is_empty()).then(|| t.clone());
-                            }
-                        }
-                        "reflectivity" => {
-                            m.reflectivity = num(v).map(|n| n as f32).unwrap_or(m.reflectivity)
-                        }
-                        "transmission" => {
-                            m.transmission =
-                                num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.transmission)
-                        }
-                        "ior" => m.ior = num(v).map(|n| (n as f32).clamp(1.0, 3.0)).unwrap_or(m.ior),
-                        "thickness" => {
-                            m.thickness =
-                                num(v).map(|n| (n as f32).clamp(0.0, 100.0)).unwrap_or(m.thickness)
-                        }
-                        "sway" => m.sway = num(v).map(|n| (n as f32).clamp(0.0, 100.0)).unwrap_or(m.sway),
-                        "backlight" => {
-                            m.backlight = num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.backlight)
-                        }
-                        "nearFadeStart" => m.near_fade[0] = num(v).map(|n| (n as f32).max(0.0)).unwrap_or(m.near_fade[0]),
-                        "nearFadeEnd" => m.near_fade[1] = num(v).map(|n| (n as f32).max(0.0)).unwrap_or(m.near_fade[1]),
-                        // A bad name here would silently pick a lighting model,
-                        // so an unparseable one leaves the material alone and the
-                        // key check (`MATERIAL_KEYS`) is what reports the typo.
-                        "shading" => {
-                            if let CompVal::Str(t) = v
-                                && let Some(sh) = floptle_core::Shading::parse(t)
-                            {
-                                m.shading = sh;
-                            }
-                        }
-                        // "project", "auto", "solid" or "thin": how glass bends
-                        // the view. An unknown name changes nothing, as above.
-                        "refraction" => {
-                            if let CompVal::Str(t) = v
-                                && let Some(r) = floptle_core::Refraction::parse(t)
-                            {
-                                m.refraction = r;
-                            }
-                        }
-                        // --- the deliberate PS1/N64 artefacts.
-                        "jitter" => {
-                            m.retro.jitter = num(v).map(|n| n as f32).unwrap_or(m.retro.jitter)
-                        }
-                        "affineUv" => {
-                            m.retro.affine_uv = num(v).map(|n| n != 0.0).unwrap_or(m.retro.affine_uv)
-                        }
-                        "vertexLit" => {
-                            m.retro.vertex_lit =
-                                num(v).map(|n| n != 0.0).unwrap_or(m.retro.vertex_lit)
-                        }
-                        "ditherAlpha" => {
-                            m.retro.dither_alpha =
-                                num(v).map(|n| n != 0.0).unwrap_or(m.retro.dither_alpha)
-                        }
-                        // …and the opt-out from the project'S artefacts, so a
-                        // script that spawns a viewmodel can hold it steady in a
-                        // world the project has wobbling.
-                        "retroExempt" => {
-                            m.retro.exempt = num(v).map(|n| n != 0.0).unwrap_or(m.retro.exempt)
-                        }
-                        _ => {}
-                    }
-                }
-                // Fading a solid surface is asking to see through it: an alpha
-                // below 1 with no blend named turns blend on, which is what
-                // `setMaterial{ alpha = … }` has always done, and back at 1 it
-                // draws as it did before. A blend named is the script's own.
-                let names_blend = fields.iter().any(|(k, _)| k == "blend");
-                let was = m.blend;
-                if names_blend {
-                    m.faded_from = None;
-                } else if fields.iter().any(|(k, _)| k == "alpha") {
-                    m.fade_to(m.alpha);
-                }
-                let fades = m.blend != was && !names_blend;
+                let fades = apply_material_fields(m, &fields);
                 if let Some(mut p) = patch {
                     for (k, _) in &fields {
                         if !p.names(k) && MATERIAL_KEYS.contains(&k.as_str()) {
@@ -6527,54 +6596,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
 // the node doesn't have it. Field names are the Lua-facing camelCase.
 {
     let q = shared.rich_sets.clone();
-    // A 3-vector in any of the Lua spellings: vec3(..), {x=,y=,z=}, {r,g,b}.
-    /// Every spelling of a three-component value the docs promise: a `vec3`, an
-    /// `{x=,y=,z=}` table, an array `{1,2,3}`, and — for colours, which is what most
-    /// of these fields are — `{r=,g=,b=}`. `{r,g,b}` was documented in `floptle.lua`
-    /// and named in this function's own error message while being the one shape it
-    /// refused.
-    fn triple_of(v: &Value) -> Option<[f64; 3]> {
-        if let Some(p) = crate::math_api::vec3_of(v) {
-            return Some([p.x, p.y, p.z]);
-        }
-        if let Value::Table(t) = v {
-            if let (Ok(Some(r)), Ok(Some(g)), Ok(Some(b))) = (
-                t.get::<Option<f64>>("r"),
-                t.get::<Option<f64>>("g"),
-                t.get::<Option<f64>>("b"),
-            ) {
-                // Alpha is accepted and dropped: these fields are all three-component.
-                return Some([r, g, b]);
-            }
-            let a = t.raw_get::<Option<f64>>(1).ok().flatten()?;
-            let b = t.raw_get::<Option<f64>>(2).ok().flatten()?;
-            let c = t.raw_get::<Option<f64>>(3).ok().flatten()?;
-            return Some([a, b, c]);
-        }
-        None
-    }
-    let fields_of = |t: &Table| -> mlua::Result<Vec<(String, crate::CompVal)>> {
-        let mut out = Vec::new();
-        for pair in t.pairs::<String, Value>() {
-            let (k, v) = pair?;
-            let cv = match &v {
-                Value::Number(n) => crate::CompVal::Num(*n),
-                Value::Integer(n) => crate::CompVal::Num(*n as f64),
-                Value::Boolean(b) => crate::CompVal::Num(if *b { 1.0 } else { 0.0 }),
-                Value::String(st) => crate::CompVal::Str(st.to_string_lossy().to_string()),
-                other => match triple_of(other) {
-                    Some(p) => crate::CompVal::Vec3(p),
-                    None => {
-                        return Err(mlua::Error::runtime(format!(
-                            "set*: field '{k}' must be a number, bool, string, vec3/{{x,y,z}} or {{r,g,b}}"
-                        )))
-                    }
-                },
-            };
-            out.push((k, cv));
-        }
-        Ok(out)
-    };
+    let fields_of = rich_fields;
     {
         let q = q.clone();
         let fo = fields_of;

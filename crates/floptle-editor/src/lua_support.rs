@@ -2211,6 +2211,20 @@ function terrain.query(x, y, z) end
 ---@param z number
 ---@return number|nil
 function terrain.slotAt(x, y, z) end
+---How many slots the terrain texture palette has (numbered from 1).
+---@return number
+function terrain.slotCount() end
+---A palette slot's own Material, as a table of node:setMaterial's keys, or nil
+---when the slot draws with its terrain's Material.
+---@param slot number
+---@return table|nil
+function terrain.slotMaterial(slot) end
+---Give a palette slot a Material of its own (node:setMaterial's keys, laid over
+---the one it has), or nil to give it back to its terrain's. A run's sets are
+---undone on Stop.
+---@param slot number
+---@param opts table|nil
+function terrain.setSlotMaterial(slot, opts) end
 ---Everything inside a sphere: a list of hits, deepest overlap first. Hits carry
 ---the same fields a raycast hit does; `distance` is the PENETRATION DEPTH.
 ---Sees sensors (a hitbox wants to know it swept a trigger) and, inside

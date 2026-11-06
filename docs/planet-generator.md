@@ -152,6 +152,22 @@ Where the slot's palette line names no picture or map, the Material's own fill i
 
 A palette with slot Materials is saved in a second file, `terrain/<scene>.palette.ron`, which holds each slot's line and its Material. The line file is still written beside it with everything it can carry, so an older engine shows the same pictures. A palette without slot Materials keeps the line file alone, byte for byte as before, and taking the last slot Material away removes the second file.
 
+A game reads and sets slot Materials while it runs, with the keys `node:setMaterial` takes:
+
+```lua
+-- The lava slot glows brighter as the eruption builds.
+local lava = terrain.slotMaterial(4) or {}
+lava.emissive = vec3(1, 0.35, 0.05)
+lava.emissiveStrength = 2 + 6 * eruption
+terrain.setSlotMaterial(4, lava)
+
+-- Rain: the cobbles go glossy, and the dirt slot keeps its terrain's look.
+terrain.setSlotMaterial(2, { roughness = 0.15 })
+terrain.setSlotMaterial(3, nil)
+```
+
+`terrain.setSlotMaterial` lays the keys given over the slot's own Material and leaves the rest, and `nil` gives the slot back to its terrain's Material. Numbers draw on the next frame. A new texture or map path is read in the background into the palette already drawn, so the other slots do not flicker. What a game sets during Play lasts for the run, and Stop puts the palette back as it was.
+
 ## The shape of what is dug
 
 How dug, raised and sculpted ground is drawn is the project's choice

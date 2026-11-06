@@ -2047,3 +2047,76 @@ fn a_spawn_callback_reaches_the_new_node_s_script() {
     assert_eq!(world.get::<Transform>(crew).unwrap().translation.x, 7.0, "the bind made in the spawn callback was lost");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A script reads and sets a terrain slot's Material.** The keys are
+/// `node:setMaterial`'s and the table `terrain.slotMaterial` answers takes
+/// them back, so a read, a change and a set round-trip. A set lays its keys
+/// over the slot's Material and leaves the rest; nil gives the slot back to
+/// its terrain's Material; a read straight after a set answers the set,
+/// before the engine has taken it; a slot past the palette and a key
+/// `setMaterial` does not know are refused by name.
+#[test]
+fn a_script_reads_and_sets_a_terrain_slots_material() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_slot_material_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "slots",
+        "function start()\n\
+           log(tostring(terrain.slotCount()) .. ' ' .. tostring(terrain.slotMaterial(1)))\n\
+           local m = terrain.slotMaterial(2)\n\
+           log(string.format('%.2f %.2f', m.roughness, m.metallic))\n\
+           m.roughness = 0.1\n\
+           terrain.setSlotMaterial(2, m)\n\
+           terrain.setSlotMaterial(1, { emissive = {1, 0.5, 0}, emissiveStrength = 3, unlit = true })\n\
+           local back = terrain.slotMaterial(1)\n\
+           log(string.format('%.2f %.2f %s %.2f', back.emissive.y, back.emissiveStrength, tostring(back.unlit), back.roughness))\n\
+           terrain.setSlotMaterial(1, { roughness = 0.3 })\n\
+           log(string.format('%.2f %.2f', terrain.slotMaterial(1).emissiveStrength, terrain.slotMaterial(1).roughness))\n\
+           terrain.setSlotMaterial(3, nil)\n\
+           log(tostring(pcall(terrain.slotMaterial, 4)) .. ' ' .. tostring(select(2, pcall(terrain.slotMaterial, 4))))\n\
+           log(tostring(select(2, pcall(terrain.setSlotMaterial, 1, { roughnes = 1 }))))\n\
+         end\n\
+         function update() local m = terrain.slotMaterial(1) log('U ' .. (m and string.format('%.2f', m.emissiveStrength) or 'nil')) end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+        kind: "slots".into(),
+        enabled: true,
+        params: Vec::new(),
+        refs: Vec::new(),
+        strs: Vec::new(),
+        pinned_bools: None,
+    }]));
+    let mut host = ScriptHost::new();
+    let metal = floptle_core::Material { roughness: 0.6, metallic: 0.8, ..Default::default() };
+    let gold = floptle_core::Material { roughness: 0.9, ..Default::default() };
+    host.set_terrain_slot_materials(vec![None, Some(metal), Some(gold)]);
+    host.set_playing(true);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert_eq!(said[0], "3 nil", "{said:?}");
+    assert_eq!(said[1], "0.60 0.80", "{said:?}");
+    assert_eq!(said[2], format!("0.50 3.00 true {:.2}", floptle_core::Material::default().roughness), "{said:?}");
+    assert_eq!(said[3], "3.00 0.30", "a set should keep the keys it does not name: {said:?}");
+    assert!(said[4].starts_with("false") && said[4].contains("slot 4") && said[4].contains("3 slots"), "{said:?}");
+    assert!(said[5].contains("roughnes"), "{said:?}");
+    // The engine publishes its own view before it has taken the sets: the
+    // script still reads what it set, not the slot as it was.
+    host.set_terrain_slot_materials(vec![None, None, None]);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    let again: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert_eq!(again.last().map(String::as_str), Some("U 3.00"), "a publish went back on a set not yet taken: {again:?}");
+    let sets = host.take_terrain_slot_sets();
+    let slots: Vec<usize> = sets.iter().map(|(i, _)| *i).collect();
+    assert_eq!(slots, vec![1, 0, 0, 2], "{sets:?}");
+    let two = sets[0].1.as_ref().expect("slot 2 keeps a Material");
+    assert!((two.roughness - 0.1).abs() < 1e-6 && (two.metallic - 0.8).abs() < 1e-6, "{two:?}");
+    assert!(sets[3].1.is_none(), "nil should take slot 3's Material away");
+    assert!(host.take_terrain_slot_sets().is_empty(), "a take empties the queue");
+    let _ = std::fs::remove_dir_all(&dir);
+}

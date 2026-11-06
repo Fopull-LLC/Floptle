@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 78
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 30
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 33
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 11
 - [weather — wind](#weather--wind) — 6
@@ -3058,9 +3058,21 @@ terrain.setDetail(scale) — a view-distance / terrain-detail setting: every ter
 
 terrain.setShape("natural" | "faceted" | level) — how dug, raised and sculpted ground is drawn, for the session, in place of the project's Terrain shape setting (nil goes back to it). "natural" (level 4) gives curved ground as many vertices as its curve needs, each on the terrain's own surface, so a 3 m dig on 1.5 m voxels is round, no straight piece of its rim over 0.3 m; flat ground is never split and costs nothing more. "faceted" (level 0) is one vertex a voxel, the crisp low-poly look: a dig is a polygon of voxel-long sides. Levels 1 to 3 are between. On a generated world only ground that was dug or raised is subdivided; its own relief is drawn as it was. Meshing an edited chunk costs about 1×, 1.1×, 1.9×, 4× and 8× (levels 0 to 4) of the faceted cost where the ground curves. Refuses: any other name.
 
+### `terrain.setSlotMaterial`
+
+terrain.setSlotMaterial(slot, { ... } | nil) — give a palette slot a Material of its own, with node:setMaterial's keys: the ground painted with that slot shines, glows, takes its own normal map at its own strength (negative turns bumps into dents) or goes unlit, whatever the terrain's Material is. The keys given are laid over the slot's own Material and the rest keep their values; a slot without one starts from the default Material. nil gives the slot back to its terrain's Material. A new texture or map path is read in the background, the others draw straight away. Sets made during Play last for the run: Stop puts the palette's Materials back. Set from an editor action, it is a change to the scene, saved with its palette. Refuses: a slot outside 1 to terrain.slotCount(), a key setMaterial does not take.
+
 ### `terrain.slotAt`
 
 terrain.slotAt(x, y, z) — the texture-palette slot at a world point, or nil where the field is untextured. The material half of the question terrain.query answers the distance half of: survey before you cut, and let a footstep know what it is standing on.
+
+### `terrain.slotCount`
+
+terrain.slotCount() → how many slots the terrain texture palette has. Slots are numbered from 1, as terrain.paintTexture and terrain.slotMaterial number them.
+
+### `terrain.slotMaterial`
+
+terrain.slotMaterial(slot) → the palette slot's own Material as a table of node:setMaterial's keys (color, emissive, emissiveStrength, roughness, metallic, normalStrength, texture, normalMap, shading and the rest), or nil when the slot draws with its terrain's Material. Change a key and hand the table to terrain.setSlotMaterial to set it. Refuses: a slot outside 1 to terrain.slotCount().
 
 ### `terrain.stats`
 

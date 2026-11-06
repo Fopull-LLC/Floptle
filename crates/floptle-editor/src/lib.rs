@@ -3859,6 +3859,9 @@ struct Editor {
     /// it — Stop restores from here so unsaved sculpts survive Play and a
     /// mid-play scene switch can't leak another scene's terrain into this one.
     play_terrains: Option<PlayTerrains>,
+    /// The palette slots' Materials when Play started: what a run's
+    /// `terrain.setSlotMaterial` calls are undone to on Stop.
+    play_slot_materials: Option<Vec<Option<floptle_scene::MaterialDoc>>>,
     /// The `scene.load` / `scene.unload` calls scripts queued this frame —
     /// performed at the top of the next frame, in order (never mid-frame under
     /// the running scripts).

@@ -1177,6 +1177,13 @@ impl Editor {
                 self.terrain_textures_dirty = true;
                 self.terrain_gpu_dirty = !self.terrains.is_empty();
             }
+            // …and the slots' Materials, which a script may have set.
+            if let Some(m) = self.play_slot_materials.take()
+                && m != self.terrain_tex_materials
+            {
+                self.terrain_tex_materials = m;
+                self.terrain_textures_dirty = true;
+            }
             // G1 residency: terrains that streamed in during Play were cold at
             // Play start (not in the snapshot above) — drop them back to cold so
             // Play can't leak residency or persist in-Play digs on them. Their
@@ -1224,6 +1231,7 @@ impl Editor {
             // mid-play scene switch can never leak another scene's terrain
             // into this one (see Stop above).
             self.play_maps = Some(self.maps.meshes.clone());
+            self.play_slot_materials = Some(self.terrain_tex_materials.clone());
             self.play_terrains = Some((
                 self.terrains
                     .iter()
