@@ -135,6 +135,23 @@ Every map is filtered the way the slot's colour is: a slot whose texture is set 
 
 A terrain node's own Material now applies in full: its shading model, roughness and metalness reach the ground. Before this they were ignored and terrain always drew with the Classic model.
 
+## A slot's own Material
+
+A palette slot can carry a full Material of its own, the same kind a mesh wears, and then shades with it instead of the terrain's. Wet cobbles beside dry dirt, a glowing lava crack, metal ore in rock, or one unlit slot in a lit world all come from one terrain. What a slot's Material sets:
+
+- **Shading model**: Classic or Physical, chosen per slot.
+- **Roughness and metalness**, multiplied by the slot's ORM map if it has one.
+- **Normal strength**: how strongly the slot's normal map bends the light. 2 doubles the bumps; a negative value turns bumps into dents.
+- **Occlusion strength**: how much the ORM map's occlusion darkens the sky's light.
+- **Colour**: tints the slot's picture.
+- **Emissive colour and strength**: light the slot gives off, which shows in the dark and is not darkened by occlusion.
+- **Unlit**: the slot shows its colour as it is, whatever light falls on it.
+- **Classic specular, shininess, rim and ambient**, for slots shaded with the Classic model.
+
+Where the slot's palette line names no picture or map, the Material's own fill in: its texture becomes the slot's colour, its normal map the slot's normal map, and its roughness, occlusion or metal map the slot's ORM map, read as glTF packs them (R occlusion, G roughness, B metalness). A slot without a Material of its own shades with the terrain's, exactly as before. Where two slots meet, everything above blends across the border with their textures.
+
+A palette with slot Materials is saved in a second file, `terrain/<scene>.palette.ron`, which holds each slot's line and its Material. The line file is still written beside it with everything it can carry, so an older engine shows the same pictures. A palette without slot Materials keeps the line file alone, byte for byte as before, and taking the last slot Material away removes the second file.
+
 ## The shape of what is dug
 
 How dug, raised and sculpted ground is drawn is the project's choice

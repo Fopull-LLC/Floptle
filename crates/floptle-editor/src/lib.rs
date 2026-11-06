@@ -2855,6 +2855,9 @@ struct Editor {
     /// Per palette slot, its surface maps (`|normal=`, `|orm=`, `|height=`).
     /// Short of the palette, a slot has none.
     terrain_tex_maps: Vec<crate::terrain_edit::SlotMaps>,
+    /// Per palette slot, its own Material, if it has one (the versioned
+    /// palette file, `terrain_edit::PaletteDoc`). Short of the palette, none.
+    terrain_tex_materials: Vec<Option<floptle_scene::MaterialDoc>>,
     /// Which slots' normal and ORM maps loaded, bit per slot, as the
     /// palette on the GPU has them: the shader's `terrain_bits` z and w.
     terrain_surface_bits: [u32; 2],

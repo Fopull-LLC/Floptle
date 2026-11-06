@@ -2318,6 +2318,16 @@ impl Editor {
                 );
                 ok = false;
             }
+            if let Err(e) =
+                crate::terrain_edit::write_palette_doc(&self.terrain_palette_path(), &palette, &self.terrain_tex_materials)
+            {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("💾 save terrain palette materials failed: {e}"),
+                    None,
+                );
+                ok = false;
+            }
         }
         if ok {
             self.scene_dirty = false;

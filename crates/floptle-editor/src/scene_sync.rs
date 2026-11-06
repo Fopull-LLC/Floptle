@@ -254,11 +254,26 @@ impl Editor {
                 .enumerate()
                 .map(|(i, p)| {
                     let m = self.terrain_tex_maps.get(i).cloned().unwrap_or_default();
+                    // A slot's own Material fills in what its palette line
+                    // does not name: its picture, its normal map, and one
+                    // ORM picture from its roughness, occlusion or metal map
+                    // (read as glTF packs them, R occlusion, G roughness, B
+                    // metalness).
+                    let own = self.terrain_tex_materials.get(i).and_then(Option::as_ref);
+                    let or_own = |line: &str, own: Option<&Option<String>>| -> String {
+                        if line.is_empty() { own.and_then(|o| o.clone()).unwrap_or_default() } else { line.to_string() }
+                    };
+                    let colour = or_own(p, own.map(|o| &o.texture));
+                    let orm_own = own.and_then(|o| o.roughness_map.clone().or_else(|| o.ao_map.clone()).or_else(|| o.metallic_map.clone()));
                     PaletteSlotFiles {
-                        colour: resolve(p),
-                        nearest: crate::assets::tex_setting(settings, &root, p).filter
+                        nearest: crate::assets::tex_setting(settings, &root, &colour).filter
                             == crate::assets::FilterMode::Pixelated,
-                        maps: [resolve(&m.normal), resolve(&m.orm), resolve(&m.height)],
+                        colour: resolve(&colour),
+                        maps: [
+                            resolve(&or_own(&m.normal, own.map(|o| &o.normal_map))),
+                            resolve(&or_own(&m.orm, Some(&orm_own))),
+                            resolve(&m.height),
+                        ],
                     }
                 })
                 .collect();
@@ -1253,7 +1268,7 @@ mod shadow_atlas_tests {
         (w, h): (u32, u32),
         suns: &[([f32; 3], f32)],
     ) -> Vec<Vec<u8>> {
-        terrain_photos_filtered(tag, colour, normal, orm, antitile, crate::assets::FilterMode::SmoothMipmaps, height, (w, h), suns)
+        terrain_photos_filtered(tag, colour, normal, orm, antitile, crate::assets::FilterMode::SmoothMipmaps, None, height, (w, h), suns)
     }
 
     /// [`terrain_photos`] with the slot's colour sampled by `filter`.
@@ -1266,6 +1281,7 @@ mod shadow_atlas_tests {
         orm: Option<floptle_render::TextureData>,
         antitile: f32,
         filter: crate::assets::FilterMode,
+        material: Option<floptle_scene::MaterialDoc>,
         height: f64,
         (w, h): (u32, u32),
         suns: &[([f32; 3], f32)],
@@ -1290,6 +1306,7 @@ mod shadow_atlas_tests {
         ed.terrain_textures = vec![colour.clone()];
         ed.terrain_tex_maps = vec![maps];
         ed.terrain_tex_tile = vec![[antitile, 0.0, 0.0]];
+        ed.terrain_tex_materials = vec![material];
         ed.texture_settings.insert(colour, crate::assets::TexSetting { filter, ..Default::default() });
         land_palette(&mut ed);
         let field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
@@ -1516,7 +1533,7 @@ mod shadow_atlas_tests {
         let (w, h) = (320u32, 240u32);
         for (side, height) in [(8u32, 6.0f64), (256, 0.15)] {
         let shoot = |tag: &str, filter| {
-            terrain_photos_filtered(&format!("{tag}{side}"), grey(side), Some(checker(side)), None, 0.0, filter, height, (w, h), &sun)
+            terrain_photos_filtered(&format!("{tag}{side}"), grey(side), Some(checker(side)), None, 0.0, filter, None, height, (w, h), &sun)
         };
         let crisp = shoot("pixelnormal", crate::assets::FilterMode::Pixelated);
         if crisp.is_empty() {
@@ -1830,6 +1847,105 @@ mod shadow_atlas_tests {
         let last = palette_colour(&ed, 31);
         assert!((last[0] as i32 - 217).abs() <= 3 && (last[1] as i32 - 38).abs() <= 3, "the last slot landed as {last:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Plain grey ground, a slot Material `material` (`None`: the terrain's
+    /// own), a normal map `normal`: the mean and brightest pixel of the
+    /// middle under each sun, and the mean red.
+    #[cfg(feature = "editor-ui")]
+    fn slot_material_ground(tag: &str, normal: Option<[u8; 4]>, material: Option<floptle_scene::MaterialDoc>, suns: &[([f32; 3], f32)]) -> Vec<[f32; 3]> {
+        let shots = terrain_photos_filtered(
+            tag,
+            flat_tex([180, 180, 180, 255]),
+            normal.map(flat_tex),
+            None,
+            0.0,
+            crate::assets::FilterMode::SmoothMipmaps,
+            material,
+            60.0,
+            (160, 120),
+            suns,
+        );
+        shots
+            .iter()
+            .map(|px| {
+                let (mut sum, mut peak, mut red) = (0.0f32, 0.0f32, 0.0f32);
+                for y in 40..80u32 {
+                    for x in 60..100u32 {
+                        let i = ((y * 160 + x) * 4) as usize;
+                        let l = px[i] as f32 * 0.3 + px[i + 1] as f32 * 0.59 + px[i + 2] as f32 * 0.11;
+                        sum += l;
+                        peak = peak.max(l);
+                        red += px[i] as f32 - (px[i + 1] as f32 + px[i + 2] as f32) * 0.5;
+                    }
+                }
+                [sum / 1600.0, peak, red / 1600.0]
+            })
+            .collect()
+    }
+
+    /// A slot Material: Physical, the rest as `f` sets it.
+    #[cfg(feature = "editor-ui")]
+    fn slot_material(f: impl FnOnce(&mut floptle_core::Material)) -> Option<floptle_scene::MaterialDoc> {
+        let mut m = floptle_core::Material { shading: floptle_core::material::Shading::Physical, roughness: 1.0, metallic: 0.0, ..Default::default() };
+        f(&mut m);
+        Some(floptle_scene::MaterialDoc::from_material(&m))
+    }
+
+    /// **A palette slot shades with its own Material.** Wet cobbles beside
+    /// dry dirt: a slot whose Material is smooth catches the sun's highlight
+    /// on terrain whose own Material is rough. Before, one Material shaded
+    /// every slot.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn a_slot_with_a_smooth_material_catches_the_highlight() {
+        let sun = [([0.0, 1.0, 0.05], 1.0)];
+        let dry = slot_material_ground("dry", None, None, &sun);
+        if dry.is_empty() {
+            return;
+        }
+        let wet = slot_material_ground("wet", None, slot_material(|m| m.roughness = 0.12), &sun);
+        assert!(wet[0][1] > dry[0][1] * 1.3, "a smooth slot Material should catch the highlight: peak {:.1} against {:.1}", wet[0][1], dry[0][1]);
+    }
+
+    /// **A slot Material's normal strength scales its bumps, and a negative
+    /// one turns them into dents.** Both signs probed: a map tilting to the
+    /// picture's right faces +x at strength 2 and −x at strength −1.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn a_negative_normal_strength_turns_bumps_into_dents() {
+        let suns = [(sun_from(1.0, 0.0), 1.0), (sun_from(-1.0, 0.0), 1.0)];
+        let right = Some([218, 128, 218, 255]);
+        let up = slot_material_ground("nstrong", right, slot_material(|m| m.normal_strength = 2.0), &suns);
+        if up.is_empty() {
+            return;
+        }
+        let flipped = slot_material_ground("nflip", right, slot_material(|m| m.normal_strength = -1.0), &suns);
+        let flat = slot_material_ground("nzero", right, slot_material(|m| m.normal_strength = 0.0), &suns);
+        assert!(up[0][0] > up[1][0] * 1.3, "strength 2 should face +x: {up:?}");
+        assert!(flipped[1][0] > flipped[0][0] * 1.3, "strength -1 should face -x: {flipped:?}");
+        assert!((flat[0][0] - flat[1][0]).abs() < flat[0][0] * 0.05, "strength 0 should light both sides alike: {flat:?}");
+    }
+
+    /// **A slot Material can glow, and can be unlit.** With no sun at all, a
+    /// slot whose Material is emissive orange shows orange, and an unlit slot
+    /// shows its own colour, where the terrain's own Material leaves the
+    /// ground in the dark.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn a_slot_material_can_glow_and_be_unlit() {
+        let dark = [([0.0, 1.0, 0.0], 0.0)];
+        let plain = slot_material_ground("dark", None, None, &dark);
+        if plain.is_empty() {
+            return;
+        }
+        let glow = slot_material_ground("glow", None, slot_material(|m| {
+            m.emissive = [1.0, 0.35, 0.0];
+            m.emissive_strength = 2.0;
+        }), &dark);
+        let unlit = slot_material_ground("unlit", None, slot_material(|m| m.unlit = true), &dark);
+        assert!(glow[0][2] > plain[0][2] + 40.0, "an emissive slot should glow orange in the dark: red {:.1} against {:.1}", glow[0][2], plain[0][2]);
+        assert!(unlit[0][0] > plain[0][0] * 2.0 && unlit[0][0] > 120.0, "an unlit slot should show its colour in the dark: {:.1} against {:.1}", unlit[0][0], plain[0][0]);
     }
 
     /// **The palette is one array, at the size the project asks for.** The

@@ -1417,6 +1417,106 @@ impl SlotMaps {
     }
 }
 
+/// The versioned palette file, `terrain/<scene>.palette.ron`, beside the line
+/// file. Written only once a slot has something the line file cannot carry
+/// (its own [`floptle_scene::MaterialDoc`]); a palette without one keeps the
+/// line file alone, byte for byte as before. When both exist this one wins,
+/// and the line file is still rewritten with what it can say, so an older
+/// engine shows the same pictures.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
+pub(crate) struct PaletteDoc {
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub slots: Vec<PaletteSlotDoc>,
+}
+
+/// One slot of a [`PaletteDoc`].
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
+pub(crate) struct PaletteSlotDoc {
+    /// The slot as the line file has it: its picture's path, then its
+    /// `|flag`s ([`PaletteFlags`], [`SlotMaps`]).
+    #[serde(default)]
+    pub line: String,
+    /// The slot's own Material, laid over the terrain's: a slot with one
+    /// shades with its values (see [`slot_material_lanes`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<floptle_scene::MaterialDoc>,
+}
+
+/// The [`PaletteDoc`] version this editor writes.
+pub(crate) const PALETTE_VERSION: u32 = 2;
+
+/// Write the versioned palette beside `line_file` for these `lines` and
+/// slot `materials`: only when a slot has a Material (a palette without one
+/// is the line file alone, as before), and taken away again when the last
+/// slot's Material is.
+pub(crate) fn write_palette_doc(
+    line_file: &std::path::Path,
+    lines: &[String],
+    materials: &[Option<floptle_scene::MaterialDoc>],
+) -> std::io::Result<()> {
+    let path = palette_doc_path(line_file);
+    if !materials.iter().any(Option::is_some) {
+        if floptle_vfs::is_file(&path) {
+            floptle_vfs::remove_file(&path)?;
+        }
+        return Ok(());
+    }
+    let doc = PaletteDoc {
+        version: PALETTE_VERSION,
+        slots: lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| PaletteSlotDoc { line: line.clone(), material: materials.get(i).cloned().flatten() })
+            .collect(),
+    };
+    let text = ron::ser::to_string_pretty(&doc, ron::ser::PrettyConfig::default()).map_err(std::io::Error::other)?;
+    floptle_vfs::write(&path, text)
+}
+
+/// The versioned palette file beside a line file.
+pub(crate) fn palette_doc_path(line_file: &std::path::Path) -> std::path::PathBuf {
+    line_file.with_extension("palette.ron")
+}
+
+/// A slot's Material as the slot store's lanes: `[tint+scale unchanged
+/// by the caller, emissive, pbr, specular, classic]`, and the flag bits it
+/// sets. `None` (no Material of its own) is the identity, which inherits
+/// every value from the terrain's Material.
+pub(crate) fn slot_material_lanes(m: Option<&floptle_scene::MaterialDoc>) -> Option<SlotMaterialLanes> {
+    let m = m?.to_material();
+    let p = crate::shading::material_params(&m);
+    let x = floptle_render::raster::SurfaceExtras::from_material(&m);
+    use floptle_render::terrain_slots::flag;
+    let mut flags = flag::OWN_MATERIAL;
+    flags |= if x.physical { flag::SHADING_PHYSICAL } else { flag::SHADING_CLASSIC };
+    if p.unlit {
+        flags |= flag::UNLIT;
+    }
+    Some(SlotMaterialLanes {
+        tint: p.color,
+        emissive: [p.emissive[0], p.emissive[1], p.emissive[2], p.emissive_strength],
+        pbr: [x.roughness, x.metallic, x.normal_strength, x.occlusion_strength],
+        specular: [p.specular[0], p.specular[1], p.specular[2], p.specular_strength],
+        classic: [p.shininess, p.rim_strength, p.ambient, 0.0],
+        rim: [p.rim[0], p.rim[1], p.rim[2]],
+        flags,
+    })
+}
+
+/// What a slot's own Material puts in its slot-store record.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SlotMaterialLanes {
+    pub tint: [f32; 3],
+    pub emissive: [f32; 4],
+    pub pbr: [f32; 4],
+    pub specular: [f32; 4],
+    pub classic: [f32; 4],
+    pub rim: [f32; 3],
+    pub flags: u32,
+}
+
 /// Per-slot anti-tiling (`terrain_tex_tile`) as the shader's `terrain_tile`:
 /// one lane per slot, x antitile, y macro strength, z macro size, w 1 where
 /// the slot reads its mips (bit `i` of `mips`, see [`terrain_mips_mask`]). A
@@ -1495,9 +1595,35 @@ impl Editor {
                 if orms & bit != 0 {
                     s.layers[2] = 2 * slots as u32 + i as u32;
                 }
+                // The slot's own Material, if it has one, in place of the
+                // terrain's values.
+                if let Some(m) = slot_material_lanes(self.terrain_tex_materials.get(i).and_then(Option::as_ref)) {
+                    s.tint_scale[..3].copy_from_slice(&m.tint);
+                    s.emissive = m.emissive;
+                    s.pbr = m.pbr;
+                    s.specular = m.specular;
+                    s.classic = m.classic;
+                    s.rim_wet[..3].copy_from_slice(&m.rim);
+                    s.flags[0] |= m.flags;
+                }
                 s
             })
             .collect()
+    }
+
+    /// The palette's slot lines, and each slot's own Material: from the
+    /// versioned file when there is one (it wins), else the line file with
+    /// no Materials.
+    pub(crate) fn read_palette(&self) -> Option<(String, Vec<Option<floptle_scene::MaterialDoc>>)> {
+        let line_file = self.terrain_palette_path();
+        if let Ok(text) = floptle_vfs::read_to_string(palette_doc_path(&line_file))
+            && let Ok(doc) = ron::from_str::<PaletteDoc>(&text)
+        {
+            let lines = doc.slots.iter().map(|s| s.line.as_str()).collect::<Vec<_>>().join("\n");
+            let materials = doc.slots.into_iter().map(|s| s.material).collect();
+            return Some((lines, materials));
+        }
+        floptle_vfs::read_to_string(line_file).ok().map(|t| (t, Vec::new()))
     }
 
     /// The palette's blend widths for the shader, each cut to what the
@@ -5153,7 +5279,7 @@ impl Editor {
         // cave-visibility channel); the marker rides the sidecar, not the path.
         // (cold terrains count — their fields still splat this palette on load.)
         if (!self.terrains.is_empty() || !self.terrain_cold.is_empty())
-            && let Ok(text) = floptle_vfs::read_to_string(self.terrain_palette_path()) {
+            && let Some((text, materials)) = self.read_palette() {
                 let slots = floptle_render::TERRAIN_SLOTS as usize;
                 let mut glow = 0u32;
                 let mut scales: Vec<f32> = Vec::new();
@@ -5195,6 +5321,9 @@ impl Editor {
                 tiles.resize(slots, [0.0; 3]);
                 maps.resize(slots, SlotMaps::default());
                 self.terrain_tex_maps = maps;
+                let mut materials = materials;
+                materials.resize(slots, None);
+                self.terrain_tex_materials = materials;
                 self.terrain_textures = palette;
                 self.terrain_tex_scale = scales;
                 self.terrain_tex_blend = blends;
@@ -5591,6 +5720,71 @@ mod tests {
         // Out of range clamps; unknown and unreadable flags keep the default.
         let odd = parse("x.png|antitile=7|macro=-1|macrosize=nope|shiny=yes");
         assert_eq!(odd.tile, [1.0, 0.0, 0.0]);
+    }
+
+    /// **A palette's Materials live in the versioned file, which wins.** A
+    /// palette with no slot Material is the line file alone; one with a
+    /// Material reads its lines and Materials from `.palette.ron` even where
+    /// the line file says something else; and a field a later engine wrote
+    /// is passed over, not an error.
+    #[test]
+    fn a_versioned_palette_wins_and_loads_what_it_does_not_know() {
+        let dir = std::env::temp_dir().join(format!("floptle_palette_v2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("terrain")).unwrap();
+        let mut ed = crate::Editor { project_root: dir.clone(), scene_name: "world".into(), ..Default::default() };
+        let line_file = ed.terrain_palette_path();
+        std::fs::write(&line_file, "textures/a.png|scale=2\ntextures/b.png").unwrap();
+        let (text, materials) = ed.read_palette().expect("the line file reads");
+        assert_eq!(text, "textures/a.png|scale=2\ntextures/b.png");
+        assert!(materials.is_empty());
+        // The versioned file, with a field no engine knows yet.
+        let doc = super::PaletteDoc {
+            version: super::PALETTE_VERSION,
+            slots: vec![
+                super::PaletteSlotDoc { line: "textures/c.png|blend=1".into(), material: None },
+                super::PaletteSlotDoc {
+                    line: "textures/d.png".into(),
+                    material: Some(floptle_scene::MaterialDoc { roughness: 0.2, ..Default::default() }),
+                },
+            ],
+        };
+        let mut text = ron::ser::to_string_pretty(&doc, ron::ser::PrettyConfig::default()).unwrap();
+        text = text.replacen("version:", "future_field: 7,\n    version:", 1);
+        std::fs::write(super::palette_doc_path(&line_file), text).unwrap();
+        let (lines, materials) = ed.read_palette().expect("the versioned file reads");
+        assert_eq!(lines, "textures/c.png|blend=1\ntextures/d.png", "the versioned file's lines win");
+        assert_eq!(materials.len(), 2);
+        assert!(materials[0].is_none());
+        assert_eq!(materials[1].as_ref().map(|m| m.roughness), Some(0.2));
+        ed.scene_name = String::new();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The versioned palette is written only while a slot has a Material.**
+    /// A palette without one writes no `.palette.ron`, so an untouched
+    /// project gains no file; one with a Material writes it and reads back
+    /// the same; and taking the last Material away removes it, or its stale
+    /// slots would win over the line file on the next load.
+    #[test]
+    fn the_versioned_palette_comes_and_goes_with_slot_materials() {
+        let dir = std::env::temp_dir().join(format!("floptle_palette_write_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let line_file = dir.join("world.palette");
+        let doc = super::palette_doc_path(&line_file);
+        let lines = vec!["textures/a.png".to_string(), "textures/b.png|glow".to_string()];
+        super::write_palette_doc(&line_file, &lines, &[None, None]).unwrap();
+        assert!(!doc.exists(), "a palette with no slot Material wrote a versioned file");
+        let wet = floptle_scene::MaterialDoc { roughness: 0.1, ..Default::default() };
+        super::write_palette_doc(&line_file, &lines, &[None, Some(wet.clone())]).unwrap();
+        let back: super::PaletteDoc = ron::from_str(&std::fs::read_to_string(&doc).unwrap()).unwrap();
+        assert_eq!(back.version, super::PALETTE_VERSION);
+        assert_eq!(back.slots.iter().map(|s| s.line.as_str()).collect::<Vec<_>>(), ["textures/a.png", "textures/b.png|glow"]);
+        assert_eq!(back.slots[1].material.as_ref(), Some(&wet));
+        super::write_palette_doc(&line_file, &lines, &[None, None]).unwrap();
+        assert!(!doc.exists(), "the versioned file outlived the last slot Material");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **A slot's surface maps share its line with its other settings.** The

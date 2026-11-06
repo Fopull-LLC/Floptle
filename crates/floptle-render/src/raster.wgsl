@@ -1535,20 +1535,59 @@ fn point_ggx(pos_rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, roug
 // the 0-based palette layer; per-slot nearest filtering comes from the slot store.
 // What the slots a terrain fragment blends say about its surface, summed by
 // their weights as `terrain_splat` reads them: the normal in the terrain's
-// own space, and occlusion, roughness, metalness and height. Zero at the start
-// of every fragment; `TS_ANY` is set only when a blended slot has a map, so a
-// palette with none leaves the surface exactly as it was.
+// own space, the maps' occlusion, roughness, metalness and height, and the
+// material values each slot shades with (its own Material's, or the
+// terrain's). Zero at the start of every fragment; `TS_ANY` is set only when
+// a blended slot has a map or a Material of its own, so a palette with
+// neither leaves the surface exactly as it was.
 var<private> TS_N: vec3<f32>;
 var<private> TS_ORM: vec4<f32>;
 var<private> TS_W: f32;
 var<private> TS_ANY: bool;
+// Roughness, metalness, occlusion (its strength applied), physical (0 or 1).
+var<private> TS_PBR: vec4<f32>;
+// Emissive rgb (strength applied), and how much of the slot is unlit.
+var<private> TS_EMIT: vec4<f32>;
+// Classic specular rgb (strength applied), shininess.
+var<private> TS_SPEC: vec4<f32>;
+// Rim rgb (strength applied), ambient multiplier.
+var<private> TS_RIM: vec4<f32>;
+// The terrain Material's own values in the same lanes, which a slot without
+// a Material of its own shades with. `fs` sets them before the splat.
+var<private> TSB_PBR: vec4<f32>;
+var<private> TSB_SPEC: vec4<f32>;
+var<private> TSB_RIM: vec4<f32>;
 
-// A slot with no surface maps, or no texture, at weight `wt`: the surface's
-// own normal and the plain ORM.
+const SLOT_SHADING_PHYSICAL: u32 = 16u;
+const SLOT_UNLIT: u32 = 32u;
+const SLOT_OWN_MATERIAL: u32 = 64u;
+
+// One slot's material values at weight `wt`, `orm` its maps' occlusion,
+// roughness and metalness (1, 1, 1 without). A slot with a Material of its own
+// shades with that Material's values; one without, with the terrain's, the
+// slot's multipliers (1 unless set) on them.
+fn slot_knobs(rec: TerrainSlot, orm: vec4<f32>, wt: f32) {
+    let own = (rec.flags.x & SLOT_OWN_MATERIAL) != 0u;
+    let rough = select(TSB_PBR.x * rec.pbr.x, rec.pbr.x, own) * orm.g;
+    let metal = select(TSB_PBR.y * rec.pbr.y, rec.pbr.y, own) * orm.b;
+    let ostr = clamp(select(TSB_PBR.z * rec.pbr.w, rec.pbr.w, own), 0.0, 1.0);
+    let phys = select(TSB_PBR.w, select(0.0, 1.0, (rec.flags.x & SLOT_SHADING_PHYSICAL) != 0u), own);
+    TS_PBR += vec4<f32>(rough, metal, mix(1.0, orm.r, ostr), phys) * wt;
+    let unlit = select(0.0, 1.0, own && (rec.flags.x & SLOT_UNLIT) != 0u);
+    TS_EMIT += vec4<f32>(rec.emissive.rgb * rec.emissive.w, unlit) * wt;
+    TS_SPEC += select(TSB_SPEC, vec4<f32>(rec.specular.rgb * max(rec.specular.w, 0.0), rec.classic.x), own) * wt;
+    TS_RIM += select(TSB_RIM, vec4<f32>(rec.rim_wet.rgb * rec.classic.y, rec.classic.z), own) * wt;
+}
+
+// An untextured stretch of ground, at weight `wt`: the surface's own normal
+// and the terrain's own material values.
 fn terrain_surface_plain(n: vec3<f32>, wt: f32) {
     TS_N += normalize(n) * wt;
     TS_ORM += vec4<f32>(1.0, 1.0, 1.0, 0.5) * wt;
     TS_W += wt;
+    TS_PBR += vec4<f32>(TSB_PBR.x, TSB_PBR.y, 1.0, TSB_PBR.w) * wt;
+    TS_SPEC += TSB_SPEC * wt;
+    TS_RIM += TSB_RIM * wt;
 }
 
 // A normal-map texel as a tangent-space normal in the frame where +y runs
@@ -1657,28 +1696,42 @@ fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, d
         let sx = pal_surface(p.zy * scale, slot, nl, ol, dpx.zy * scale, dpy.zy * scale, anti, has_n, has_o, nearest);
         let sy = pal_surface(p.xz * scale, slot, nl, ol, dpx.xz * scale, dpy.xz * scale, anti, has_n, has_o, nearest);
         let sz = pal_surface(p.xy * scale, slot, nl, ol, dpx.xy * scale, dpy.xy * scale, anti, has_n, has_o, nearest);
+        // The normal map's strength: the slot's Material's (a negative one
+        // turns every bump into a dent), else as drawn.
+        let k = rec.pbr.z;
         let nn = normalize(n);
-        let tx = vec3<f32>(sx.n.xy + nn.zy, abs(sx.n.z) * nn.x);
-        let ty = vec3<f32>(sy.n.xy + nn.xz, abs(sy.n.z) * nn.y);
-        let tz = vec3<f32>(sz.n.xy + nn.xy, abs(sz.n.z) * nn.z);
+        let tx = vec3<f32>(sx.n.xy * k + nn.zy, abs(sx.n.z) * nn.x);
+        let ty = vec3<f32>(sy.n.xy * k + nn.xz, abs(sy.n.z) * nn.y);
+        let tz = vec3<f32>(sz.n.xy * k + nn.xy, abs(sz.n.z) * nn.z);
         TS_N += normalize(tx.zyx * w.x + ty.xzy * w.y + tz.xyz * w.z) * wt;
-        TS_ORM += (sx.orm * w.x + sy.orm * w.y + sz.orm * w.z) * wt;
+        let orm = sx.orm * w.x + sy.orm * w.y + sz.orm * w.z;
+        TS_ORM += orm * wt;
         TS_W += wt;
+        slot_knobs(rec, orm, wt);
         TS_ANY = true;
-        return (sx.col * w.x + sy.col * w.y + sz.col * w.z) * mac;
-    } else {
+        return (sx.col * w.x + sy.col * w.y + sz.col * w.z) * mac * rec.tint_scale.rgb;
+    } else if (slot < 0) {
         terrain_surface_plain(n, wt);
+    } else {
+        TS_N += normalize(n) * wt;
+        TS_ORM += vec4<f32>(1.0, 1.0, 1.0, 0.5) * wt;
+        TS_W += wt;
+        slot_knobs(rec, vec4<f32>(1.0), wt);
+        if ((rec.flags.x & SLOT_OWN_MATERIAL) != 0u) {
+            TS_ANY = true;
+        }
     }
+    let tint = select(vec3<f32>(1.0), rec.tint_scale.rgb, slot >= 0);
     if (nearest) {
         let nx = pal_sample(terrain_pal_nearest, terrain_pal_samp_nearest, p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale, anti);
         let ny = pal_sample(terrain_pal_nearest, terrain_pal_samp_nearest, p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale, anti);
         let nz = pal_sample(terrain_pal_nearest, terrain_pal_samp_nearest, p.xy * scale, slot, dpx.xy * scale, dpy.xy * scale, anti);
-        return (nx * w.x + ny * w.y + nz * w.z) * mac;
+        return (nx * w.x + ny * w.y + nz * w.z) * mac * tint;
     }
     let lx = pal_sample(terrain_pal, terrain_pal_samp, p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale, anti);
     let ly = pal_sample(terrain_pal, terrain_pal_samp, p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale, anti);
     let lz = pal_sample(terrain_pal, terrain_pal_samp, p.xy * scale, slot, dpx.xy * scale, dpy.xy * scale, anti);
-    return (lx * w.x + ly * w.y + lz * w.z) * mac;
+    return (lx * w.x + ly * w.y + lz * w.z) * mac * tint;
 }
 
 // The terrain's surface normal the slots' maps make, in the world: `nl` in
@@ -2011,6 +2064,11 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let tp_aw = fwidth(in.vcolor.a * 255.0);
     let tp_ew = fwidth(in.uv.y);
     var tsplat_val = vec4<f32>(0.0);
+    // The terrain Material's own values, which a palette slot without a
+    // Material of its own shades with.
+    TSB_PBR = vec4<f32>(ext.rough, ext.metal, ext.ostr, select(0.0, 1.0, ext_has(ext, EXT_PHYSICAL)));
+    TSB_SPEC = vec4<f32>(in.specular.rgb * in.specular.a, in.params.x);
+    TSB_RIM = vec4<f32>(in.rim.rgb * in.params.y, in.params.w);
     if (terrain) {
         tsplat_val = terrain_splat(in, tp_dpx, tp_dpy, tp_aw, tp_ew);
     }
@@ -2020,12 +2078,13 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // taken here, beside the terrain's own, where derivatives are allowed.
     let tp_vdx = dpdx(in.view_pos);
     let terrain_surfaced = terrain && TS_ANY && !ext_has(ext, EXT_VERTEX_LIT);
-    if (terrain_surfaced) {
-        let o = TS_ORM / max(TS_W, 1e-6);
-        ao_s = o.r;
-        rough_s = o.g;
-        metal_s = o.b;
-    }
+    // What the blended slots shade with: their maps and their Materials
+    // (each its own, or the terrain's), averaged by their weights.
+    let tw = max(TS_W, 1e-6);
+    let t_pbr = TS_PBR / tw;
+    let t_emit = TS_EMIT / tw;
+    let t_spec = TS_SPEC / tw;
+    let t_rim = TS_RIM / tw;
     let mapped_n = mapped_normal(in, geo_n, muv, ext.nstr, nmap_s);
     var n = select(mapped_n, geo_n, ext_has(ext, EXT_VERTEX_LIT));
     if (terrain_surfaced) {
@@ -2039,7 +2098,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // discard it — a slot index reads as a near-zero alpha). Everything else takes the
     // normal vertex-paint multiply.
     let albedo = select(texel.rgb * in.color.rgb * in.vcolor.rgb, tsplat_val.rgb * in.color.rgb, terrain);
-    let emissive = in.emissive.rgb * in.emissive.a * emit_s;
+    let emissive = in.emissive.rgb * in.emissive.a * emit_s + select(vec3<f32>(0.0), t_emit.rgb, terrain_surfaced);
     // Opacity: the material's alpha (in.color.a) times the texture's own alpha,
     // times painted alpha. Terrain is forced opaque (its vcolor.a is a slot).
     // Terrain is opaque: its dissolve is the discard below, not a blend, so its
@@ -2141,8 +2200,8 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // covered in grey smudges.
     // The baked bounce, where a light probe volume covers this fragment; the
     // scene's flat ambient where none does.
-    let ambient =
-        gi_ambient(in.view_pos, n, g.ambient.rgb) * in.params.w * mix(1.0, ao_s, clamp(ext.ostr, 0.0, 1.0));
+    let ambient = gi_ambient(in.view_pos, n, g.ambient.rgb)
+        * select(in.params.w * mix(1.0, ao_s, clamp(ext.ostr, 0.0, 1.0)), t_rim.w * t_pbr.z, terrain_surfaced);
 
     // RETRO — per-vertex (Gouraud) lighting: use what `vs` interpolated and stop.
     // No shadow march, no SDF AO, no normal map; see `VsOut.vlit`.
@@ -2157,13 +2216,13 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     }
 
     var lit: vec3<f32>;
-    if (ext_has(ext, EXT_PHYSICAL)) {
+    if (select(ext_has(ext, EXT_PHYSICAL), t_pbr.w > 0.5, terrain_surfaced)) {
         // --- Metal-rough. -------------------------------------------------
         // Roughness reads the GREEN channel and metallic the BLUE, so a glTF
         // packed occlusion/roughness/metallic image drops in unmodified — and
         // the AO map above reads RED from the same image for the same reason.
-        let rough = clamp(ext.rough * rough_s, 0.045, 1.0);
-        let metal = clamp(ext.metal * metal_s, 0.0, 1.0);
+        let rough = clamp(select(ext.rough * rough_s, t_pbr.x, terrain_surfaced), 0.045, 1.0);
+        let metal = clamp(select(ext.metal * metal_s, t_pbr.y, terrain_surfaced), 0.0, 1.0);
         // 4% normal-incidence reflectance is what every dielectric does; a metal
         // reflects its own colour and has no diffuse at all.
         let f0 = mix(vec3<f32>(0.04), albedo, metal);
@@ -2205,12 +2264,12 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         // --- Blinn-Phong, exactly as it was. ------------------------------
         // Key light(s): the shared multi-star model — Σ color·NdotL·shadow per
         // star (or the one legacy directional/positional sun), plus its specular.
-        let shininess = max(in.params.x, 1.0);
+        let shininess = max(select(in.params.x, t_spec.w, terrain_surfaced), 1.0);
         let kl = key_light(in.view_pos, n, v, shininess, pix);
         lit = albedo * (ambient + kl.diffuse);
         // Placeable point lights (camera-relative; in.view_pos is in the same space).
         lit += albedo * point_diffuse_lit(in.view_pos, n, pix) * gi_only_gate();
-        lit += in.specular.rgb * kl.spec * in.specular.a;
+        lit += select(in.specular.rgb * in.specular.a, t_spec.rgb, terrain_surfaced) * kl.spec;
     }
 
     // BACKLIGHT — the key light on the far side of a thin surface, coming
@@ -2224,8 +2283,8 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
 
     // Rim / fresnel — a cheap stylized edge glow. Available under BOTH models:
     // it is an art direction, not a physical term.
-    let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * in.params.y;
-    lit += in.rim.rgb * rim_f;
+    let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0);
+    lit += select(in.rim.rgb * in.params.y, t_rim.rgb, terrain_surfaced) * rim_f;
 
     // Glowing terrain slots: their albedo bypasses lighting AND the AO multiply —
     // the cave-readability channel (per-voxel emissive without a new vertex stream).
@@ -2234,7 +2293,10 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         glow = albedo * tsplat_val.w * 0.9;
     }
 
-    return vec4<f32>(surface_fog(ext, lit * occ + emissive + glow, in.view_pos, pix), out_a);
+    // An unlit slot shows its colour as it is, whatever falls on it.
+    let shaded = lit * occ + emissive + glow;
+    let shown = select(shaded, mix(shaded, albedo + emissive, clamp(t_emit.w, 0.0, 1.0)), terrain_surfaced);
+    return vec4<f32>(surface_fog(ext, shown, in.view_pos, pix), out_a);
 }
 
 // `fs`'s Physical shading over a custom shader's own albedo and normal — what

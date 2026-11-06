@@ -36,6 +36,9 @@ pub mod flag {
     pub const SHADING_PHYSICAL: u32 = 1 << 4;
     /// Unlit: the colour as it is, no light at all.
     pub const UNLIT: u32 = 1 << 5;
+    /// The slot has a Material of its own: `pbr`, `emissive`, the tint and
+    /// the shading model are its values, not multipliers on the terrain's.
+    pub const OWN_MATERIAL: u32 = 1 << 6;
 }
 
 /// One slot, as the shaders read it. Eleven `vec4`s, 176 bytes; see the
