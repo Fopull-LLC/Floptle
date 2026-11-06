@@ -2420,6 +2420,9 @@ struct Editor {
     /// menu can open two minutes into a session — whether an existing trap is
     /// handed back (see `game_trap`).
     ui_pointer_wanted: bool,
+    /// The pointer is over a screen UI element that covers the world this
+    /// frame (`ui.wantsPointer()`, `ui_game::spec_blocks_pointer`).
+    ui_pointer_over: bool,
     /// The focused element (keyboard / gamepad). One at a time across every
     /// layer, the way focus works everywhere else. Cleared on Play start/stop
     /// so a menu never resumes with a stale ring.

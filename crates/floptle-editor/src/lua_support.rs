@@ -781,6 +781,12 @@ function ui.events(hook) end
 ---@param element Node|nil
 ---@return Node|boolean|nil
 function ui.hovered(element) end
+---True while the pointer is over screen UI that covers the world: anything
+---clickable, or any element that draws a surface (fill, border, frame,
+---picture, scroll view). Ask it before treating a click or the wheel as the
+---world's.
+---@return boolean
+function ui.wantsPointer() end
 ---The element the pointer is holding down, or nil — or, given an element,
 ---whether it is being held. Hold-to-charge, press-and-hold repeat, a dip while
 ---pressed.

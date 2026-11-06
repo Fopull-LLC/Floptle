@@ -25,7 +25,7 @@ each group, and meant to be searched.
 - [compute — gpu.* & compute.run](#compute--gpu--computerun) — 13
 - [the web — http.*, json.*](#the-web--http-json) — 15
 - [the player's account — account.*](#the-players-account--account) — 13
-- [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 78
+- [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 79
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 33
@@ -2746,6 +2746,10 @@ ui.submitted(element) — Enter in this focused text field this frame.
 ### `ui.unbind`
 
 ui.unbind(node) drops every binding on that node; ui.unbind(node, "text") drops one.
+
+### `ui.wantsPointer`
+
+ui.wantsPointer() — true while the pointer is over screen UI that covers the world: anything clickable, or any element that draws a surface (a fill, even a faint one, a border, a frame, a picture, a scroll view). input.button and input.scroll still reach the world under a panel, so a map or a world click asks this first: if not ui.wantsPointer() and input.clicked(0) then select() end. A bare text label and an empty layout box do not count.
 
 ## networking — net.*, synced
 

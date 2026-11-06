@@ -888,6 +888,8 @@ pub struct ScriptHost {
     ui_hover: Rc<RefCell<Option<u32>>>,
     /// The element being held down, fed by the engine each frame (`ui.held`).
     ui_active: Rc<RefCell<Option<u32>>>,
+    /// The pointer is over UI that covers the world (`ui.wantsPointer()`).
+    ui_pointer_over: Rc<std::cell::Cell<bool>>,
     /// `ui.setScale`: the whole interface's size, over every layer's own.
     ui_scale: Rc<std::cell::Cell<f32>>,
     /// The material presets the editor lends each frame (name → Material), so a script can

@@ -31,6 +31,22 @@ use crate::Editor;
 /// through the solver. A tooltip is not on this list — hovering is
 /// an interaction, but a HUD readout with a tooltip is not a menu, and it must
 /// not take back a cursor the game is aiming with.
+/// Does this element cover what is behind it, for `ui.wantsPointer()`? Anything
+/// the pointer can use, and anything that draws a surface: a fill or gradient,
+/// a border, a frame, a surface material, a picture, a scroll view. Text and
+/// empty layout boxes do not: a label over the world is not a panel.
+pub(crate) fn spec_blocks_pointer(spec: &ElementSpec) -> bool {
+    let shape = spec.shape.as_ref().is_some_and(|s| {
+        s.fill[3] > 0.0
+            || s.gradient.is_some()
+            || (s.border.0.iter().any(|&b| b > 0.0) && s.border_color[3] > 0.0)
+            || s.frame.is_some()
+            || s.surface.is_some()
+    });
+    spec.opacity > 0.0
+        && (spec_wants_pointer(spec) || shape || spec.image.is_some() || spec.scroll.is_some() || !spec.tooltip.is_empty())
+}
+
 pub(crate) fn spec_wants_pointer(spec: &ElementSpec) -> bool {
     !spec.disabled
         && (spec.button
@@ -1291,6 +1307,7 @@ impl Editor {
             self.ui_hover = None;
             self.ui_active = None;
             self.ui_pointer_wanted = false;
+            self.ui_pointer_over = false;
             // Focus belongs to a running game. Clearing it on Stop means Play
             // never starts with a ring left over from the last session, and
             // means the editor's own arrow keys are never fighting a menu.
@@ -1312,6 +1329,7 @@ impl Editor {
             // pass can still run, so say so rather than leaving the last
             // playing frame's answers standing.
             self.script_host.set_ui_frame_state(&[], None, None);
+            self.script_host.set_ui_pointer_over(false);
             return;
         }
         let pointer = self.ui_pointer();
@@ -1328,6 +1346,8 @@ impl Editor {
         // Does anything the pointer clicks exist on screen this frame? Answered
         // from the placed elements below, and published to `ui_pointer_wanted`.
         let mut pointer_wanted = false;
+        // Is the pointer over UI that covers the world (`ui.wantsPointer()`)?
+        let mut pointer_over = false;
         // The topmost scroll view under the pointer this frame → (entity id,
         // clamped new offset). Applied after the borrows drop; consumes the
         // wheel so gameplay zoom never fights a menu scroll.
@@ -1497,6 +1517,8 @@ impl Editor {
                         // Everything the pointer can do something with. A
                         // tooltip counts: hovering is the interaction.
                         pointer_wanted |= spec_wants_pointer(spec);
+                        pointer_over |= spec_blocks_pointer(spec)
+                            && ptr_design.is_some_and(|p| in_rect(&pl.rect, &p) && clip.is_none_or(|c| in_rect(&c, &p)));
                         if spec.button
                             || slider.is_some()
                             || spec.field.is_some()
@@ -1569,6 +1591,7 @@ impl Editor {
         // has to be able to take the cursor back, and the trap can only give it
         // back if somebody keeps asking.
         self.ui_pointer_wanted = pointer_wanted;
+        self.ui_pointer_over = pointer_over;
         if let Some((id, next)) = wheel_target {
             let ent = self.world.entity_with::<Transform>(id);
             if let Some(e) = ent
@@ -1835,6 +1858,7 @@ impl Editor {
         // states rather than events, and every screen that asks about one asks
         // about the others.
         self.script_host.set_ui_frame_state(&self.ui_events, self.ui_hover, self.ui_active);
+        self.script_host.set_ui_pointer_over(self.ui_pointer_over);
     }
 
     /// Write one axis of a scroll view's offset.
@@ -3903,6 +3927,60 @@ mod tests {
         ed.ui_events.clear();
         ed.ui_slider_to(id, 0.75);
         assert!(ed.ui_events.is_empty(), "held still is not a change");
+    }
+
+    /// **A script can tell the pointer is over UI.** `ui.hovered()` answers
+    /// only for interactive elements, so a plain panel let clicks and the
+    /// wheel through to the map behind it with nothing to say so. A panel
+    /// with a fill, even a faint one, covers the world; a bare text label
+    /// does not, and neither does the space beside the panel.
+    #[test]
+    fn the_pointer_over_a_panel_is_over_ui_and_over_a_label_is_not() {
+        use crate::touch::Phase;
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.player_mode = true;
+        ed.playing = true;
+        let layer = ed.world.spawn();
+        ed.world.insert(layer, Transform::IDENTITY);
+        ed.world.insert(layer, UiLayer::default());
+        let panel = ed.world.spawn();
+        ed.world.insert(panel, Transform::IDENTITY);
+        ed.world.insert(panel, Parent(layer));
+        // The left half: a faint plate, nothing clickable on it.
+        ed.world.insert(
+            panel,
+            ElementSpec {
+                size: [Size::Pct(0.5), Size::Pct(1.0)],
+                shape: Some(floptle_ui::ShapeSpec { fill: [0.0, 0.0, 0.0, 0.2], ..Default::default() }),
+                ..Default::default()
+            },
+        );
+        // The right quarter: a label, text and nothing behind it.
+        let label = ed.world.spawn();
+        ed.world.insert(label, Transform::IDENTITY);
+        ed.world.insert(label, Parent(layer));
+        ed.world.insert(
+            label,
+            ElementSpec {
+                size: [Size::Pct(0.25), Size::Pct(1.0)],
+                place: floptle_ui::Place::Pin { anchor: floptle_ui::Anchor::TopRight, offset: [0.0, 0.0] },
+                text: Some(TextSpec { text: "ALT 1200".into(), ..Default::default() }),
+                ..Default::default()
+            },
+        );
+        let (w, h) = ed.game_surface_px().expect("a player has a surface").1.into();
+        let mut over_at = |x: f32, id: u64| {
+            ed.note_touch(id, Phase::Began, x, h * 0.5, None);
+            ed.ui_interact();
+            ed.ui_events.clear();
+            let over = ed.ui_pointer_over;
+            ed.note_touch(id, Phase::Ended, x, h * 0.5, None);
+            ed.touches.end_frame();
+            over
+        };
+        assert!(over_at(w * 0.1, 1), "the pointer over a faint plate is not over UI");
+        assert!(!over_at(w * 0.6, 2), "the pointer beside the plate is over UI");
+        assert!(!over_at(w * 0.9, 3), "a text label covers the world");
     }
 
     /// What the pointer can drive, and — just as important — what it can't.

@@ -2120,3 +2120,33 @@ fn a_script_reads_and_sets_a_terrain_slots_material() {
     assert!(host.take_terrain_slot_sets().is_empty(), "a take empties the queue");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `ui.wantsPointer()` answers what the engine published for this frame.
+#[test]
+fn ui_wants_pointer_reads_what_the_engine_published() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_wants_pointer_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(&dir, "hud", "function update() log(tostring(ui.wantsPointer())) end\n");
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+        kind: "hud".into(),
+        enabled: true,
+        params: Vec::new(),
+        refs: Vec::new(),
+        strs: Vec::new(),
+        pinned_bools: None,
+    }]));
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    host.set_ui_pointer_over(true);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    host.set_ui_pointer_over(false);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert_eq!(said, vec!["true".to_string(), "false".to_string()]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

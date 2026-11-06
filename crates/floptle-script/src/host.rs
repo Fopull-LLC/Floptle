@@ -1561,6 +1561,7 @@ struct UiCells {
     ui_frame_events: crate::UiFrameEvents,
     ui_hover: Rc<RefCell<Option<u32>>>,
     ui_active: Rc<RefCell<Option<u32>>>,
+    ui_pointer_over: Rc<std::cell::Cell<bool>>,
     ui_scale: Rc<std::cell::Cell<f32>>,
 }
 
@@ -1583,6 +1584,7 @@ fn install_ui(lua: &Lua, net: &crate::net_api::SharedNet) -> UiCells {
     let ui_frame_events: crate::UiFrameEvents = Rc::new(RefCell::new(Vec::new()));
     let ui_hover: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
     let ui_active: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
+    let ui_pointer_over: Rc<std::cell::Cell<bool>> = Rc::default();
     let ui_scale: Rc<std::cell::Cell<f32>> = Rc::new(std::cell::Cell::new(1.0));
     if let Ok(t) = lua.create_table() {
         // ui.setScale(s) / ui.scale() — one size for the whole interface: every
@@ -1881,6 +1883,16 @@ fn install_ui(lua: &Lua, net: &crate::net_api::SharedNet) -> UiCells {
                 .ok(),
             );
         }
+        // ui.wantsPointer() — is the pointer over UI that covers the world
+        // this frame: anything clickable, or any element that draws a
+        // surface (a fill, a border, a frame, a picture, a scroll view)?
+        // Raw input.button and input.scroll reach the world under a panel;
+        // a game asks this before treating a click or the wheel as the
+        // world's. Text and empty layout boxes do not count.
+        {
+            let c = ui_pointer_over.clone();
+            let _ = t.set("wantsPointer", lua.create_function(move |_, ()| Ok(c.get())).ok());
+        }
         let _ = lua.globals().set("ui", t);
         // `ui.engineSettings`: the Controls and Accessibility pages, written in
         // Lua over ui.make, input.* and access.* — nothing a game could not
@@ -1902,6 +1914,7 @@ fn install_ui(lua: &Lua, net: &crate::net_api::SharedNet) -> UiCells {
         ui_frame_events,
         ui_hover,
         ui_active,
+        ui_pointer_over,
         ui_scale,
     }
 }
@@ -3025,6 +3038,7 @@ impl ScriptHost {
             ui_frame_events,
             ui_hover,
             ui_active,
+            ui_pointer_over,
             ui_scale,
         } = install_ui(&lua, &net);
         let spawn_effects = install_spawn_effect(&lua);
@@ -3594,6 +3608,7 @@ impl ScriptHost {
             ui_frame_events,
             ui_hover,
             ui_active,
+            ui_pointer_over,
             ui_scale,
             anim_info: shared.anim_info.clone(),
             bone_poses: shared.bone_poses.clone(),
@@ -4216,6 +4231,12 @@ impl ScriptHost {
         ev.extend(events.iter().map(|(e, h)| (*e, (*h).to_string())));
         *self.ui_hover.borrow_mut() = hover;
         *self.ui_active.borrow_mut() = held;
+    }
+
+    /// Publish whether the pointer is over UI that covers the world, before
+    /// scripts run: `ui.wantsPointer()`.
+    pub fn set_ui_pointer_over(&mut self, over: bool) {
+        self.ui_pointer_over.set(over);
     }
 
     /// Evaluate every live `ui.bind` and queue what it returned.

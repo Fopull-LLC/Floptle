@@ -908,10 +908,20 @@ end
 | `ui.event(el, hook)` | any hook, by name |
 | `ui.events([hook])` | everything that fired this frame: `{ node = , event = }` |
 | `ui.hovered([el])` / `ui.held([el])` / `ui.focused([el])` | which element — or, given one, yes/no |
+| `ui.wantsPointer()` | is the pointer over UI that covers the world? |
 
-The last row is **states**, not events: true for as long as they are true, where
-`hoverStart` / `hoverEnd` are the edges. Everything else is per-frame and gone
-the next.
+The last two rows are **states**, not events: true for as long as they are true,
+where `hoverStart` / `hoverEnd` are the edges. Everything else is per-frame and
+gone the next.
+
+`input.button` and `input.scroll` reach the world under a panel. A map or a
+world click asks `ui.wantsPointer()` first, which is true over anything
+clickable and over any element that draws a surface (a fill, even a faint one,
+a border, a frame, a picture, a scroll view), and false over a bare text label:
+
+```lua
+if not ui.wantsPointer() and input.clicked(0) then pickTarget() end
+```
 
 Polls and hooks read the same list, published before scripts run, so the two can
 never disagree about what happened this frame.
