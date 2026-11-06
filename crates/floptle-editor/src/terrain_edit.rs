@@ -2365,7 +2365,13 @@ fn upload_chunk(
         render.forget_far(coord);
     }
     render.stale.remove(&coord);
-    let data = floptle_render::chunk_mesh_data(cm);
+    // A coarsest chunk draws in its group, from the copy above: its own slot
+    // holds nothing, rather than a mesh nothing draws.
+    let data = if lod == FAR_LOD {
+        floptle_render::MeshData { vertices: Vec::new(), indices: Vec::new(), colors: Some(Vec::new()) }
+    } else {
+        floptle_render::chunk_mesh_data(cm)
+    };
     // Before the match, because two of its three arms are also "already
     // resident" — an LOD swap and an outgrown slot are both re-meshes of
     // something the player can already see, and neither should dissolve.
@@ -6484,6 +6490,65 @@ mod residency_tests {
         ed.toggle_play();
         assert_eq!(ed.terrain_tex_materials, vec![None, Some(wet)], "Stop should put the run's slot Materials back");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Ground the player has left gives its GPU memory back.** A chunk's
+    /// mesh slot kept the capacity of the finest mesh it ever held, so every
+    /// chunk meshed whole beside the player kept a whole chunk's buffers once
+    /// it was drawn coarse behind them: Solar walked a kilometre and held
+    /// 200 MB more, given back only by reloading the scene. Meshed beside the
+    /// camera, then left for the far side of the world, the chunks it left
+    /// must hold a small part of what they did.
+    #[test]
+    fn ground_left_behind_gives_its_mesh_memory_back() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.project.terrain_shape = Some(floptle_scene::TerrainShapeDoc::Natural);
+        let fill = floptle_field::procgen::PlanetFill { seed: 3, radius: 300.0, voxel: 2.0, relief: 0.0, cave_depth: 0.0, ..Default::default() };
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        // A world, so its detail rings are sized to it as a planet's are.
+        ed.world.insert(e, floptle_core::CelestialBody { body_radius: 300.0, ..Default::default() });
+        ed.terrains.insert(e, EditorTerrain::new(floptle_field::procgen::generate_planet(&fill)));
+        let here = DVec3::new(0.0, 312.0, 0.0);
+        ed.sync_terrain_meshes(true, here);
+        settle(&mut ed, e, here);
+        let bytes = |ed: &crate::Editor, coords: &[[i32; 3]]| -> u64 {
+            let r = &ed.terrain_render[&e];
+            coords.iter().filter_map(|c| r.slots.get(c)).map(|&(mid, _)| ed.raster.as_ref().unwrap().mesh_gpu_bytes(mid)).sum()
+        };
+        let near: Vec<[i32; 3]> = ed.terrain_render[&e].slots.iter().filter(|(_, s)| s.1 == 0).map(|(c, _)| *c).collect();
+        assert!(near.len() > 4, "the fixture: chunks meshed whole beside the camera ({})", near.len());
+        let before: std::collections::HashMap<[i32; 3], u64> =
+            near.iter().map(|c| (*c, bytes(&ed, std::slice::from_ref(c)))).collect();
+        // The far side of the world.
+        let away = DVec3::new(0.0, -312.0, 0.0);
+        // Until no chunk has waited on a new mesh for several scans: every
+        // chunk already has one, so the swaps to coarser ones are the work.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let mut quiet = 0;
+        while quiet < 12 {
+            ed.sync_terrain_meshes(false, away);
+            let r = &ed.terrain_render[&e];
+            quiet = if r.pending.is_empty() && r.waiting == 0 { quiet + 1 } else { 0 };
+            assert!(std::time::Instant::now() < until, "the world never settled after the move");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let mut lods = [0usize; 5];
+        for c in &near {
+            let l = ed.terrain_render[&e].slots.get(c).map_or(4, |s| s.1.min(3) as usize);
+            lods[l] += 1;
+        }
+        let coarse: Vec<[i32; 3]> = near.iter().copied().filter(|c| ed.terrain_render[&e].slots.get(c).is_some_and(|s| s.1 >= 2)).collect();
+        assert!(coarse.len() * 2 > near.len(), "the fixture: most of the chunks left behind should be drawn coarse (by level 0..3, gone: {lods:?})");
+        let left = bytes(&ed, &coarse);
+        let whole: u64 = coarse.iter().map(|c| before[c]).sum();
+        assert!(left * 4 < whole, "the ground left behind holds {left} bytes of GPU mesh, against {whole} when it was drawn whole");
+        // A chunk drawn in its far group holds no mesh of its own.
+        let r = &ed.terrain_render[&e];
+        let far: Vec<u64> = r.slots.values().filter(|s| s.1 == FAR_LOD).map(|&(mid, _)| ed.raster.as_ref().unwrap().mesh_gpu_bytes(mid)).collect();
+        assert!(!far.is_empty(), "the fixture: some chunks should be drawn in far groups");
+        let most = far.iter().copied().max().unwrap_or(0);
+        assert!(most < 1024, "a chunk drawn in its far group still holds {most} bytes of mesh of its own");
     }
 
     /// **The ground still to come can be counted** (`perf.counts().meshesPending`).

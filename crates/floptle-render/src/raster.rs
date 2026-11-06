@@ -822,6 +822,13 @@ fn group_by_key<K: Eq + std::hash::Hash + Copy, T: Copy>(
 /// at 1024 and rounded to a power of two. The rounding matters as much as the headroom:
 /// the free-lists are keyed by exact capacity, so collapsing thousands of chunk sizes
 /// onto a handful of size classes is what makes slot re-use actually hit.
+/// How many times too big a dynamic slot is before it is made smaller
+/// ([`Raster::replace_dynamic`]).
+const SLOT_SHRINK: u32 = 4;
+
+/// A dynamic slot's size while it holds nothing.
+const EMPTY_SLOT_CAP: u32 = 4;
+
 fn slot_cap(n: u32) -> u32 {
     n.saturating_mul(3).div_ceil(2).max(1024).next_power_of_two()
 }
@@ -3638,15 +3645,26 @@ impl Raster {
         let Some(m) = self.meshes.get(id.0 as usize) else { return false };
         let Some(slot) = m.dynamic.as_ref() else { return false };
         let (nv, ni) = (data.vertices.len() as u32, data.indices.len() as u32);
-
-        if nv > slot.cap_verts || ni > slot.cap_indices {
-            let (cap_verts, cap_indices) = (slot_cap(nv), slot_cap(ni));
+        // An empty mesh keeps a token slot: a mesh that draws nothing (a
+        // chunk another draw stands in for) holds no buffers to speak of.
+        let cap = |n: u32| if nv == 0 && ni == 0 { EMPTY_SLOT_CAP } else { slot_cap(n) };
+        let (cap_verts, cap_indices) = (cap(nv), cap(ni));
+        // A slot also shrinks once its mesh needs a quarter of it or less: a
+        // terrain chunk meshed whole beside the player and coarse once they
+        // have gone kept the whole one's buffers, and walking a kilometre held
+        // hundreds of megabytes the ground no longer drew. The detail rings'
+        // own hysteresis keeps a chunk on a ring's edge from swapping back and
+        // forth, so a slot resized is a chunk that really did change detail.
+        let outgrew = nv > slot.cap_verts || ni > slot.cap_indices;
+        let shrinks = cap_verts.saturating_mul(SLOT_SHRINK) <= slot.cap_verts
+            && cap_indices.saturating_mul(SLOT_SHRINK) <= slot.cap_indices;
+        if outgrew || shrinks {
             log::debug!(
-                "terrain chunk outgrew its slot ({} > {} verts / {} > {} indices) — regrowing",
-                nv,
+                "terrain chunk slot resized ({} → {} verts / {} → {} indices)",
                 slot.cap_verts,
-                ni,
-                slot.cap_indices
+                cap_verts,
+                slot.cap_indices,
+                cap_indices
             );
             // The color block is sized to the slot, so it regrows with it: hand the old
             // one back to the free-list (it is re-usable at its own capacity) and take a
