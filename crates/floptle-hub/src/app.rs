@@ -302,6 +302,11 @@ pub struct HubApp {
     /// bar never goes away at all.
     hub_update_job: Option<HubUpdateJob>,
     hub_update_hidden: bool,
+    /// When the install ping's notice first showed this run, and whether this
+    /// run already sent while it waits for an answer
+    /// ([`crate::ping::notice_send_due`]).
+    ping_notice_since: Option<std::time::Instant>,
+    ping_sent_unanswered: bool,
     /// The theme, shared with the editor (`floptle-theme`): the same choice,
     /// the same files, the same look.
     themes: floptle_theme::host::Host,
@@ -393,6 +398,8 @@ impl HubApp {
             selected_version: None,
             hub_update_job: None,
             hub_update_hidden: false,
+            ping_notice_since: None,
+            ping_sent_unanswered: false,
             themes: floptle_theme::host::Host::load(floptle_theme::source::config_dir()),
             fonts_set: None,
             backdrop: None,
@@ -1496,6 +1503,19 @@ impl eframe::App for HubApp {
             && self.config.settings.install_ping
             && !crate::ping::env_says_off(std::env::var("FOPULL_NO_PING").ok().as_deref())
         {
+            // Counted on the first open (the contract's §4): the notice stays
+            // where it is until it is answered, and once it has been up for
+            // the grace the day's ping goes, unless it was turned off first.
+            let since = *self.ping_notice_since.get_or_insert_with(std::time::Instant::now);
+            if crate::ping::notice_send_due(since.elapsed(), self.config.settings.install_ping, self.ping_sent_unanswered) {
+                self.ping_sent_unanswered = true;
+                crate::ping::start(&self.paths, true, true, self.config.settings.channel().to_string());
+            }
+            // One wake at the end of the grace, so an idle Hub still sends;
+            // after it, nothing keeps the Hub repainting.
+            if let Some(left) = crate::ping::NOTICE_GRACE.checked_sub(since.elapsed()) {
+                ui.ctx().request_repaint_after(left);
+            }
             let (mut ok, mut off) = (false, false);
             egui::Panel::top("ping-notice").frame(banner_frame(ui)).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -1512,7 +1532,7 @@ impl eframe::App for HubApp {
                     crate::ping::forget(&self.paths);
                 }
                 self.save();
-                if ok {
+                if ok && !self.ping_sent_unanswered {
                     crate::ping::start(&self.paths, true, true, self.config.settings.channel().to_string());
                 }
             }

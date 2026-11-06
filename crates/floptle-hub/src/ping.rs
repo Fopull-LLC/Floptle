@@ -30,6 +30,11 @@ pub const PRODUCT: &str = "floptle-hub";
 pub const NOTICE: &str = "The Hub sends an anonymous ping once a day: a random install id, the Hub's version, \
 your OS and CPU type, and its update channel. Nothing that identifies you. Turn it off in Settings.";
 
+/// How long the first-run notice is on screen before the ping counts as told
+/// about: an install opened once is counted on that first open (the
+/// contract's §4), and someone who answers sooner decides sooner.
+pub const NOTICE_GRACE: Duration = Duration::from_secs(60);
+
 /// Seconds to wait before each retry after a network error or a 5xx.
 const RETRY_AFTER: [u64; 2] = [60, 600];
 
@@ -157,6 +162,13 @@ pub fn wanted(enabled: bool, notice_seen: bool, env_off: bool, last_sent: Option
     enabled && notice_seen && !env_off && last_sent != Some(today)
 }
 
+/// Has the notice been up long enough to send while it waits for an answer?
+/// Once a run, and only with the ping still on: turning it off in the grace
+/// means no request.
+pub fn notice_send_due(shown_for: Duration, enabled: bool, sent_this_run: bool) -> bool {
+    enabled && !sent_this_run && shown_for >= NOTICE_GRACE
+}
+
 /// Send today's ping on a background thread, if this run should. Nothing
 /// waits on it and it never reports an error to the user.
 pub fn start(paths: &Paths, enabled: bool, notice_seen: bool, channel: String) {
@@ -240,6 +252,19 @@ mod tests {
         assert!(!wanted(false, true, false, None, "2026-10-19"), "turned off");
         assert!(!wanted(true, false, false, None, "2026-10-19"), "before the notice");
         assert!(!wanted(true, true, true, None, "2026-10-19"), "FOPULL_NO_PING");
+    }
+
+    /// **An install opened once is counted on that open.** The notice waits
+    /// for an answer, and an unanswered one used to mean no ping ever: the
+    /// Hub sends once the notice has been up for the grace, once a run, and
+    /// never once the ping is turned off.
+    #[test]
+    fn an_unanswered_notice_sends_after_its_grace() {
+        assert!(!notice_send_due(Duration::from_secs(59), true, false), "before the grace");
+        assert!(notice_send_due(Duration::from_secs(60), true, false), "at the grace");
+        assert!(notice_send_due(Duration::from_secs(600), true, false));
+        assert!(!notice_send_due(Duration::from_secs(600), false, false), "turned off in the grace");
+        assert!(!notice_send_due(Duration::from_secs(600), true, true), "twice in a run");
     }
 
     /// A 204 is done, a 400 or 429 stops for the day, and only a 5xx or no

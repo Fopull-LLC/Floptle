@@ -165,8 +165,11 @@ installs rather than downloads. It holds a random install id made on your
 machine, the Hub's version, your OS and CPU type, and its update channel, and
 nothing that identifies you. The editor never pings.
 
-The Hub tells you before it sends anything. **Settings ▸ Install ping** turns it
-off and deletes the install id. `FOPULL_NO_PING=1` in the environment turns it
+The Hub tells you before it sends anything: a notice across the top on first
+run says what the ping holds, with **OK** and **Turn it off**. Answer it, or
+leave it up for a minute and the first ping goes; turn it off in that minute
+and nothing is sent. **Settings ▸ Install ping** turns it off at any time and
+deletes the install id. `FOPULL_NO_PING=1` in the environment turns it
 off for every Fopull app, whatever the setting says, which is the switch for CI,
 packagers and managed machines.
 
