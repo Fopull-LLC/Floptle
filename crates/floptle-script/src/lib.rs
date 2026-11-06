@@ -2179,6 +2179,8 @@ pub enum RichSet {
     Celestial(Vec<(String, CompVal)>),
     Material(Vec<(String, CompVal)>),
     MatterTerrain(u32),
+    /// `el:scrollTo(row [, align])`: the row's node id and where it lands.
+    ScrollTo(u32, floptle_ui::ScrollAlign),
     /// `node:setPrimitive(shape [, color])`. The shape is already parsed — the
     /// name was checked at the call, where a misspelling can still name a line.
     MatterPrimitive(floptle_core::Shape, [f64; 3]),

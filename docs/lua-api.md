@@ -16,7 +16,7 @@ each group, and meant to be searched.
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 231
 - [node — transform & body fields](#node--transform--body-fields) — 45
-- [node — methods & handles](#node--methods--handles) — 38
+- [node — methods & handles](#node--methods--handles) — 39
 - [vectors, directions & easing](#vectors-directions--easing) — 51
 - [scene lookups & raycast](#scene-lookups--raycast) — 18
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
@@ -1314,6 +1314,10 @@ node:removeJoint() — take this node's joint off. It lets go at once.
 ### `node:removeTag`
 
 node:removeTag("burning") — remove a tag (no-op when absent).
+
+### `node:scrollTo`
+
+view:scrollTo(row [, "nearest" | "start" | "center"]) — on a scroll view: bring row, any element under it, into view. "nearest" (the default) scrolls as little as shows the row whole, and not at all when it already shows; "start" and "center" put its top or middle at the view's. Lands once both are laid out, so it works on a row made the same frame; never past the content. Keeps a row picked from somewhere else (the map, a search) in view in a long list. Refuses: another place name.
 
 ### `node:setBodyOutline`
 

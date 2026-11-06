@@ -2196,6 +2196,74 @@ pub fn scroll_max(roots: &[Node], placed: &[Placed], scroll_id: u32) -> [f32; 2]
     ]
 }
 
+/// A scroll view's ask to bring a row into view (`el:scrollTo`), on the view's
+/// node until the frame both are laid out, when the view's offsets take
+/// [`scroll_to`]'s answer and the ask goes. `frames` counts the frames it has
+/// waited; one whose row never appears is dropped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollToRequest {
+    pub row: u32,
+    pub align: ScrollAlign,
+    pub frames: u8,
+}
+
+/// Where a scroll view brings a row into view, for `el:scrollTo`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScrollAlign {
+    /// Scroll as little as brings the row fully into view; not at all when it
+    /// already is.
+    #[default]
+    Nearest,
+    /// The row's top (left) edge at the view's.
+    Start,
+    /// The row's middle at the view's.
+    Center,
+}
+
+/// The `[x, y]` offsets scroll view `view_id` takes to bring element `row`
+/// (anywhere under it) into view, clamped to what the content can scroll;
+/// `None` while either is not laid out. An axis with nothing to scroll keeps
+/// its offset.
+pub fn scroll_to(roots: &[Node], placed: &[Placed], view_id: u32, row: u32, align: ScrollAlign) -> Option<[f32; 2]> {
+    fn find(roots: &[Node], id: u32) -> Option<&Node> {
+        for n in roots {
+            if n.id == id {
+                return Some(n);
+            }
+            if let Some(f) = find(&n.children, id) {
+                return Some(f);
+            }
+        }
+        None
+    }
+    let view = find(roots, view_id)?;
+    let sc = view.spec.scroll?;
+    let rect = |id: u32| placed.iter().find(|p| p.id == id).map(|p| p.rect);
+    let (v, r) = (rect(view_id)?, rect(row)?);
+    let max = scroll_max(roots, placed, view_id);
+    let off = [sc.offset_x.max(0.0), sc.offset.max(0.0)];
+    let mut out = off;
+    for a in 0..2 {
+        if max[a] <= 0.0 {
+            continue;
+        }
+        // The row in content space: where it is now, plus how far the
+        // content is already scrolled.
+        let start = r[a] - v[a] + off[a];
+        let end = start + r[a + 2];
+        let span = v[a + 2];
+        let want = match align {
+            ScrollAlign::Start => start,
+            ScrollAlign::Center => start + r[a + 2] * 0.5 - span * 0.5,
+            ScrollAlign::Nearest if start < off[a] => start,
+            ScrollAlign::Nearest if end > off[a] + span => end - span,
+            ScrollAlign::Nearest => off[a],
+        };
+        out[a] = want.clamp(0.0, max[a]);
+    }
+    Some(out)
+}
+
 /// Build the draw list for solved elements. `roots`/`placed` must come from
 /// the same [`solve`] call (painter's order is reused).
 ///
@@ -2755,6 +2823,49 @@ mod tests {
         let roots = [fits];
         let placed = solve(&roots, [1280.0, 720.0], &m);
         assert_eq!(scroll_max(&roots, &placed, roots[0].id), [0.0, 0.0]);
+    }
+
+    /// **A scroll view brings a row into view.** Four 40-tall rows at 0, 50,
+    /// 100 and 150 in a 100-tall view scrolled to 30 (90 of travel):
+    /// "nearest" leaves a row already in view where it is and otherwise
+    /// scrolls as little as shows it whole; "start" and "center" put the
+    /// row's top or middle at the view's; every answer stays inside the
+    /// travel; a row that is not laid out has no answer.
+    #[test]
+    fn a_scroll_view_scrolls_to_a_row() {
+        let row = |y: f32| {
+            el(
+                ElementSpec {
+                    place: Place::Free { pos: [0.0, y] },
+                    size: [Size::Fixed(100.0), Size::Fixed(40.0)],
+                    ..Default::default()
+                },
+                vec![],
+            )
+        };
+        let rows = [row(0.0), row(50.0), row(100.0), row(150.0)];
+        let ids: Vec<u32> = rows.iter().map(|r| r.id).collect();
+        let view = el(
+            ElementSpec {
+                place: Place::Free { pos: [10.0, 20.0] },
+                size: [Size::Fixed(120.0), Size::Fixed(100.0)],
+                scroll: Some(ScrollSpec { offset: 30.0, ..Default::default() }),
+                ..Default::default()
+            },
+            rows.into(),
+        );
+        let roots = [view];
+        let placed = solve(&roots, [1280.0, 720.0], &m);
+        let v = roots[0].id;
+        let to = |row: u32, a: ScrollAlign| scroll_to(&roots, &placed, v, row, a).map(|o| o[1]);
+        assert_eq!(to(ids[1], ScrollAlign::Nearest), Some(30.0), "a row in view moved the list");
+        assert_eq!(to(ids[3], ScrollAlign::Nearest), Some(90.0), "the row below should end at the bottom edge");
+        assert_eq!(to(ids[0], ScrollAlign::Nearest), Some(0.0), "the row above should start at the top edge");
+        assert_eq!(to(ids[1], ScrollAlign::Start), Some(50.0));
+        assert_eq!(to(ids[1], ScrollAlign::Center), Some(20.0));
+        assert_eq!(to(ids[3], ScrollAlign::Start), Some(90.0), "past the travel");
+        assert_eq!(to(9_999_999, ScrollAlign::Nearest), None);
+        assert_eq!(scroll_to(&roots, &placed, v, ids[3], ScrollAlign::Nearest).map(|o| o[0]), Some(0.0), "no sideways travel, no sideways scroll");
     }
 
     /// **A scroll view fades only the edges that hide content.** A list at

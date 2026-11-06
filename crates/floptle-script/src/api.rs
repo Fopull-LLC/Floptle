@@ -2713,6 +2713,9 @@ pub(crate) fn apply_rich_sets(
                     world.insert(e, p);
                 }
             }
+            RichSet::ScrollTo(row, align) => {
+                world.insert(e, floptle_ui::ScrollToRequest { row, align, frames: 0 });
+            }
             RichSet::MatterTerrain(id) => {
                 world.insert(e, Matter::Terrain { id, collision: Default::default() });
             }
@@ -6619,6 +6622,35 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                 let e: u32 = this.raw_get("__id")?;
                 crate::opts::check_keys(&t, MATERIAL_KEYS, "node:setMaterial")?;
                 q.borrow_mut().push((e, crate::RichSet::Material(fo(&t)?)));
+                Ok(())
+            })?,
+        )?;
+    }
+    // el:scrollTo(row [, "nearest" | "start" | "center"]) — bring `row`, any
+    // element under this scroll view, into view, once both are laid out
+    // (the frame a row is made, too). "nearest" (the default) scrolls as
+    // little as shows the row whole and not at all when it already shows;
+    // "start" and "center" put its top or middle at the view's.
+    {
+        let q = q.clone();
+        methods.set(
+            "scrollTo",
+            lua.create_function(move |_, (this, row, align): (Table, Table, Option<String>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let row: u32 = row
+                    .raw_get("__id")
+                    .map_err(|_| mlua::Error::runtime("el:scrollTo(row): row is an element under this scroll view"))?;
+                let align = match align.as_deref() {
+                    None | Some("nearest") => floptle_ui::ScrollAlign::Nearest,
+                    Some("start") => floptle_ui::ScrollAlign::Start,
+                    Some("center") => floptle_ui::ScrollAlign::Center,
+                    Some(other) => {
+                        return Err(mlua::Error::runtime(format!(
+                            "el:scrollTo: \"{other}\" is not a place — \"nearest\" (the default), \"start\" or \"center\""
+                        )))
+                    }
+                };
+                q.borrow_mut().push((e, crate::RichSet::ScrollTo(row, align)));
                 Ok(())
             })?,
         )?;

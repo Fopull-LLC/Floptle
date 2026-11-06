@@ -1073,3 +1073,13 @@ fits doesn't scroll at all. Scripts read/write it as
 `getcomponent("UiElement").scrollY` (design units, `0` = top — reset it when
 you re-open a panel). The solar demo's New Galaxy panel is the reference: a
 `Scroll View` holding one slider row per generator parameter.
+
+To keep a row in view, ask the view for it: `list:scrollTo(row)` scrolls as
+little as shows the row whole, and not at all when it already shows;
+`list:scrollTo(row, "center")` (or `"start"`) puts it in the middle (or at the
+top). It lands once both are laid out, so it works on a row made that frame:
+
+```lua
+-- a craft picked on the map: its row comes up in the fleet list
+fleetList:scrollTo(rowOf[craft])
+```

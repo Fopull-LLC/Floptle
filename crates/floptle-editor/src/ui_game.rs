@@ -1380,6 +1380,11 @@ impl Editor {
         let mut solved_rects: HashMap<u32, [f32; 4]> = HashMap::new();
         // Each scroll view's travel, for `scrollMaxX` / `scrollMaxY`.
         let mut scroll_travel: Vec<(u32, [f32; 2])> = Vec::new();
+        // `el:scrollTo` asks waiting on their view, and the offsets each
+        // answered with this frame (once its view and row are laid out).
+        let scroll_asks: Vec<(u32, floptle_ui::ScrollToRequest)> =
+            self.world.query::<floptle_ui::ScrollToRequest>().map(|(e, r)| (e.index(), *r)).collect();
+        let mut scroll_answers: Vec<(u32, [f32; 2])> = Vec::new();
         // Every layer's solved rects this frame, for the navigation pass.
         let mut nav_layers: Vec<(UiLayer, Vec<floptle_ui::Node>, Vec<floptle_ui::Placed>)> =
             Vec::new();
@@ -1471,6 +1476,11 @@ impl Editor {
                     }
                     for id in views {
                         scroll_travel.push((id, floptle_ui::scroll_max(roots, &placed, id)));
+                        if let Some((_, ask)) = scroll_asks.iter().find(|(v, _)| *v == id)
+                            && let Some(off) = floptle_ui::scroll_to(roots, &placed, id, ask.row, ask.align)
+                        {
+                            scroll_answers.push((id, off));
+                        }
                     }
                     nav_layers.push((*layer, roots.clone(), placed.clone()));
                     // Publish each screen-space element's solved rect in
@@ -1840,6 +1850,28 @@ impl Editor {
         // here (right before scripts run) so a script's mouse hit-test uses
         // the panel's actual rendered position.
         self.script_host.set_ui_rects(solved_rects);
+        // Each answered ask lands in its view's offsets and goes; one still
+        // waiting on its row tries again next frame, for about half a second.
+        for (id, ask) in scroll_asks {
+            let Some(e) = self.world.entity_with::<Transform>(id) else { continue };
+            match scroll_answers.iter().find(|(v, _)| *v == id) {
+                Some(&(_, off)) => {
+                    if let Some(sc) = self.world.get_mut::<ElementSpec>(e).and_then(|s| s.scroll.as_mut()) {
+                        sc.offset_x = off[0];
+                        sc.offset = off[1];
+                    }
+                    self.world.remove::<floptle_ui::ScrollToRequest>(e);
+                }
+                None if ask.frames >= 30 => {
+                    self.world.remove::<floptle_ui::ScrollToRequest>(e);
+                }
+                None => {
+                    if let Some(r) = self.world.get_mut::<floptle_ui::ScrollToRequest>(e) {
+                        r.frames += 1;
+                    }
+                }
+            }
+        }
         for (id, max) in scroll_travel {
             if let Some(e) = self.world.entity_with::<Transform>(id)
                 && self.world.get::<ElementSpec>(e).and_then(|s| s.scroll).is_some_and(|sc| sc.max != max)
@@ -3981,6 +4013,67 @@ mod tests {
         assert!(over_at(w * 0.1, 1), "the pointer over a faint plate is not over UI");
         assert!(!over_at(w * 0.6, 2), "the pointer beside the plate is over UI");
         assert!(!over_at(w * 0.9, 3), "a text label covers the world");
+    }
+
+    /// **A scroll view scrolls to a row.** A row picked from somewhere else
+    /// (a craft chosen on the map) sat outside its list with no way to bring
+    /// it up. Twenty 40-tall rows in a 200-tall view: asked for the fifteenth,
+    /// the view scrolls just far enough to show it whole; asked for a row
+    /// the list has not made yet, the ask waits for the row instead of being
+    /// lost.
+    #[test]
+    fn a_scroll_view_scrolls_to_a_row_it_is_asked_for() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.player_mode = true;
+        ed.playing = true;
+        let layer = ed.world.spawn();
+        ed.world.insert(layer, Transform::IDENTITY);
+        ed.world.insert(layer, UiLayer::default());
+        let view = ed.world.spawn();
+        ed.world.insert(view, Transform::IDENTITY);
+        ed.world.insert(view, Parent(layer));
+        ed.world.insert(
+            view,
+            ElementSpec {
+                size: [Size::Fixed(300.0), Size::Fixed(200.0)],
+                scroll: Some(floptle_ui::ScrollSpec::default()),
+                ..Default::default()
+            },
+        );
+        let row_at = |ed: &mut crate::Editor, i: usize| {
+            let r = ed.world.spawn();
+            ed.world.insert(r, Transform::IDENTITY);
+            ed.world.insert(r, Parent(view));
+            ed.world.insert(
+                r,
+                ElementSpec {
+                    place: floptle_ui::Place::Free { pos: [0.0, 40.0 * i as f32] },
+                    size: [Size::Fixed(300.0), Size::Fixed(40.0)],
+                    ..Default::default()
+                },
+            );
+            r
+        };
+        let rows: Vec<_> = (0..20).map(|i| row_at(&mut ed, i)).collect();
+        let offset = |ed: &crate::Editor| ed.world.get::<ElementSpec>(view).and_then(|s| s.scroll).map(|s| s.offset).unwrap();
+        ed.ui_interact();
+        assert_eq!(offset(&ed), 0.0, "the fixture: the list starts at its top");
+        let ask = |row: Entity| floptle_ui::ScrollToRequest { row: row.index(), align: floptle_ui::ScrollAlign::Nearest, frames: 0 };
+        ed.world.insert(view, ask(rows[14]));
+        ed.ui_interact();
+        // Row 14 spans 560..600: it ends at the bottom of a 200-tall view at 400.
+        assert_eq!(offset(&ed), 400.0, "the list did not bring row 15 into view");
+        assert!(ed.world.get::<floptle_ui::ScrollToRequest>(view).is_none(), "an answered ask stayed on the view");
+        // A row asked for before it exists lands once it does.
+        let late = ed.world.spawn();
+        ed.world.insert(view, ask(late));
+        ed.ui_interact();
+        assert!(ed.world.get::<floptle_ui::ScrollToRequest>(view).is_some(), "the ask for a row not made yet was dropped");
+        ed.world.despawn(late);
+        let late = row_at(&mut ed, 2);
+        ed.world.insert(view, ask(late));
+        ed.ui_interact();
+        assert_eq!(offset(&ed), 80.0, "the list did not come back up to row 3");
     }
 
     /// What the pointer can drive, and — just as important — what it can't.

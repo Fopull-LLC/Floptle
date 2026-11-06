@@ -2150,3 +2150,46 @@ fn ui_wants_pointer_reads_what_the_engine_published() {
     assert_eq!(said, vec!["true".to_string(), "false".to_string()]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `el:scrollTo(row [, align])` leaves the ask on the scroll view for the
+/// engine's UI pass, and a place it does not know is refused by name.
+#[test]
+fn scroll_to_leaves_its_ask_on_the_view() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_scroll_to_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "list",
+        "function start()\n\
+           find('List'):scrollTo(find('Row'), 'center')\n\
+           log(tostring(select(2, pcall(function() find('List'):scrollTo(find('Row'), 'middle') end))))\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let view = world.spawn();
+    world.insert(view, Transform::IDENTITY);
+    world.insert(view, floptle_core::Name("List".into()));
+    world.insert(view, floptle_ui::ElementSpec { scroll: Some(floptle_ui::ScrollSpec::default()), ..Default::default() });
+    let row = world.spawn();
+    world.insert(row, Transform::IDENTITY);
+    world.insert(row, floptle_core::Name("Row".into()));
+    world.insert(row, floptle_core::Parent(view));
+    world.insert(view, Scripts(vec![floptle_core::ScriptInst {
+        kind: "list".into(),
+        enabled: true,
+        params: Vec::new(),
+        refs: Vec::new(),
+        strs: Vec::new(),
+        pinned_bools: None,
+    }]));
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let ask = world.get::<floptle_ui::ScrollToRequest>(view).copied().expect("the ask should be on the view");
+    assert_eq!((ask.row, ask.align), (row.index(), floptle_ui::ScrollAlign::Center));
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(said.iter().any(|l| l.contains("middle") && l.contains("nearest")), "{said:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
