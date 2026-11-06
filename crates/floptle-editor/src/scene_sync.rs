@@ -1006,6 +1006,83 @@ mod shadow_atlas_tests {
         assert!(wide > narrow, "a 3 m blend mixes no more than a 0.5 m one: {counts:?}");
     }
 
+    /// **Up close, a blend between two slots shows only those two.** A
+    /// triangle whose corners carry slots 1 and 3 interpolates its slot from
+    /// one to the other, through 2; up close it changes so little across a
+    /// pixel that the "whole slot" shortcut took the pixel where it passed 2
+    /// for slot 2 alone, and a thin line of a slot painted nowhere near ran
+    /// across the triangle (Ty's "blending lines", glowing in the dark when
+    /// that slot glows). A pit dug through red ground into blue subsoil, its
+    /// rim seen from 0.6 m, slot 2 green: not one green pixel.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn up_close_a_blend_shows_no_slot_between_its_two() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_between_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
+        for (name, c) in [("red", [200u8, 40, 40, 255]), ("green", [40, 200, 40, 255]), ("blue", [40, 40, 200, 255])] {
+            let tex = floptle_render::TextureData { pixels: c.repeat(16 * 16), width: 16, height: 16 };
+            std::fs::write(dir.join(format!("textures/{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        }
+        ed.project_root = dir.clone();
+        ed.terrain_textures = vec!["textures/red.png".into(), "textures/green.png".into(), "textures/blue.png".into()];
+        ed.terrain_textures_dirty = true;
+        for _ in 0..20_000 {
+            ed.sync_terrain_palette(false);
+            if ed.terrain_palette_job.is_none() && !ed.terrain_textures_dirty {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 8,
+            radius: 120.0,
+            voxel: 1.5,
+            relief: 0.0,
+            cave_depth: 0.0,
+            surface_a: floptle_field::procgen::LayerPaint { slot: 1, color: [1.0; 3] },
+            surface_b: floptle_field::procgen::LayerPaint { slot: 1, color: [1.0; 3] },
+            subsoil_depth: 0.0,
+            ..Default::default()
+        });
+        let top = field.raycast(Vec3::new(0.0, 250.0, 0.0), Vec3::NEG_Y, 250.0).unwrap();
+        // Slot 3 painted beside slot 1, the way Ty's walls were painted.
+        field.paint_texture(top + Vec3::new(4.0, 0.0, 0.0), 4.0, 3);
+        add_body(&mut ed, 1, DVec3::ZERO, &field);
+        settle(&mut ed);
+        let sun = ed.world.spawn();
+        ed.world.insert(sun, Transform { rotation: floptle_core::math::Quat::from_rotation_x(-1.2), ..Transform::IDENTITY });
+        ed.world.insert(sun, floptle_core::Light { intensity: 1.0, shadows: false, ..Default::default() });
+        let (w, h) = (320u32, 240u32);
+        let green = |px: &[u8]| px.as_chunks::<4>().0.iter().filter(|p| p[1] > 90 && p[1] as f32 > 1.6 * p[0].max(p[2]) as f32).count();
+        let mut seen = Vec::new();
+        // Across the painted edge, a little over half a metre off the ground.
+        for a in 0..12 {
+            let ang = 0.0f32;
+            let rim = top + Vec3::new(-1.5 + a as f32 * 0.5, 0.0, 0.0);
+            let ground = field.raycast(rim + Vec3::Y * 10.0, Vec3::NEG_Y, 20.0).unwrap_or(rim);
+            ed.camera.position = DVec3::new(ground.x as f64, ground.y as f64 + 0.6, ground.z as f64);
+            ed.camera.pitch = -1.5;
+            ed.camera.yaw = ang;
+            let at = ed.camera.position;
+            ed.settle_terrain_meshes(at, std::time::Duration::from_secs(60));
+            let cam = ed.camera.render_camera();
+            let px = crate::shot::render_frame_pixels(&mut ed, &cam, None, w, h, !0, false).expect("a frame");
+            if let Ok(out) = std::env::var("FLOPTLE_BETWEEN_PNG") {
+                let tex = floptle_render::TextureData { pixels: px.clone(), width: w, height: h };
+                std::fs::write(std::path::Path::new(&out).join(format!("between_{a}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+            }
+            let red = px.as_chunks::<4>().0.iter().filter(|p| p[0] > 90 && p[0] as f32 > 1.6 * p[1].max(p[2]) as f32).count();
+            let blue = px.as_chunks::<4>().0.iter().filter(|p| p[2] > 90 && p[2] as f32 > 1.6 * p[0].max(p[1]) as f32).count();
+            seen.push((red, blue, green(&px)));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(seen.iter().any(|(r, b, _)| *r > 500 && *b > 500), "the fixture: a view should show both the red ground and the blue subsoil: {seen:?}");
+        let lines: usize = seen.iter().map(|s| s.2).sum();
+        assert_eq!(lines, 0, "slot 2 drew between slots 1 and 3 (red, blue, green px per view): {seen:?}");
+    }
+
     /// **Anti-tiling hides a texture's repeat from far off (0626).** One slot
     /// of light noise with one dark disc per tile, so the picture's structure
     /// is the tile's own period, a grid of dots, seen straight down from 60 m. Plain, the picture correlates

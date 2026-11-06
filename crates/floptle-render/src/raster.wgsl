@@ -1845,8 +1845,14 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
     // three voxels, and on undug ground its cells reached the subsoil a voxel
     // down and blotched it through. Only a triangle whose corners differ is
     // blended from the atlas.
+    //
+    // Whole means the corners agree, so the slot is constant and its change
+    // across the pixel nil, not merely small: up close, a triangle blending
+    // slot 4 into slot 10 changes by a few thousandths a pixel, and the old
+    // bounds took every pixel where it passed 5, 6, 7, 8 or 9 for that slot
+    // alone, a thin line of each across the triangle.
     let whole = round(av);
-    if (aw < 0.01 && abs(av - whole) < 0.01) {
+    if (aw < 1e-4 && abs(av - whole) < 1e-3) {
         let layer = i32(whole) - 1;
         let c = terrain_triplanar(layer, in.lpos, in.lnorm, dpx, dpy, 1.0) * tint * 1.6;
         return vec4<f32>(c, slot_glow(max(layer, 0)));
