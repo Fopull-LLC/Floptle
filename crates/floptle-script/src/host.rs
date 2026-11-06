@@ -758,7 +758,7 @@ fn cast_ray(
     exclude: &[u32],
     mask: u32,
 ) -> Option<floptle_physics::RayHit> {
-    let solid = floptle_physics::raycast_colliders(cols, o, dir, max, mask);
+    let solid = floptle_physics::raycast_colliders_excluding(cols, o, dir, max, mask, exclude);
     let body = floptle_physics::raycast_hulls(hulls, o, dir, max, exclude, mask);
     match (solid, body) {
         (Some(s), Some((_, b))) if b.distance < s.distance => Some(b),

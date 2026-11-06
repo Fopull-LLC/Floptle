@@ -332,7 +332,7 @@ pub(crate) fn install_shape_api(
             let p = (glam::DVec3::new(c.x, c.y, c.z) - origin).as_vec3();
             let r = radius as f32;
             let mut hits =
-                floptle_physics::overlap_sphere_colliders(&s.colliders.borrow(), p, r, mask);
+                floptle_physics::overlap_sphere_colliders(&s.colliders.borrow(), p, r, mask, &exclude);
             hits.extend(floptle_physics::overlap_sphere_hulls(
                 &s.hulls.borrow(),
                 p,

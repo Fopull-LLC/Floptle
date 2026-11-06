@@ -557,6 +557,12 @@ pub fn unmeshed_ground_in_box(colliders: &[AnchoredCollider], lo: Vec3, hi: Vec3
 ///
 /// `mask` filters by collision layer: bit `i` set = colliders on layer `i` are
 /// testable (`!0` = everything, the no-filter default).
+/// Is collider `c` one a query was told to pass through (its node named in
+/// `exclude`)? A collider with no node is level geometry and never is.
+fn excluded(c: &AnchoredCollider, exclude: &[u32]) -> bool {
+    c.eid.is_some_and(|e| exclude.contains(&e))
+}
+
 pub fn raycast_colliders(
     colliders: &[AnchoredCollider],
     origin: Vec3,
@@ -564,14 +570,28 @@ pub fn raycast_colliders(
     max_dist: f32,
     mask: u32,
 ) -> Option<RayHit> {
-    cast_colliders(colliders, origin, dir, max_dist, mask, false)
+    cast_colliders(colliders, origin, dir, max_dist, mask, &[], false)
+}
+
+/// [`raycast_colliders`], passing through every collider whose node is in
+/// `exclude`: what a script's `ignore` names, static ground and walls
+/// included, not only bodies.
+pub fn raycast_colliders_excluding(
+    colliders: &[AnchoredCollider],
+    origin: Vec3,
+    dir: Vec3,
+    max_dist: f32,
+    mask: u32,
+    exclude: &[u32],
+) -> Option<RayHit> {
+    cast_colliders(colliders, origin, dir, max_dist, mask, exclude, false)
 }
 
 /// [`raycast_colliders`], asking each collider its
 /// [`ground_cast`](crate::CollisionShape::ground_cast) answer: the ray a
 /// scatter prop is dropped onto the ground with.
 pub fn raycast_ground_colliders(colliders: &[AnchoredCollider], origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
-    cast_colliders(colliders, origin, dir, max_dist, !0, true)
+    cast_colliders(colliders, origin, dir, max_dist, !0, &[], true)
 }
 
 fn cast_colliders(
@@ -580,6 +600,7 @@ fn cast_colliders(
     dir: Vec3,
     max_dist: f32,
     mask: u32,
+    exclude: &[u32],
     ground: bool,
 ) -> Option<RayHit> {
     // A march stops within 0.02 of a surface, so a box grazed by that much
@@ -592,7 +613,7 @@ fn cast_colliders(
     for (i, c) in colliders.iter().enumerate() {
         // Sensors don't block rays either (a camera ray must pass through
         // a portal trigger exactly like the player does).
-        if (mask >> c.layer) & 1 == 0 || c.sensor {
+        if (mask >> c.layer) & 1 == 0 || c.sensor || excluded(c, exclude) {
             continue;
         }
         let span = match c.aabb().map(Ok).or_else(|| c.bounds().map(Err)) {
@@ -942,10 +963,11 @@ pub fn overlap_sphere_colliders(
     center: Vec3,
     radius: f32,
     mask: u32,
+    exclude: &[u32],
 ) -> Vec<ShapeHit> {
     let mut out = Vec::new();
     for c in colliders {
-        if (mask >> c.layer) & 1 == 0 {
+        if (mask >> c.layer) & 1 == 0 || excluded(c, exclude) {
             continue;
         }
         let d = c.distance(center);
@@ -1036,7 +1058,7 @@ pub fn spherecast(
     let r = radius.max(0.0);
     let near: Vec<&AnchoredCollider> = colliders
         .iter()
-        .filter(|c| (mask >> c.layer) & 1 == 1 && !c.sensor)
+        .filter(|c| (mask >> c.layer) & 1 == 1 && !c.sensor && !excluded(c, exclude))
         .filter(|c| match c.aabb().map(Ok).or_else(|| c.bounds().map(Err)) {
             Some(Ok((lo, hi))) => {
                 let grow = Vec3::splat(r + SLACK);
@@ -1241,7 +1263,7 @@ pub fn overlap_box_2d(
     };
     let mut out = Vec::new();
     for c in colliders {
-        if (mask >> c.layer) & 1 == 0 || c.sensor {
+        if (mask >> c.layer) & 1 == 0 || c.sensor || excluded(c, exclude) {
             continue;
         }
         let (d, p) = deepest(&|q| c.distance(q));

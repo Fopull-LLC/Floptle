@@ -35,7 +35,7 @@ fn ignore_start_lets_off_only_what_the_cast_starts_against() {
         assert!((hit.distance - (5.0 - r)).abs() < 0.05, "radius {r} stopped after {} m, not {}", hit.distance, 5.0 - r);
         // Where it stopped, an overlap of that radius just touches the floor.
         let at = origin + Vec3::NEG_Y * hit.distance;
-        let over = floptle_physics::overlap_sphere_colliders(cols, at, r + 0.05, !0);
+        let over = floptle_physics::overlap_sphere_colliders(cols, at, r + 0.05, !0, &[]);
         assert!(!over.is_empty() && over.iter().all(|o| o.distance < 0.1), "radius {r}: the overlap there reads {over:?}");
     }
     let around = [ball(2, origin, 1.0)];

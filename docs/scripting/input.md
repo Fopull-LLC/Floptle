@@ -418,7 +418,7 @@ local h = raycast(x, y, z, 0, -1, 0, 2.0, { ignore = target, layers = { "Ground"
 **both** static geometry and bodies; a misspelled layer name is an error, not a
 silent miss.
 
-`ignore` skips the nodes it names, and only those. A prefab whose colliders sit on child nodes, such as a craft or a launch stand, needs `ignoreChildren = true` to be passed whole by naming its root:
+`ignore` skips the nodes it names, and only those: their bodies and their static colliders alike. A prefab whose colliders sit on child nodes, such as a craft or a launch stand, needs `ignoreChildren = true` to be passed whole by naming its root:
 
 ```lua
 -- the deck under the craft, not the craft's own landing legs

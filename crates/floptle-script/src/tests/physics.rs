@@ -1315,3 +1315,91 @@ end
     assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 1.0, "the script did not finish");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **`ignore` skips static colliders, not only bodies.** A launch stand is
+/// static `Collidable` boxes under a root, with no body; every query
+/// filtered its exclude list against body hulls alone, so a ray told to
+/// skip the stand, even naming its wall directly, still stopped on the wall.
+/// Root A (no collider of its own) holds box B at x 6, which holds box D at
+/// 7.5; box C at 9 stands alone. Ignoring B by name meets D; ignoring A with
+/// `ignoreChildren` meets C; on every query.
+#[test]
+fn ignore_skips_static_colliders_by_node() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_ignore_static_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "caster",
+        r#"
+local function id(h) return h and h.node and h.node.__id end
+local function ids(list)
+  local s = {}
+  for _, h in ipairs(list) do if h.node then s[h.node.__id] = true end end
+  return s
+end
+function update(node, dt)
+  local a, b, c, d = find("A"), find("B"), find("C"), find("D")
+  local o, dir = vec3(0, 0, 0), vec3(1, 0, 0)
+  for _, case in ipairs({ { { ignore = b }, d, { b } }, { { ignore = a, ignoreChildren = true }, c, { b, d } } }) do
+    local opts, want, gone = case[1], case[2].__id, case[3]
+    local function check(what, got)
+      if got ~= want then error(what .. " met " .. tostring(got) .. ", not " .. want) end
+    end
+    check("raycast", id(raycast(0, 0, 0, 1, 0, 0, 50, opts)))
+    check("raycastMany", id(raycastMany({ o }, { dir }, 50, opts)[1]))
+    check("spherecast", id(spherecast(o, dir, 0.1, 50, opts)))
+    check("capsulecast", id(capsulecast(o, dir, 0.1, 0.2, 50, opts)))
+    check("boxcast", id(boxcast(o, dir, 0.1, 0.1, 50, opts)))
+    for _, q in ipairs({ { "overlapSphere", overlapSphere(vec3(7.5, 0, 0), 2.5, opts) }, { "overlapBox", overlapBox(vec3(7.5, 0, 0), 2.5, 1, opts) } }) do
+      local s = ids(q[2])
+      for _, g in ipairs(gone) do
+        if s[g.__id] then error(q[1] .. " met " .. g.__id .. ", which it was told to skip") end
+      end
+      if not s[want] then error(q[1] .. " missed " .. want) end
+    end
+  end
+  node.x = 1
+end
+"#,
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::from_translation(glam::DVec3::new(0.0, 0.0, 50.0)));
+    world.insert(
+        e,
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "caster".into(),
+            enabled: true,
+            params: Vec::new(),
+            refs: Vec::new(),
+            strs: Vec::new(),
+            pinned_bools: None,
+        }]),
+    );
+    let mut cols = Vec::new();
+    let mut made = std::collections::HashMap::new();
+    for (name, x, parent) in [("A", None, None), ("B", Some(6.0), Some("A")), ("D", Some(7.5), Some("B")), ("C", Some(9.0), None)] {
+        let n = world.spawn();
+        world.insert(n, Transform::from_translation(glam::DVec3::new(x.unwrap_or(3.0) as f64, 0.0, 0.0)));
+        world.insert(n, floptle_core::Name(name.into()));
+        if let Some(p) = parent {
+            world.insert(n, floptle_core::Parent(made[p]));
+        }
+        made.insert(name, n);
+        if let Some(x) = x {
+            let mut c = floptle_physics::AnchoredCollider::world(Box::new(floptle_physics::BoxShape::new(
+                glam::Vec3::new(x, 0.0, 0.0),
+                glam::Vec3::splat(0.4),
+                glam::Quat::IDENTITY,
+            )));
+            c.eid = Some(n.index());
+            cols.push(c);
+        }
+    }
+    let mut host = ScriptHost::new();
+    host.set_colliders(cols, glam::DVec3::ZERO);
+    host.run(&mut world, &dir, 0.01, 0.01);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 1.0, "the script did not finish");
+    let _ = std::fs::remove_dir_all(&dir);
+}
