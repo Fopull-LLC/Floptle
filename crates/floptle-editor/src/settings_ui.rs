@@ -841,6 +841,32 @@ impl<'a> SettingsCtx<'a> {
         );
         row(
             ui,
+            "Upscale",
+            Some("how a render scale below the screen's is brought up to it. \"fsr 1\": AMD's \
+                  edge-adaptive upscale, sharpened by contrast, so a frame drawn at two thirds of \
+                  the screen reads close to native. \"bilinear\": smooth and lightly sharpened, \
+                  as projects made before the setting do it"),
+            |ui| {
+                use floptle_scene::UpscaleDoc as U;
+                let mut u = project.upscale_resolved();
+                egui::ComboBox::from_id_salt("project-upscale")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(match u {
+                        U::Fsr1 => "fsr 1",
+                        U::Bilinear => "bilinear",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut u, U::Fsr1, "fsr 1");
+                        ui.selectable_value(&mut u, U::Bilinear, "bilinear");
+                    });
+                if u != project.upscale_resolved() {
+                    project.upscale = Some(u);
+                    out.save_project = true;
+                }
+            },
+        );
+        row(
+            ui,
             "Volumetric fog",
             Some("how the lit volumetric fog is built. \"grid\": in a grid of cells over the view, \
                   each lit once and read by every pixel, a fraction of the cost and the same \

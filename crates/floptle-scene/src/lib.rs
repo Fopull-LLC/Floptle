@@ -1560,6 +1560,20 @@ pub enum ScreenDrawOrderDoc {
     TextOnTop,
 }
 
+/// How a render scale below the screen's is brought up to it.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum UpscaleDoc {
+    /// Bilinear, lightly sharpened by contrast: how every project brought a
+    /// render scale up before the setting, which a project from then keeps.
+    Bilinear,
+    /// AMD's FSR 1: edge-adaptive, so an edge stays an edge rather than
+    /// smearing across the texels it falls between, then sharpened by
+    /// contrast. A frame drawn at two thirds of the screen and brought up
+    /// this way reads close to native. New projects start here.
+    #[default]
+    Fsr1,
+}
+
 /// How the volumetric fog is built.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FogMethodDoc {
@@ -3344,6 +3358,11 @@ pub struct ProjectConfigDoc {
     /// [`March`](FogMethodDoc::March).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fog_method: Option<FogMethodDoc>,
+    /// How a render scale is brought up to the screen; see [`UpscaleDoc`].
+    /// `None` means the file predates the setting and resolves to
+    /// [`Bilinear`](UpscaleDoc::Bilinear).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upscale: Option<UpscaleDoc>,
     /// How screen draws stack; see [`ScreenDrawOrderDoc`]. `None` means the
     /// file predates the setting and resolves to
     /// [`TextOnTop`](ScreenDrawOrderDoc::TextOnTop).
@@ -3453,6 +3472,7 @@ impl ProjectConfigDoc {
             wheel_friction: Some(WheelFrictionDoc::Single),
             terrain_shape: Some(TerrainShapeDoc::Natural),
             fog_method: Some(FogMethodDoc::Grid),
+            upscale: Some(UpscaleDoc::Fsr1),
             screen_draw_order: Some(ScreenDrawOrderDoc::CallOrder),
             terrain_border: Some(TerrainBorderDoc::Natural),
             example_scripts: true,
@@ -3515,6 +3535,12 @@ impl ProjectConfigDoc {
     /// before the setting gripped twice over, and still does.
     pub fn wheel_friction_resolved(&self) -> WheelFrictionDoc {
         self.wheel_friction.unwrap_or(WheelFrictionDoc::Classic)
+    }
+
+    /// How this project brings a render scale up to the screen. A project
+    /// file from before the setting did it bilinearly, and still does.
+    pub fn upscale_resolved(&self) -> UpscaleDoc {
+        self.upscale.unwrap_or(UpscaleDoc::Bilinear)
     }
 
     /// How this project builds its volumetric fog. A project file from

@@ -113,6 +113,7 @@ pub(crate) fn render_frame_texture(
         r.resize_to(&gpu, cw, ch);
         r.set_smooth(&gpu, !retro_on);
         r.set_sharpness(&gpu, ed.render_sharpness());
+        r.set_fsr(&gpu, ed.project.upscale_resolved() == floptle_scene::UpscaleDoc::Fsr1);
         r
     });
     // The picture that gets written. In retro mode the scene never draws into

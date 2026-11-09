@@ -680,6 +680,7 @@ impl Editor {
                 if let Some(r) = self.game_retro.as_mut() {
                     r.set_smooth(gpu, !retro_on);
                     r.set_sharpness(gpu, self.render_sharpness.unwrap_or(floptle_render::retro::DEFAULT_SHARPNESS));
+                    r.set_fsr(gpu, self.project.upscale_resolved() == floptle_scene::UpscaleDoc::Fsr1);
                 }
             }
             // Always configured, not only when an effect is on: the chain is

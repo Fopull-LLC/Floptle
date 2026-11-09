@@ -26,6 +26,9 @@ pub struct Retro {
     /// smoothly rather than into chunky pixels.
     smooth_sampler: wgpu::Sampler,
     smooth: bool,
+    /// A smooth upscale through FSR 1 (edge-adaptive, then sharpened by
+    /// contrast) rather than bilinear. See [`Self::set_fsr`].
+    fsr: bool,
     /// How hard a smooth upscale sharpens (0 = plain bilinear, 1 = most).
     sharpness: f32,
     /// `[smooth, sharpness, 1/width, 1/height]` for the blit shader.
@@ -146,6 +149,7 @@ impl Retro {
             sampler,
             smooth_sampler,
             smooth: false,
+            fsr: false,
             sharpness: DEFAULT_SHARPNESS,
             params,
             bind,
@@ -156,7 +160,11 @@ impl Retro {
 
     fn write_params(&self, gpu: &Gpu) {
         let p = [
-            if self.smooth { 1.0f32 } else { 0.0 },
+            match (self.smooth, self.fsr) {
+                (false, _) => 0.0f32,
+                (true, false) => 1.0,
+                (true, true) => 2.0,
+            },
             self.sharpness,
             1.0 / self.width.max(1) as f32,
             1.0 / self.height.max(1) as f32,
@@ -177,6 +185,19 @@ impl Retro {
 
     pub fn sharpness(&self) -> f32 {
         self.sharpness
+    }
+
+    /// Upscale a render scale through FSR 1 (on) or bilinear (off, the
+    /// default): AMD's edge-adaptive upscale, each edge kept an edge rather
+    /// than smeared across the texels it falls between, then sharpened by
+    /// contrast as hard as [`Self::set_sharpness`] says. What lets a game
+    /// draw at two thirds of the screen and not look it. A retro
+    /// (hard-pixel) upscale ignores it.
+    pub fn set_fsr(&mut self, gpu: &Gpu, on: bool) {
+        if self.fsr != on {
+            self.fsr = on;
+            self.write_params(gpu);
+        }
     }
 
     /// Upscale smoothly (a render scale) or in hard-edged pixels (retro).

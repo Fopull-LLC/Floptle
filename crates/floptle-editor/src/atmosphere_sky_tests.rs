@@ -438,6 +438,66 @@ fn volumetric_fog_marched_once_per_four_pixels_draws_the_same_picture() {
 }
 
 
+/// **FSR 1 brings two thirds of the screen up nearer the native picture
+/// than bilinear does.** Thin dark bars at many angles over pale ground,
+/// drawn at the screen's own resolution and at a render scale of 0.67,
+/// brought up bilinearly and through FSR 1. Measured: off the native
+/// picture by 1.22 levels of luma on average bilinear, 0.83 through FSR.
+/// Bilinear's sharpening makes its steepest edges steeper than FSR's, but
+/// staircased; FSR keeps an edge an edge. `FLOPTLE_FSR_PNG=<dir>` writes
+/// all three.
+#[cfg(feature = "editor-ui")]
+#[test]
+fn fsr1_brings_a_scaled_frame_nearer_native_than_bilinear() {
+    use floptle_core::math::Vec3;
+    let (w, h) = (960u32, 540u32);
+    let shot = |scale: f32, up: floptle_scene::UpscaleDoc| -> Option<Vec<u8>> {
+        let mut ed = crate::offscreen::test_editor_with_gpu()?;
+        // A render scale, not the retro look (a test editor starts retro).
+        ed.project.retro = false;
+        ed.project.render_scale = scale;
+        ed.project.upscale = Some(up);
+        let wd = &mut ed.world;
+        let floor = wd.spawn();
+        wd.insert(floor, Transform { translation: DVec3::new(0.0, -0.5, -8.0), scale: Vec3::new(40.0, 0.2, 40.0), ..Transform::IDENTITY });
+        wd.insert(floor, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.9, 0.88, 0.85] });
+        for k in 0..18 {
+            let b = wd.spawn();
+            let ang = k as f32 * 0.17;
+            wd.insert(
+                b,
+                Transform {
+                    translation: DVec3::new((k % 6) as f64 * 1.2 - 3.0, -0.3, -5.0 - (k / 6) as f64 * 1.5),
+                    rotation: Quat::from_rotation_y(ang),
+                    scale: Vec3::new(1.4, 0.05, 0.06),
+                },
+            );
+            wd.insert(b, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.05, 0.05, 0.08] });
+        }
+        let sun = wd.spawn();
+        wd.insert(sun, Transform { rotation: Quat::from_rotation_x(-1.0), ..Transform::IDENTITY });
+        wd.insert(sun, floptle_core::Light { intensity: 1.0, shadows: false, ..Default::default() });
+        let cam = RenderCamera::new(DVec3::new(0.0, 2.0, 0.0), Quat::from_rotation_x(-0.5), Projection::Perspective { fov_y: 1.0, near: 0.05, far: 200.0 });
+        let tex = crate::capture::render_frame_texture(&mut ed, &cam, None, w, h, u32::MAX, false, false)?;
+        crate::offscreen::read_back_frame(ed.gpu.as_ref()?, &tex)
+    };
+    use floptle_scene::UpscaleDoc as U;
+    let Some(native) = shot(1.0, U::Bilinear) else { return };
+    let Some(bilinear) = shot(0.67, U::Bilinear) else { return };
+    let Some(fsr) = shot(0.67, U::Fsr1) else { return };
+    if let Ok(out) = std::env::var("FLOPTLE_FSR_PNG") {
+        for (name, px) in [("native", &native), ("bilinear", &bilinear), ("fsr", &fsr)] {
+            let tex = floptle_render::TextureData { pixels: px.clone(), width: w, height: h };
+            std::fs::write(std::path::Path::new(&out).join(format!("up_{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        }
+    }
+    let luma = |px: &[u8], i: usize| px[i * 4] as f32 * 0.3 + px[i * 4 + 1] as f32 * 0.59 + px[i * 4 + 2] as f32 * 0.11;
+    let err = |px: &[u8]| (0..(w * h) as usize).map(|i| (luma(px, i) - luma(&native, i)).abs()).sum::<f32>() / (w * h) as f32;
+    let (eb, ef) = (err(&bilinear), err(&fsr));
+    assert!(eb > 0.3, "the fixture: a scaled frame differs from the native one ({eb:.2})");
+    assert!(ef < eb * 0.85, "through FSR the scaled frame is {ef:.2} off native, bilinear {eb:.2}");
+}
+
 /// **The froxel fog draws the march's fog.** The field of poles (stems,
 /// every pixel an edge) under lit, noisy volumetric fog, marched as before
 /// and built in a froxel grid: within two levels in 255 of each other on

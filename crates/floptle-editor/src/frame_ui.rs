@@ -438,6 +438,7 @@ impl Editor {
         }
         retro.set_smooth(gpu, !self.project.retro);
         retro.set_sharpness(gpu, self.render_sharpness.unwrap_or(floptle_render::retro::DEFAULT_SHARPNESS));
+        retro.set_fsr(gpu, self.project.upscale_resolved() == floptle_scene::UpscaleDoc::Fsr1);
 
         // Post-processing (SSAO/bloom/vignette, from the scene's PostProcess node —
         // gathered above) runs at the resolution the scene was composited at: the
