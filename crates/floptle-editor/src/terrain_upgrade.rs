@@ -19,11 +19,12 @@ use std::path::{Path, PathBuf};
 /// planets by. Each line is the release a change to the generator shipped in.
 /// A project from before stamps, or before any of them, gets the oldest.
 pub(crate) fn generator_for_stamp(from: Option<&str>) -> u32 {
-    use floptle_field::procgen::{DEEP_ROCK_NEEDS_CAVES, LATITUDE_BANDS, RIVERS_FOLLOW_DRAINAGE};
+    use floptle_field::procgen::{DEEP_ROCK_NEEDS_CAVES, DISTANCE_BOUNDED_BY_SLOPE, LATITUDE_BANDS, RIVERS_FOLLOW_DRAINAGE};
     const SHIPPED: &[(&str, u32)] = &[
         ("0.117.0-rc3", RIVERS_FOLLOW_DRAINAGE),
         ("0.117.0-rc4", DEEP_ROCK_NEEDS_CAVES),
         ("0.117.0-rc7", LATITUDE_BANDS),
+        ("0.117.1", DISTANCE_BOUNDED_BY_SLOPE),
     ];
     SHIPPED.iter().filter(|(since, _)| !crate::upgrade::older(from, since)).map(|&(_, v)| v).max().unwrap_or(0)
 }
@@ -64,7 +65,10 @@ mod tests {
         assert_eq!(v(Some("0.117.0-rc4")), 2);
         assert_eq!(v(Some("0.117.0-rc6")), 2);
         assert_eq!(v(Some("0.117.0-rc7")), 3);
-        assert_eq!(v(Some("0.117.0")), floptle_field::procgen::GENERATOR_VERSION);
+        assert_eq!(v(Some("0.117.0")), 3);
+        assert_eq!(v(Some("0.117.1-dev.1455")), 3);
+        assert_eq!(v(Some("0.117.1")), 4);
+        assert_eq!(v(Some("0.118.0")), floptle_field::procgen::GENERATOR_VERSION);
     }
 
     /// **The step writes the version once, and leaves a file that has one.**

@@ -47,6 +47,10 @@ struct Face {
     water: Vec<f32>,
     /// Level k: (cells across, min, max), each cell spanning 2^k cells of level 0.
     mips: Vec<(usize, Vec<f32>, Vec<f32>)>,
+    /// Level k: (cells across, the steepest the ground is anywhere in the
+    /// cell), as `mips`; empty unless the spec bounds distances by slope
+    /// ([`Relief::near`]).
+    slopes: Vec<(usize, Vec<f32>)>,
 }
 
 /// A planet's precomputed ground.
@@ -55,6 +59,10 @@ pub(crate) struct Relief {
     faces: Vec<Face>,
     lo: f32,
     hi: f32,
+    radius: f32,
+    /// The steepest the ground is anywhere (rise over run), when `slopes`
+    /// are kept.
+    steepest: f32,
 }
 
 /// Which face of the cube `d` points through, and where on it, in [-1, 1].
@@ -187,11 +195,68 @@ impl Relief {
                 }
             }
             let mips = pyramid(&h, n);
-            faces.push(Face { h, water, mips });
+            let slopes = if s.has(crate::procgen::DISTANCE_BOUNDED_BY_SLOPE) { slope_pyramid(f, &h, n, s.radius) } else { Vec::new() };
+            faces.push(Face { h, water, mips, slopes });
         }
         let lo = faces.iter().flat_map(|f| f.h.iter()).fold(f32::INFINITY, |a, b| a.min(*b));
         let hi = faces.iter().flat_map(|f| f.h.iter()).fold(f32::NEG_INFINITY, |a, b| a.max(*b));
-        Relief { n, faces, lo, hi }
+        let steepest = faces.iter().filter_map(|f| f.slopes.last()).flat_map(|(_, v)| v.iter()).fold(0.0f32, |a, b| a.max(*b));
+        Relief { n, faces, lo, hi, radius: s.radius, steepest }
+    }
+
+    /// The ground near the points `corners` cover, within `reach` world
+    /// units of them along the ground: the steepest it is there (rise over
+    /// run) and its lowest and highest height. What bounds how near ground can
+    /// come to a point ([`crate::procgen::DISTANCE_BOUNDED_BY_SLOPE`]): ground
+    /// further off than `reach` is further than that, and ground nearer is
+    /// no steeper, lower or higher than this. Never inside the truth: a region
+    /// crossing a face's edge gets the steepest, lowest and highest anywhere.
+    pub(crate) fn near(&self, corners: &[Vec3], reach: f32) -> (f32, f32, f32) {
+        let all = (self.steepest, self.lo, self.hi);
+        let mut face = None;
+        let (mut u0, mut u1, mut v0, mut v1) = (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY);
+        for c in corners {
+            if c.length_squared() < 1e-12 {
+                return all;
+            }
+            let (f, u, v) = to_face(c.normalize());
+            if face.is_some_and(|g| g != f) {
+                return all;
+            }
+            face = Some(f);
+            (u0, u1, v0, v1) = (u0.min(u), u1.max(u), v0.min(v), v1.max(v));
+        }
+        let Some(f) = face else { return all };
+        let face = &self.faces[f];
+        if face.slopes.is_empty() {
+            return all;
+        }
+        // A face coordinate runs at most twice as fast as the ground under
+        // it (at the face's edge), so this many covers the reach anywhere.
+        let grow = 2.0 * reach / self.radius.max(1.0);
+        let (u0, u1, v0, v1) = (u0 - grow, u1 + grow, v0 - grow, v1 + grow);
+        if u0 < -1.0 || u1 > 1.0 || v0 < -1.0 || v1 > 1.0 {
+            return all;
+        }
+        let n = self.n as f32;
+        let cell = |t: f32| (((t + 1.0) * 0.5 * n).floor().max(0.0) as usize).min(self.n - 1);
+        let (i0, i1, j0, j1) = (cell(u0), cell(u1), cell(v0), cell(v1));
+        let span = (i1 - i0).max(j1 - j0) + 1;
+        let mut k = 0;
+        while (1usize << k) < span && k + 1 < face.slopes.len() {
+            k += 1;
+        }
+        let (m, gx) = &face.slopes[k];
+        let (_, mn, mx) = &face.mips[k];
+        let (mut g, mut lo, mut hi) = (0.0f32, f32::INFINITY, f32::NEG_INFINITY);
+        for b in (j0 >> k)..=(j1 >> k).min(m - 1) {
+            for a in (i0 >> k)..=(i1 >> k).min(m - 1) {
+                g = g.max(gx[b * m + a]);
+                lo = lo.min(mn[b * m + a]);
+                hi = hi.max(mx[b * m + a]);
+            }
+        }
+        (g, lo, hi)
     }
 
     /// The ground's height above the radius in direction `d` (unit).
@@ -271,6 +336,43 @@ impl Relief {
     pub(crate) fn range(&self) -> (f32, f32) {
         (self.lo, self.hi)
     }
+}
+
+/// The max pyramid of how steep face `f`'s ground is in each of its `n × n`
+/// cells, rise over run along the ground. A cell's ground is bilinear between
+/// its corners, so its slope along either grid direction is at most the
+/// larger change along that direction's two edges over the edge's length on
+/// the sphere, and the two combine to at most their sum over the sine of the
+/// angle between the grid lines, which is never under 60° on a cube map.
+fn slope_pyramid(f: usize, h: &[f32], n: usize, radius: f32) -> Vec<(usize, Vec<f32>)> {
+    let at = |a: usize, b: usize| h[b * (n + 1) + a];
+    let dir = |a: usize, b: usize| from_face(f, -1.0 + 2.0 * a as f32 / n as f32, -1.0 + 2.0 * b as f32 / n as f32);
+    let len = |p: Vec3, q: Vec3| ((p - q).length() * radius).max(1e-4);
+    let mut row: Vec<Vec3> = (0..=n).map(|a| dir(a, 0)).collect();
+    let mut mx = vec![0.0f32; n * n];
+    for b in 0..n {
+        let next: Vec<Vec3> = (0..=n).map(|a| dir(a, b + 1)).collect();
+        for a in 0..n {
+            let gu = ((at(a + 1, b) - at(a, b)).abs() / len(row[a + 1], row[a])).max((at(a + 1, b + 1) - at(a, b + 1)).abs() / len(next[a + 1], next[a]));
+            let gv = ((at(a, b + 1) - at(a, b)).abs() / len(next[a], row[a])).max((at(a + 1, b + 1) - at(a + 1, b)).abs() / len(next[a + 1], row[a + 1]));
+            mx[b * n + a] = (gu + gv) * 1.16;
+        }
+        row = next;
+    }
+    let mut levels = vec![(n, mx)];
+    while levels.last().unwrap().0 > 1 {
+        let (m, pmx) = levels.last().unwrap();
+        let m2 = m.div_ceil(2);
+        let mut cmx = vec![0.0f32; m2 * m2];
+        for b in 0..*m {
+            for a in 0..*m {
+                let c = (b / 2) * m2 + a / 2;
+                cmx[c] = cmx[c].max(pmx[b * m + a]);
+            }
+        }
+        levels.push((m2, cmx));
+    }
+    levels
 }
 
 /// The min/max pyramid over a face's `n × n` cells, each cell the four corners

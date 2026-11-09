@@ -222,9 +222,9 @@ impl MeshScratch {
     /// material `own`: the signed distance to the nearest ground of another
     /// material within [`Self::edge_reach`] voxels, and the pair.
     ///
-    /// Only ground counts: a voxel within three quarters of a voxel of the
-    /// surface. A layer a voxel under undug ground is a voxel deep, so it is
-    /// never found, and the surface over it never blends toward it. The
+    /// Only ground counts: a voxel the surface passes within half a voxel of
+    /// ([`Self::on_surface`]). A layer a voxel under undug ground is never
+    /// found, and the surface over it never blends toward it. The
     /// boundary is taken halfway between the two voxels, so the distance is
     /// to that, not to the other voxel.
     fn slot_edge(&self, p: Vec3, own: u8) -> [f32; 2] {
@@ -234,7 +234,6 @@ impl MeshScratch {
         }
         let g = p / self.voxel;
         let c = [g.x.round() as i32, g.y.round() as i32, g.z.round() as i32];
-        let ground = 0.75 * self.voxel;
         let (mut best, mut other) = (f32::MAX, 0u8);
         for dz in -r..=r {
             for dy in -r..=r {
@@ -246,7 +245,7 @@ impl MeshScratch {
                     }
                     let k = (z as usize * self.dim + y as usize) * self.dim + x as usize;
                     let slot = self.color[k][3];
-                    if slot == own || slot == 0 || slot == 255 || self.dist[k].abs() > ground {
+                    if slot == own || slot == 0 || slot == 255 || !self.on_surface(k, x as usize, y as usize, z as usize) {
                         continue;
                     }
                     let at = Vec3::new(i[0] as f32, i[1] as f32, i[2] as f32) * self.voxel;
@@ -266,6 +265,35 @@ impl MeshScratch {
         [if own == hi { to_edge } else { -to_edge }, lo as f32 + hi as f32 * 256.0]
     }
 
+    /// Is the voxel at box index `k` (box coordinates `x`, `y`, `z`) ground:
+    /// does the surface cross one of the six edges to its neighbours within
+    /// half a voxel of it, where the mesher would put the surface and a
+    /// vertex there would take this voxel's colour?
+    ///
+    /// Read from where the field changes sign, not from how far it says the
+    /// surface is: a generated field's distances are a bound, not exact (a
+    /// planet's relief stores voxels 1.1 voxels down as 0.57), and a test of
+    /// the distance alone took subsoil buried under undug ground for ground
+    /// and blended the surface toward it in patches. Every neighbour asked
+    /// is inside the box: a vertex reads at most a voxel past its chunk, its
+    /// edge reach (3) and one more, under [`mesh_depends`].
+    fn on_surface(&self, k: usize, x: usize, y: usize, z: usize) -> bool {
+        let d0 = self.dist[k];
+        let (row, plane) = (self.dim, self.dim * self.dim);
+        let near = [
+            (x > 0).then(|| k - 1),
+            (x + 1 < self.dim).then(|| k + 1),
+            (y > 0).then(|| k - row),
+            (y + 1 < self.dim).then(|| k + row),
+            (z > 0).then(|| k - plane),
+            (z + 1 < self.dim).then(|| k + plane),
+        ];
+        near.into_iter().flatten().any(|n| {
+            let d1 = self.dist[n];
+            (d0 < 0.0) != (d1 < 0.0) && d0 / (d0 - d1) <= 0.5
+        })
+    }
+
     /// How far `p` is from ground of `slot`, as [`Self::slot_edge`] measures
     /// it to the other material of a pair: to halfway between the nearest
     /// such voxel and the voxel before it, and never under 0. Past the
@@ -275,7 +303,6 @@ impl MeshScratch {
         let far = (r as f32 + 1.0) * self.voxel;
         let g = p / self.voxel;
         let c = [g.x.round() as i32, g.y.round() as i32, g.z.round() as i32];
-        let ground = 0.75 * self.voxel;
         let mut best = f32::MAX;
         for dz in -r..=r {
             for dy in -r..=r {
@@ -286,7 +313,7 @@ impl MeshScratch {
                         continue;
                     }
                     let k = (z as usize * self.dim + y as usize) * self.dim + x as usize;
-                    if self.color[k][3] != slot || self.dist[k].abs() > ground {
+                    if self.color[k][3] != slot || !self.on_surface(k, x as usize, y as usize, z as usize) {
                         continue;
                     }
                     let at = Vec3::new(i[0] as f32, i[1] as f32, i[2] as f32) * self.voxel;
@@ -345,10 +372,12 @@ pub fn mesh_reads(stride: i32) -> i32 {
 ///
 /// Tighter than [`mesh_reads`] at full detail, where no vertex settles: corners
 /// reach one voxel past the chunk and a normal reads a voxel either side of its
-/// vertex, through the trilinear cell around that, so four voxels hold every
-/// value the mesh is built from.
+/// vertex, through the trilinear cell around that, so four voxels hold that;
+/// and the material edges a vertex bakes read up to three voxels round it,
+/// each with its neighbours to tell whether it is ground
+/// ([`MeshScratch::on_surface`]): one past the chunk, three, and one more.
 pub fn mesh_depends(stride: i32) -> i32 {
-    if stride <= 1 { 4 } else { mesh_reads(stride) }
+    if stride <= 1 { 5 } else { mesh_reads(stride) }
 }
 
 /// Each face of a cell as its four corners in order around the face, and the cell edge
@@ -1776,6 +1805,72 @@ mod tests {
             let m = mesh_chunk(&two, c, 1, false);
             assert!(m.edges.iter().all(|e| e[1] >= 0.0), "ground of two materials split a triangle");
         }
+    }
+
+    /// **Undug ground never blends toward the layer under it.** A planet's
+    /// field stores a bound on the distance to its surface, not the
+    /// distance: its relief left subsoil 1.1 voxels down reading 0.57, and a
+    /// bake that took any voxel within three quarters of a voxel for ground
+    /// found that subsoil under undug, nearly flat ground and tinted the
+    /// surface toward it in patches, with no subsoil showing anywhere near.
+    /// Ground is now where the surface crosses within half a voxel: every
+    /// vertex that blends toward the subsoil has it showing about as far off
+    /// as it baked, and the pit dug through to it still blends all round its rim.
+    /// How much nearer than the nearest voxel it shows from a layer may be
+    /// baked, in voxels: a vertex looks round its own rounded voxel, so it
+    /// can find ground a little nearer than the voxel a vertex took.
+    const TOO_NEAR: f32 = 0.6;
+
+    #[test]
+    fn undug_ground_never_blends_toward_the_layer_under_it() {
+        let mut f = crate::procgen::generate_planet(&crate::procgen::PlanetFill {
+            seed: 8,
+            radius: 120.0,
+            voxel: 1.5,
+            relief: 2.0,
+            cave_depth: 0.0,
+            subsoil_depth: 1.5,
+            subsoil: crate::procgen::LayerPaint { slot: 3, color: [1.0; 3] },
+            ..Default::default()
+        });
+        let top = f.raycast(Vec3::new(0.0, 250.0, 0.0), Vec3::NEG_Y, 250.0).unwrap();
+        for k in 0..4 {
+            f.sculpt(crate::Brush::Lower, top - Vec3::Y * (k as f32 * 0.8), 5.0, 1.0, Default::default());
+        }
+        f.set_slot_edge_reach(3);
+        let meshes: Vec<ChunkMesh> = f.chunk_coords().into_iter().map(|c| mesh_chunk(&f, c, 1, false)).collect();
+        // The voxels the subsoil shows from: those a vertex takes its colour from.
+        let v = f.voxel();
+        let showing: Vec<Vec3> = meshes
+            .iter()
+            .flat_map(|m| m.positions.iter().zip(&m.colors).filter(|(_, c)| c[3] == 3).map(move |(p, _)| ((Vec3::from(*p) + Vec3::from(m.origin)) / v).round() * v))
+            .collect();
+        let (mut phantom, mut rim, mut shown, mut worst) = (0, 0, 0, 0.0f32);
+        for m in &meshes {
+            let origin = Vec3::from(m.origin);
+            for (i, (p, c)) in m.positions.iter().zip(&m.colors).enumerate() {
+                let (p, own) = (Vec3::from(*p) + origin, c[3]);
+                let flat = Vec3::new(p.x - top.x, 0.0, p.z - top.z).length();
+                if (p.y - top.y).abs() > 12.0 || flat > 30.0 || i >= m.edges.len() {
+                    continue;
+                }
+                shown += usize::from(own == 3 && flat > 8.0);
+                let code = m.edges[i][1].round() as i64;
+                if own == 3 || code <= 0 || (code & 255 != 3 && code >> 8 != 3) {
+                    continue;
+                }
+                rim += usize::from(flat < 7.0);
+                // How far the subsoil really is: to halfway to the nearest
+                // voxel it shows from. The bake may say no nearer than that.
+                let truth = showing.iter().map(|q| (*q - p).length()).fold(f32::MAX, f32::min) - 0.5 * v;
+                let short = truth - m.edges[i][0].abs();
+                worst = worst.max(short);
+                phantom += usize::from(short > TOO_NEAR * v);
+            }
+        }
+        assert_eq!(shown, 0, "the fixture: no subsoil shows on the undug ground");
+        assert!(rim > 20, "the pit's rim blends toward the subsoil it was dug into ({rim} vertices)");
+        assert_eq!(phantom, 0, "{phantom} vertices blend toward subsoil nearer than it shows (up to {:.2} voxels nearer): buried under undug ground", worst / v);
     }
 
     #[test]

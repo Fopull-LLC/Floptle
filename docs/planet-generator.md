@@ -333,5 +333,6 @@ A planet's save holds only the digs and edits made to it. Everything else is mad
 | 1 | Rivers follow how water drains to the sea. Paint depth is measured under the ground the overhangs leave. |
 | 2 | A world with `caveDepth = 0` has no deep cave rock: its subsoil and strata show. |
 | 3 | Relief layers take `latitude`. |
+| 4 | Ground beside steep relief (ravine walls, terrace risers) is painted and shaped correctly: no untextured patches on ravine walls, no holes along their rims, and raycasts stop at the walls. |
 
-`generator = 3` in the options picks a version. Without it, a world is made by the project's version, which `project.ron` holds as `terrain_generator`. A new project starts at the current version. Upgrading a project sets its version to the one its last engine used, so its worlds come out as they did before. Every save also records the version its ground was made by, and a project can raise its version without moving ground under the digs it has already saved.
+`generator = 4` in the options picks a version. Without it, a world is made by the project's version, which `project.ron` holds as `terrain_generator`. A new project starts at the current version. Upgrading a project sets its version to the one its last engine used, so its worlds come out as they did before. Every save also records the version its ground was made by, and a project can raise its version without moving ground under the digs it has already saved.

@@ -858,8 +858,9 @@ impl ChunkField {
     ///
     /// Three is as far as stays inside what a chunk gathers and what an edit
     /// re-meshes ([`crate::mesher::mesh_depends`]): a vertex sits up to a
-    /// voxel past its chunk, so a fourth would read voxels the chunk next door
-    /// does not, and the two would bake the border's edge differently.
+    /// voxel past its chunk and weighs each voxel it finds with that voxel's
+    /// neighbours, so a fourth would read voxels the chunk next door does
+    /// not, and the two would bake the border's edge differently.
     pub fn set_slot_edge_reach(&mut self, voxels: u8) {
         self.slot_edge_reach = voxels.min(3);
     }

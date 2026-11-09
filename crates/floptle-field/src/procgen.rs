@@ -258,6 +258,16 @@ pub const DEPTH_UNDER_OVERHANGS: u32 = 1;
 pub const DEEP_ROCK_NEEDS_CAVES: u32 = 2;
 /// The version relief layers began taking a latitude band.
 pub const LATITUDE_BANDS: u32 = 3;
+/// The version a planet with relief layers began storing a distance to its
+/// ground bounded by the ground's slope and the heights round it, not the
+/// height above it. Beside a ravine's wall the height above the floor is
+/// metres while the wall is a hand away: the field read the air there as far
+/// from any ground and left it unpainted, so the wall drew in patches of no
+/// texture at all; its block shortcuts and its raycasts trusted that
+/// distance too, and left voxels on the wrong side of the ground along the
+/// rims, and rays that passed through them. The ground is now the relief's,
+/// voxel for voxel.
+pub const DISTANCE_BOUNDED_BY_SLOPE: u32 = 4;
 
 impl PlanetFill {
     /// The version this spec is made by: its own, or the oldest when it has
@@ -527,6 +537,9 @@ pub(crate) struct PlanetShape {
     craters: Vec<(Vec3, f32)>,
     /// The precomputed ground, for a world with relief layers.
     ground: Option<std::sync::Arc<crate::relief::Relief>>,
+    /// Bound the distance to the relief ground by its slope
+    /// ([`DISTANCE_BOUNDED_BY_SLOPE`]).
+    slope_bounded: bool,
     overhangs: Option<Overhangs>,
     /// A small body's shape, in place of the ball.
     small: Option<SmallShape>,
@@ -549,9 +562,29 @@ impl PlanetShape {
         }
     }
 
+    /// The distance to the relief ground from `p`, `raw` its height above
+    /// (negative: under) it there. Two bounds, the larger kept: ground no
+    /// steeper than the steepest `g` within a band and a voxel can come no
+    /// nearer than `|raw| / sqrt(1 + g²)`; and none there is higher or lower
+    /// than the highest or lowest there, so it is no nearer than the gap to
+    /// that. Ground further off than the reach is further than the band. So
+    /// the distance stored is never more than the true one, and beside a
+    /// ravine's wall it is the wall's, not the floor's. `raw` itself without
+    /// relief or before [`DISTANCE_BOUNDED_BY_SLOPE`].
+    fn bounded(&self, p: Vec3, raw: f32) -> f32 {
+        let Some(relief) = self.ground.as_ref().filter(|_| self.slope_bounded) else { return raw };
+        let (g, lo, hi) = relief.near(&[p], (crate::BAND_VOXELS + 1.0) * self.voxel);
+        let lean = self.overhang_reach();
+        let r = p.length();
+        let by_slope = raw.abs() / (1.0 + g * g).sqrt();
+        let gap = if raw >= 0.0 { r - (self.radius + hi) - lean } else { (self.radius + lo) - r - lean };
+        let d = by_slope.max(gap).min(raw.abs());
+        if raw >= 0.0 { d } else { -d }
+    }
+
     /// [`Self::body`] with the bump already known.
     fn body_with(&self, p: Vec3, bump: f32) -> f32 {
-        let mut body = self.ground_with(p, bump);
+        let mut body = self.bounded(p, self.ground_with(p, bump));
         for (c, cr) in &self.craters {
             body = body.max(-((p - *c).length() - cr));
         }
@@ -777,6 +810,7 @@ impl Planet {
             voxel: spec.voxel.clamp(0.25, 16.0),
             craters,
             ground: crate::relief::Relief::wanted(spec).then(|| std::sync::Arc::new(crate::relief::Relief::new(spec))),
+            slope_bounded: small.is_none() && spec.has(DISTANCE_BOUNDED_BY_SLOPE),
             overhangs: spec.overhangs,
             small,
         };
@@ -998,17 +1032,22 @@ impl crate::VoxelSource for Planet {
         if r_min - (s.radius + s.height_range().1) - lean >= band + margin {
             return BlockClass::Air;
         }
+        let corners: [Vec3; 8] = std::array::from_fn(|k| {
+            Vec3::new(
+                if k & 1 == 0 { lo.x } else { hi.x },
+                if k & 2 == 0 { lo.y } else { hi.y },
+                if k & 4 == 0 { lo.z } else { hi.z },
+            )
+        });
+        // A distance bounded by slope ([`DISTANCE_BOUNDED_BY_SLOPE`]) is no
+        // more than the gap to the highest or lowest ground within the band
+        // of each point: bound the box by the ground that far round it.
         let (bump_lo, bump_hi) = match &s.ground {
-            Some(relief) => {
-                let corners: [Vec3; 8] = std::array::from_fn(|k| {
-                    Vec3::new(
-                        if k & 1 == 0 { lo.x } else { hi.x },
-                        if k & 2 == 0 { lo.y } else { hi.y },
-                        if k & 4 == 0 { lo.z } else { hi.z },
-                    )
-                });
-                relief.height_bounds(&corners)
+            Some(relief) if s.slope_bounded => {
+                let (_, lo, hi) = relief.near(&corners, band + margin + s.voxel);
+                (lo, hi)
             }
+            Some(relief) => relief.height_bounds(&corners),
             None => self.bump_bounds(lo, hi, r_min, r_max),
         };
         if r_min - (s.radius + bump_hi) - lean >= band + margin {
@@ -1785,6 +1824,7 @@ mod tests {
             voxel: 1.5,
             craters: Vec::new(),
             ground: None,
+            slope_bounded: false,
             overhangs: None,
             small: None,
         }
@@ -2047,6 +2087,126 @@ mod tests {
         assert_eq!(new.5, 0, "a new world with no cave zone still has deep rock");
         assert!(RC2.5 > 0);
         assert_eq!(PlanetFill::default().generator(), GENERATOR_VERSION, "a spec made today is not stamped today");
+    }
+
+    /// A world with ravines cut through soil, subsoil and strata.
+    fn ravine_world(generator: Option<u32>) -> PlanetFill {
+        let paint = |slot: u8| LayerPaint { slot, color: [1.0; 3] };
+        PlanetFill {
+            seed: 21,
+            radius: 260.0,
+            voxel: 1.5,
+            relief: 4.0,
+            cave_depth: 0.0,
+            craters: 0,
+            surface_a: paint(1),
+            surface_b: paint(1),
+            subsoil: paint(2),
+            subsoil_depth: 1.5,
+            strata: paint(3),
+            strata_depth: 5.0,
+            ravines: Some(Ravines { count: 6, depth: 14.0, width: 10.0, length: 260.0, meander: 1.0 }),
+            generator,
+            ..PlanetFill::default()
+        }
+    }
+
+    /// **A spec of version 3 makes the world it made then**, through the
+    /// slope-bounded distances of version 4: every save made before them is
+    /// laid over this. The numbers are what the generator before
+    /// [`DISTANCE_BOUNDED_BY_SLOPE`] gave the ravine world.
+    #[test]
+    fn a_version_3_spec_makes_the_world_it_made_then() {
+        assert_eq!(fingerprint(&ravine_world(Some(3))), V3_RAVINES, "a version-3 world is no longer the world it was");
+    }
+    const V3_RAVINES: (usize, u64, usize, u64, u64, usize) =
+        (156, 15851184076990955128, 683, 16122201572913583792, 3300790019836618388, 0);
+
+    /// Untextured vertices of `f`'s full-detail meshes, of how many: those
+    /// whose colour comes from a voxel the generator never painted.
+    fn unpainted_vertices(f: &crate::ChunkField) -> (usize, usize) {
+        let (mut bare, mut all) = (0, 0);
+        for c in f.chunk_coords() {
+            let m = crate::mesh_chunk(f, c, 1, false);
+            for (i, col) in m.colors.iter().enumerate() {
+                // Junction triangles' words ride as colours of vertices no
+                // triangle draws, after a split triangle's own vertices.
+                if m.edges.get(i).is_some_and(|e| e[1] < -0.5) || !m.indices.contains(&(i as u32)) {
+                    continue;
+                }
+                all += 1;
+                bare += usize::from(col[3] == 255);
+            }
+        }
+        (bare, all)
+    }
+
+    /// **A ravine's walls are painted.** The distance stored beside a wall
+    /// was the height over the ravine's floor, metres where the wall was a
+    /// hand away; the generator took that air for far from any ground and
+    /// left it unpainted, and every vertex on the wall that took its colour
+    /// from it drew no texture at all, in flat-sided patches. A version-3
+    /// world still does, as it always did.
+    #[test]
+    fn a_ravines_walls_are_painted() {
+        let (bare, all) = unpainted_vertices(&generate_planet(&ravine_world(Some(GENERATOR_VERSION))));
+        assert!(all > 10_000, "the fixture: a meshed world ({all} vertices)");
+        assert_eq!(bare, 0, "{bare} of {all} vertices on the ravines draw no texture");
+        let (old, _) = unpainted_vertices(&generate_planet(&ravine_world(Some(3))));
+        assert!(old > 100, "the fixture: a version-3 world's ravine walls were bare ({old} vertices)");
+    }
+
+    /// **No distance near a ravine says the ground is further than it is.**
+    /// Sphere tracing, normals, AO, shadows and every "is this open air"
+    /// shortcut lean on it (see `chunks.rs`). The true distance is taken as
+    /// that to the nearest vertex of the full-detail mesh, which lies on the
+    /// surface, a voxel apart: within half a voxel of the truth.
+    #[test]
+    fn no_distance_near_a_ravine_overstates_the_ground() {
+        let worst = |f: &crate::ChunkField| {
+            let v = f.voxel();
+            let mut pts = Vec::new();
+            for c in f.chunk_coords() {
+                let m = crate::mesh_chunk(f, c, 1, false);
+                pts.extend(m.positions.iter().map(|p| Vec3::from(*p) + Vec3::from(m.origin)));
+            }
+            // The steepest drop near the top: a ravine.
+            let ground = |x: f32, z: f32| f.raycast(Vec3::new(x, 600.0, z), Vec3::NEG_Y, 600.0);
+            let mut rim = (0.0f32, Vec3::ZERO);
+            for gz in -40..=40 {
+                for gx in -40..=40 {
+                    let (x, z) = (gx as f32 * 2.0, gz as f32 * 2.0);
+                    if let (Some(a), Some(b)) = (ground(x, z), ground(x, z + 2.0))
+                        && a.y - b.y > rim.0
+                    {
+                        rim = (a.y - b.y, a);
+                    }
+                }
+            }
+            assert!(rim.0 > 4.0, "the fixture: a ravine near the top");
+            let near: Vec<Vec3> = pts.into_iter().filter(|p| (*p - rim.1).length() < 30.0).collect();
+            let c = (rim.1 / v).round();
+            let mut over = 0.0f32;
+            for dz in -12..=12 {
+                for dy in -12..=12 {
+                    for dx in -12..=12 {
+                        let i = [c.x as i32 + dx, c.y as i32 + dy, c.z as i32 + dz];
+                        let d = f.voxel_at(i);
+                        if d.abs() >= f.band() - 1e-3 {
+                            continue;
+                        }
+                        let p = Vec3::new(i[0] as f32, i[1] as f32, i[2] as f32) * v;
+                        let truth = near.iter().map(|q| (*q - p).length()).fold(f32::MAX, f32::min);
+                        over = over.max(d.abs() - truth);
+                    }
+                }
+            }
+            over / v
+        };
+        let new = worst(&generate_planet(&ravine_world(Some(GENERATOR_VERSION))));
+        assert!(new <= 0.5, "a distance by a ravine says the ground is {new:.2} voxels further than it is");
+        let old = worst(&generate_planet(&ravine_world(Some(3))));
+        assert!(old > 1.0, "the fixture: version 3 overstated it ({old:.2} voxels)");
     }
 
     fn rock(shape: SmallBodyShape, seed: u32) -> PlanetFill {

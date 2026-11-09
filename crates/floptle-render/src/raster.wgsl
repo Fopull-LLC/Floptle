@@ -1821,8 +1821,10 @@ fn splat_slot_at(vi: u32, c: vec3<i32>) -> u32 {
 // between ANY two slots, at any palette size. Fragments outside any resident
 // volume (a skirt sliver, an evicted terrain) fall back to the old behavior.
 // A slot's height at `p`, from the alpha of its ORM-and-height layer (its
-// `|height=` map, or 0.5 where it has none), projected as its colour is but
-// without the hex taps: what the borders below weigh, not what is drawn.
+// `|height=` map, or 0.5 where it has none), projected and anti-tiled as its
+// colour is (`pal_surface`): the same hex taps and weights, so on an
+// `|antitile=` slot the border weighs the stones that are drawn, not the
+// picture they were tiled from.
 fn terrain_height(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, dpy_in: vec3<f32>) -> f32 {
     let rec = slot_rec(slot);
     if (slot < 0 || rec.layers.z == SLOT_NONE) {
@@ -1836,10 +1838,29 @@ fn terrain_height(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, dpy_
     let dpx = select(vec3<f32>(0.0), dpx_in, mips) * scale;
     let dpy = select(vec3<f32>(0.0), dpy_in, mips) * scale;
     let ol = i32(rec.layers.z);
-    let hx = pal_read(nearest, p.zy * scale, ol, dpx.zy, dpy.zy).a;
-    let hy = pal_read(nearest, p.xz * scale, ol, dpx.xz, dpy.xz).a;
-    let hz = pal_read(nearest, p.xy * scale, ol, dpx.xy, dpy.xy).a;
+    let anti = terrain_slot_tile(slot).x;
+    let hx = pal_height(nearest, p.zy * scale, slot, ol, dpx.zy, dpy.zy, anti);
+    let hy = pal_height(nearest, p.xz * scale, slot, ol, dpx.xz, dpy.xz, anti);
+    let hz = pal_height(nearest, p.xy * scale, slot, ol, dpx.xy, dpy.xy, anti);
     return hx * w.x + hy * w.y + hz * w.z;
+}
+
+// The height `pal_surface` would give at `uv`: one read, or with anti-tiling
+// the three hex taps weighed by the colour they draw (`hex_weights` reads the
+// colour), so the height follows the picture on screen.
+fn pal_height(nearest: bool, uv: vec2<f32>, layer: i32, ol: i32, dx: vec2<f32>, dy: vec2<f32>, amount: f32) -> f32 {
+    if (amount <= 0.0) {
+        return pal_read(nearest, uv, ol, dx, dy).a;
+    }
+    let h = hex_taps(uv, clamp(amount, 0.0, 1.0));
+    let c1 = pal_read(nearest, h.uv1, layer, h.r1 * dx, h.r1 * dy);
+    let c2 = pal_read(nearest, h.uv2, layer, h.r2 * dx, h.r2 * dy);
+    let c3 = pal_read(nearest, h.uv3, layer, h.r3 * dx, h.r3 * dy);
+    let ww = hex_weights(c1, c2, c3, h.w);
+    let o1 = pal_read(nearest, h.uv1, ol, h.r1 * dx, h.r1 * dy).a;
+    let o2 = pal_read(nearest, h.uv2, ol, h.r2 * dx, h.r2 * dy).a;
+    let o3 = pal_read(nearest, h.uv3, ol, h.r3 * dx, h.r3 * dy).a;
+    return o1 * ww.x + o2 * ww.y + o3 * ww.z;
 }
 
 // Height-aware blending: given `t`, how far a border has come from `lo` to

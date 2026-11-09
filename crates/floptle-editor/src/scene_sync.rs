@@ -1229,6 +1229,17 @@ mod shadow_atlas_tests {
     #[cfg(feature = "editor-ui")]
     #[test]
     fn where_three_slots_meet_every_border_keeps_its_width() {
+        // Grass the lowest slot; and grass numbered between the other two,
+        // where a blend that runs through the numbers would draw it as a
+        // thin line along the red and blue border.
+        three_slots_meet(1, 2, 3);
+        three_slots_meet(2, 1, 3);
+    }
+
+    /// The fixture of [`where_three_slots_meet_every_border_keeps_its_width`]:
+    /// grass of slot `base`, red of `left`, blue of `right`.
+    #[cfg(feature = "editor-ui")]
+    fn three_slots_meet(base: u8, left: u8, right: u8) {
         let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
         let dir = std::env::temp_dir().join(format!("floptle_three_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1238,11 +1249,16 @@ mod shadow_atlas_tests {
             std::fs::write(dir.join(format!("textures/{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
         }
         ed.project_root = dir.clone();
-        ed.terrain_textures = vec!["textures/green.png".into(), "textures/red.png".into(), "textures/blue.png".into()];
+        let mut textures = vec![String::new(); 3];
+        for (slot, name) in [(base, "green"), (left, "red"), (right, "blue")] {
+            textures[slot as usize - 1] = format!("textures/{name}.png");
+        }
+        ed.terrain_textures = textures;
+        let tag = if base == 1 { String::new() } else { format!("{base}{left}{right}_") };
         // `FLOPTLE_THREE_TEX=<solar>` draws the pictures with Solar's soil,
         // slate and flagstone and their maps instead: what the borders look
         // like on real ground. The checks below are for the flat colours.
-        let real = std::env::var("FLOPTLE_THREE_TEX").ok();
+        let real = std::env::var("FLOPTLE_THREE_TEX").ok().filter(|_| base == 1);
         if let Some(root) = &real {
             ed.project_root = root.into();
             let t = |n: &str| format!("textures/env/terrain/{n}");
@@ -1263,11 +1279,11 @@ mod shadow_atlas_tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         let mut field = floptle_field::ChunkField::new(1.5);
-        field.fill_with_rgba(Vec3::new(-60.0, -10.0, -60.0), Vec3::new(60.0, 10.0, 60.0), |p: Vec3| p.y - 0.2, |_| [255, 255, 255, 1]);
+        field.fill_with_rgba(Vec3::new(-60.0, -10.0, -60.0), Vec3::new(60.0, 10.0, 60.0), |p: Vec3| p.y - 0.2, move |_| [255, 255, 255, base]);
         let top = Vec3::new(0.0, 0.2, 0.0);
         // Red left of x = 0 and blue right of it, both north of z = 0: the
         // two meet along x = 0 and each meets the grass along z = 0.
-        for (slot, x0, x1) in [(2u8, -12, 0), (3, 0, 12)] {
+        for (slot, x0, x1) in [(left, -12, 0), (right, 0, 12)] {
             for x in x0..x1 {
                 for z in -14..0 {
                     let p = Vec3::new(x as f32 + 0.5, 0.0, z as f32 + 0.5);
@@ -1282,6 +1298,7 @@ mod shadow_atlas_tests {
         ed.world.insert(sun, floptle_core::Light { intensity: 1.0, shadows: false, ..Default::default() });
         let (w, h) = (480u32, 320u32);
         let views = [("low", Vec3::new(0.0, 2.5, 6.0), -0.5f32), ("above", Vec3::new(0.0, 9.0, -1.0), -1.5), ("corner", Vec3::new(0.0, 2.0, 0.5), -1.5)];
+        let tag_all = tag.clone();
         let shoot = |ed: &mut crate::Editor, border: crate::terrain_edit::SlotBorder, blend: f32, tag: &str| -> Vec<Vec<u8>> {
             ed.terrain_tex_blend = vec![blend; 3];
             ed.terrain_tex_rough = vec![0.5; 3];
@@ -1299,7 +1316,7 @@ mod shadow_atlas_tests {
                 let px = crate::shot::render_frame_pixels(ed, &cam, None, w, h, !0, false).expect("a frame");
                 if let Ok(out) = std::env::var("FLOPTLE_THREE_PNG") {
                     let tex = floptle_render::TextureData { pixels: px.clone(), width: w, height: h };
-                    std::fs::write(std::path::Path::new(&out).join(format!("three_{tag}{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+                    std::fs::write(std::path::Path::new(&out).join(format!("three_{}{tag}{name}.png", tag_all)), floptle_assets::encode_png(&tex).unwrap()).unwrap();
                 }
                 shots.push(px);
             }
@@ -1344,8 +1361,203 @@ mod shadow_atlas_tests {
         };
         let (r, g, b) = colours(&soft[2]);
         assert!(r > 2000 && g > 2000 && b > 2000, "the fixture: the corner view shows all three ({r} red, {g} green, {b} blue)");
-        assert!(steps.iter().all(|(cuts, _)| *cuts == 0), "a soft border was cut off where three slots meet: (steps over 48, largest step) per view {steps:?}");
+        assert!(steps.iter().all(|(cuts, _)| *cuts == 0), "a soft border was cut off where three slots meet (grass {base}, red {left}, blue {right}): (steps over 48, largest step) per view {steps:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A height border on an anti-tiled slot follows the stones drawn.**
+    /// The slot's height map is its own picture, bright where high, and it
+    /// meets flat blue ground over a 3 m border its heights decide. Where
+    /// the border lets the stones through, they must be the bright ones
+    /// drawn there: the heights were read from the picture before its hex
+    /// tiling, a different picture from the one on screen, and the border
+    /// picked stones no brighter than any other.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn a_height_border_follows_the_anti_tiled_stones() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_hexheight_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
+        let mut seed = 0x1b87_3593u32;
+        let mut stones = Vec::with_capacity(32 * 32 * 4);
+        let mut blocks = [0u8; 64];
+        for b in &mut blocks {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *b = 30 + (seed >> 24) as u8 % 200;
+        }
+        for i in 0..32 * 32 {
+            let v = blocks[(i / 32 / 4) * 8 + (i % 32) / 4];
+            stones.extend_from_slice(&[v, v, v, 255]);
+        }
+        let png = |px: Vec<u8>, w: u32| floptle_assets::encode_png(&floptle_render::TextureData { pixels: px, width: w, height: w }).unwrap();
+        std::fs::write(dir.join("textures/stones.png"), png(stones, 32)).unwrap();
+        std::fs::write(dir.join("textures/blue.png"), png([40u8, 40, 200, 255].repeat(16 * 16), 16)).unwrap();
+        ed.project_root = dir.clone();
+        ed.terrain_textures = vec!["textures/stones.png".into(), "textures/blue.png".into()];
+        ed.terrain_tex_maps = vec![
+            crate::terrain_edit::SlotMaps { height: "textures/stones.png".into(), ..Default::default() },
+            crate::terrain_edit::SlotMaps::default(),
+        ];
+        ed.terrain_tex_tile = vec![[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]];
+        ed.terrain_tex_blend = vec![3.0, 3.0];
+        ed.terrain_tex_rough = vec![0.0, 0.0];
+        let b = crate::terrain_edit::SlotBorder { height_blend: 0.9, ..Default::default() };
+        ed.terrain_tex_border = vec![b, b];
+        ed.terrain_textures_dirty = true;
+        for _ in 0..20_000 {
+            ed.sync_terrain_palette(false);
+            if ed.terrain_palette_job.is_none() && !ed.terrain_textures_dirty {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut field = floptle_field::ChunkField::new(1.0);
+        field.fill_with_rgba(Vec3::new(-40.0, -6.0, -40.0), Vec3::new(40.0, 6.0, 40.0), |p: Vec3| p.y - 0.3, |_| [255, 255, 255, 1]);
+        field.paint_texture(Vec3::new(0.0, 0.3, 0.0), 6.0, 2);
+        add_body(&mut ed, 1, DVec3::ZERO, &field);
+        ed.terrain_gpu_dirty = true;
+        settle(&mut ed);
+        let sun = ed.world.spawn();
+        ed.world.insert(sun, Transform { rotation: floptle_core::math::Quat::from_rotation_x(-1.5), ..Transform::IDENTITY });
+        ed.world.insert(sun, floptle_core::Light { intensity: 1.0, shadows: false, ..Default::default() });
+        ed.camera.position = DVec3::new(0.0, 16.0, 0.01);
+        ed.camera.pitch = -1.55;
+        ed.camera.yaw = 0.0;
+        let (w, h) = (320u32, 240u32);
+        let at = ed.camera.position;
+        ed.settle_terrain_meshes(at, std::time::Duration::from_secs(60));
+        let cam = ed.camera.render_camera();
+        let px = crate::shot::render_frame_pixels(&mut ed, &cam, None, w, h, !0, false).expect("a frame");
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Ok(out) = std::env::var("FLOPTLE_HEXHEIGHT_PNG") {
+            let tex = floptle_render::TextureData { pixels: px.clone(), width: w, height: h };
+            std::fs::write(std::path::Path::new(&out).join("hexheight.png"), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        }
+        let at = |x: u32, y: u32| &px[((y * w + x) * 4) as usize..((y * w + x) * 4 + 3) as usize];
+        let blue = |p: &[u8]| p[2] as i32 > p[0] as i32 + 40;
+        // Each stone pixel by how near the blue it lies: where the border
+        // was contested (within 3 px of blue) or well away from it (over
+        // 40 px). Measured: 169 against 147 drawn so, 152 against 147 with
+        // the heights read past the tiling.
+        let (mut band, mut away) = (Vec::new(), Vec::new());
+        let blues: Vec<(i32, i32)> = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|(x, y)| blue(at(*x, *y))).map(|(x, y)| (x as i32, y as i32)).collect();
+        assert!(blues.len() > 3000, "the fixture: a disc of blue ({} px)", blues.len());
+        for y in 0..h {
+            for x in 0..w {
+                let p = at(x, y);
+                if blue(p) {
+                    continue;
+                }
+                let near = blues.iter().map(|(bx, by)| (bx - x as i32).pow(2) + (by - y as i32).pow(2)).min().unwrap_or(i32::MAX);
+                let lum = p[0] as f32;
+                if near <= 9 {
+                    band.push(lum);
+                } else if near > 1600 {
+                    away.push(lum);
+                }
+            }
+        }
+        let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
+        let (m_band, m_away) = (mean(&band), mean(&away));
+        assert!(band.len() > 300 && away.len() > 1000, "the fixture: stones by the border and away ({} and {})", band.len(), away.len());
+        assert!(
+            m_band > m_away + 12.0,
+            "the stones the border lets through are no brighter ({m_band:.0}) than the ground's own ({m_away:.0}): their heights are not the ones drawn"
+        );
+    }
+
+    /// A probe, not a check: ravines cut through soil, subsoil and strata,
+    /// where the most slots meet, drawn with Solar's textures and a new
+    /// project's Natural borders, from beside a rim and from far off.
+    /// `FLOPTLE_RAVINE_PNG=<dir>` with `FLOPTLE_RAVINE_TEX=<solar>` writes
+    /// them; without both it does nothing.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn ravine_rims_probe() {
+        let (Ok(out), Ok(root)) = (std::env::var("FLOPTLE_RAVINE_PNG"), std::env::var("FLOPTLE_RAVINE_TEX")) else { return };
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.project_root = root.into();
+        let t = |n: &str| format!("textures/env/terrain/{n}");
+        let maps = |m: &str| crate::terrain_edit::SlotMaps {
+            normal: t(&format!("maps/{m}_normal.png")),
+            orm: t(&format!("maps/{m}_orm.png")),
+            height: t(&format!("maps/{m}_height.png")),
+        };
+        ed.terrain_textures = vec![t("02_soil.png"), t("09_slate.png"), t("03_flagstone.png"), t("04_onyx.png")];
+        ed.terrain_tex_maps = vec![maps("Ground039"), maps("Rock058"), maps("Rocks011"), maps("Onyx006")];
+        let mut border = crate::terrain_edit::SlotBorder::default();
+        let mut blend = 0.0;
+        crate::terrain_edit::apply_border_default(floptle_scene::TerrainBorderDoc::Natural, &mut blend, &mut border);
+        ed.terrain_tex_blend = vec![blend; 4];
+        ed.terrain_tex_rough = vec![0.7; 4];
+        ed.terrain_tex_border = vec![border; 4];
+        ed.terrain_tex_tile = vec![[1.0, 0.35, 60.0], [0.3, 0.35, 60.0], [0.15, 0.35, 60.0], [0.2, 0.35, 60.0]];
+        ed.terrain_textures_dirty = true;
+        for _ in 0..20_000 {
+            ed.sync_terrain_palette(false);
+            if ed.terrain_palette_job.is_none() && !ed.terrain_textures_dirty {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let paint = |slot: u8| floptle_field::procgen::LayerPaint { slot, color: [1.0; 3] };
+        // `FLOPTLE_RAVINE_GEN=<version>` draws the world an older generator
+        // made, from the same place: found on the current generator's field,
+        // whose distances a raycast can trust beside a wall.
+        let generator = std::env::var("FLOPTLE_RAVINE_GEN").ok().and_then(|v| v.parse().ok());
+        let spec = |generator: Option<u32>| floptle_field::procgen::PlanetFill {
+            seed: 21,
+            radius: 260.0,
+            voxel: 1.5,
+            relief: 4.0,
+            cave_depth: 0.0,
+            craters: 0,
+            surface_a: paint(1),
+            surface_b: paint(1),
+            subsoil: paint(2),
+            subsoil_depth: 1.5,
+            strata: paint(3),
+            strata_depth: 5.0,
+            ravines: Some(floptle_field::procgen::Ravines { count: 6, depth: 14.0, width: 10.0, length: 260.0, meander: 1.0 }),
+            generator: generator.or(Some(floptle_field::procgen::GENERATOR_VERSION)),
+            ..Default::default()
+        };
+        let field = floptle_field::procgen::generate_planet(&spec(None));
+        // The steepest drop near the top: a ravine's rim.
+        let ground = |x: f32, z: f32| field.raycast(Vec3::new(x, 600.0, z), Vec3::NEG_Y, 600.0);
+        let mut rim = (0.0f32, Vec3::ZERO);
+        for gz in -40..=40 {
+            for gx in -40..=40 {
+                let (x, z) = (gx as f32 * 2.0, gz as f32 * 2.0);
+                let (Some(a), Some(b)) = (ground(x, z), ground(x, z + 2.0)) else { continue };
+                if a.y - b.y > rim.0 {
+                    rim = (a.y - b.y, a);
+                }
+            }
+        }
+        assert!(rim.0 > 4.0, "no ravine near the top (steepest drop {:.1} m)", rim.0);
+        let field = if generator.is_some() { floptle_field::procgen::generate_planet(&spec(generator)) } else { field };
+        add_body(&mut ed, 1, DVec3::ZERO, &field);
+        ed.terrain_gpu_dirty = true;
+        settle(&mut ed);
+        let sun = ed.world.spawn();
+        ed.world.insert(sun, Transform { rotation: floptle_core::math::Quat::from_rotation_x(-0.9), ..Transform::IDENTITY });
+        ed.world.insert(sun, floptle_core::Light { intensity: 1.0, shadows: false, ..Default::default() });
+        let (w, h) = (640u32, 400u32);
+        let p = rim.1;
+        // The ravine falls away toward +z: look across it from the rim's side.
+        for (name, back, up, pitch) in [("near", -10.0f32, 6.0f32, -0.45f32), ("mid", -30.0, 18.0, -0.5), ("far", -90.0, 55.0, -0.55)] {
+            ed.camera.position = DVec3::new(p.x as f64, (p.y + up) as f64, (p.z + back) as f64);
+            ed.camera.pitch = pitch;
+            ed.camera.yaw = std::f32::consts::PI;
+            let at = ed.camera.position;
+            ed.settle_terrain_meshes(at, std::time::Duration::from_secs(60));
+            let cam = ed.camera.render_camera();
+            let px = crate::shot::render_frame_pixels(&mut ed, &cam, None, w, h, !0, false).expect("a frame");
+            let tex = floptle_render::TextureData { pixels: px, width: w, height: h };
+            std::fs::write(std::path::Path::new(&out).join(format!("ravine_{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        }
     }
 
     /// **Anti-tiling hides a texture's repeat from far off (0626).** One slot

@@ -1041,7 +1041,7 @@ pub struct TerrainGen(pub String);
 /// the next number and is keyed on it (`floptle_field::procgen`), and an older
 /// spec keeps the rules it was made under. It lives here, not with the
 /// generator, because a project's own setting names it too.
-pub const TERRAIN_GENERATOR: u32 = 3;
+pub const TERRAIN_GENERATOR: u32 = 4;
 
 /// Makes a [`Collidable`] node's static collider a **trigger**: bodies pass
 /// straight through it (no blocking, no push-out), but overlap still fires the
