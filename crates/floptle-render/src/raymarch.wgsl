@@ -208,6 +208,7 @@ fn point_diffuse(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let count = min(u32(G.point_count.x), 16u);
     for (var i = 0u; i < count; i = i + 1u) {
         let lp = G.point_pos[i];
+        if (lamp_out_of_reach(G.point_shape[i], lp.xyz - p, lp.w)) { continue; }
         // The emitter's SHAPE decides the direction, the softness and the
         // distance; a point light returns the same three numbers it always did.
         let a = area_terms(G.point_shape[i], G.point_rot[i], G.point_cone[i], lp.xyz - p, n, n);

@@ -1037,6 +1037,18 @@ fn spot_atten(cone: vec4<f32>, rot: vec4<f32>, to: vec3<f32>) -> f32 {
     return t * t;
 }
 
+// Whether a lamp `to` away (from the shading point to its centre) cannot
+// reach the point at all: its range falloff measures to the emitter's
+// nearest point, never nearer than the centre less the emitter's size
+// (`shape` is [kind, a, b, flags]: a sphere's or disk's radius, a rect's
+// half sizes, a tube's half length and radius, all within `a + b`), so past
+// `range` from that it lights nothing, exactly. Asked before `area_terms`,
+// which costs a rect four normalizes and a polygon integral, so a base
+// lit by a pool of sixteen lamps pays only for the ones near each pixel.
+fn lamp_out_of_reach(shape: vec4<f32>, to: vec3<f32>, range: f32) -> bool {
+    return length(to) - (shape.y + shape.z) >= max(range, 0.0001);
+}
+
 fn area_terms(shape: vec4<f32>, rot: vec4<f32>, cone: vec4<f32>, to: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> AreaTerms {
     var out: AreaTerms;
     out.atten = spot_atten(cone, rot, to);

@@ -938,6 +938,7 @@ fn point_diffuse(pos_rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let count = min(u32(g.point_count.x), 16u);
     for (var i = 0u; i < count; i = i + 1u) {
         let lp = g.point_pos[i];
+        if (lamp_out_of_reach(g.point_shape[i], lp.xyz - pos_rel, lp.w)) { continue; }
         // See `area_terms` in field.wgsl; an emitter with no size is exactly a
         // point light.
         let a = area_terms(g.point_shape[i], g.point_rot[i], g.point_cone[i], lp.xyz - pos_rel, n, n);
@@ -960,6 +961,7 @@ fn point_diffuse_lit(pos_rel: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f
     let count = min(u32(g.point_count.x), 16u);
     for (var i = 0u; i < count; i = i + 1u) {
         let lp = g.point_pos[i];
+        if (lamp_out_of_reach(g.point_shape[i], lp.xyz - pos_rel, lp.w)) { continue; }
         let a = area_terms(g.point_shape[i], g.point_rot[i], g.point_cone[i], lp.xyz - pos_rel, n, n);
         let x = clamp(1.0 - a.dist / max(lp.w, 0.0001), 0.0, 1.0);
         if (x <= 0.0 || a.atten <= 0.0) { continue; }
@@ -1519,6 +1521,7 @@ fn point_ggx(pos_rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, roug
     let count = min(u32(g.point_count.x), 16u);
     for (var i = 0u; i < count; i = i + 1u) {
         let lp = g.point_pos[i];
+        if (lamp_out_of_reach(g.point_shape[i], lp.xyz - pos_rel, lp.w)) { continue; }
         let a = area_terms(g.point_shape[i], g.point_rot[i], g.point_cone[i], lp.xyz - pos_rel, n, v);
         let x = clamp(1.0 - a.dist / max(lp.w, 0.0001), 0.0, 1.0);
         // The cone rides the SAME factor the range falloff does, so it dims the
