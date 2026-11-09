@@ -369,6 +369,8 @@ fn volumetric_fog_marched_once_per_four_pixels_draws_the_same_picture() {
     // paints what reads it magenta.
     let shot = |pass: bool, debug: bool| -> Option<Vec<u8>> {
         let mut ed = crate::offscreen::test_editor_with_gpu()?;
+        // The march, as a project from before the grid draws it.
+        ed.project.fog_method = Some(floptle_scene::FogMethodDoc::March);
         let w = &mut ed.world;
         let floor = w.spawn();
         w.insert(floor, Transform { translation: DVec3::new(0.0, -1.0, -40.0), scale: Vec3::new(200.0, 1.0, 200.0), ..Transform::IDENTITY });
@@ -435,6 +437,83 @@ fn volumetric_fog_marched_once_per_four_pixels_draws_the_same_picture() {
     assert!(magenta * 100 >= ground.len() * 95, "only {magenta} of {} ground pixels took the shared march", ground.len());
 }
 
+
+/// **The froxel fog draws the march's fog.** The field of poles (stems,
+/// every pixel an edge) under lit, noisy volumetric fog, marched as before
+/// and built in a froxel grid: within two levels in 255 of each other on
+/// average (measured 0.35). Its cost is `tests/froxel_fog_cost.rs`'s.
+/// `FLOPTLE_FROXEL_PNG=<dir>` writes both.
+#[cfg(feature = "editor-ui")]
+#[test]
+fn froxel_fog_draws_the_marched_fog() {
+    use floptle_core::math::Vec3;
+    let shot = |grid: Option<([u32; 3], f32)>, w: u32, h: u32, frames: u32| -> Option<(Vec<u8>, f64)> {
+        let mut ed = crate::offscreen::test_editor_with_gpu()?;
+        let wd = &mut ed.world;
+        let floor = wd.spawn();
+        wd.insert(floor, Transform { translation: DVec3::new(0.0, -1.0, -40.0), scale: Vec3::new(200.0, 1.0, 200.0), ..Transform::IDENTITY });
+        wd.insert(floor, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.4, 0.5, 0.3] });
+        for k in 0..12 {
+            let b = wd.spawn();
+            let (x, z) = ((k % 4) as f64 * 9.0 - 13.0, -8.0 - (k / 4) as f64 * 14.0);
+            wd.insert(b, Transform { translation: DVec3::new(x, 1.0, z), scale: Vec3::new(2.0, 3.0 + k as f32 * 0.4, 2.0), ..Transform::IDENTITY });
+            wd.insert(b, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.8, 0.75, 0.7] });
+        }
+        for k in 0..300 {
+            let b = wd.spawn();
+            let (x, z) = ((k % 30) as f64 * 0.6 - 9.0, -3.0 - (k / 30) as f64 * 1.2);
+            wd.insert(b, Transform { translation: DVec3::new(x, 0.5, z), scale: Vec3::new(0.06, 3.0, 0.06), ..Transform::IDENTITY });
+            wd.insert(b, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.3, 0.5, 0.2] });
+        }
+        let sun = wd.spawn();
+        wd.insert(sun, Transform { rotation: Quat::from_rotation_x(-0.6), ..Transform::IDENTITY });
+        wd.insert(
+            sun,
+            floptle_core::Light {
+                intensity: 1.0,
+                fog: true,
+                fog_color: [0.85, 0.85, 0.9],
+                fog_volumetric: true,
+                fog_density: 0.06,
+                fog_height: 6.0,
+                fog_falloff: 4.0,
+                fog_noise: 0.5,
+                fog_light: 1.0,
+                fog_steps: 16,
+                ..Default::default()
+            },
+        );
+        // No grid: the march, as a project from before the grid draws it.
+        ed.project.fog_method = Some(if grid.is_some() { floptle_scene::FogMethodDoc::Grid } else { floptle_scene::FogMethodDoc::March });
+        ed.raymarch.as_mut()?.set_fog_froxels(grid);
+        let cam = RenderCamera::new(
+            DVec3::new(0.0, 6.0, 6.0),
+            Quat::from_rotation_x(-0.45),
+            Projection::Perspective { fov_y: 1.0, near: 0.05, far: 1000.0 },
+        );
+        let _ = crate::shot::render_frame_pixels(&mut ed, &cam, None, w, h, !0, false)?;
+        let t = std::time::Instant::now();
+        let mut px = Vec::new();
+        for _ in 0..frames {
+            px = crate::shot::render_frame_pixels(&mut ed, &cam, None, w, h, !0, false)?;
+        }
+        Some((px, t.elapsed().as_secs_f64() / frames as f64))
+    };
+    let grid = Some(([160, 90, 64], 400.0));
+    let Some((march, t_march)) = shot(None, 1280, 720, 6) else { return };
+    let Some((froxel, t_froxel)) = shot(grid, 1280, 720, 6) else { return };
+    if let Ok(out) = std::env::var("FLOPTLE_FROXEL_PNG") {
+        for (name, px) in [("march", &march), ("froxel", &froxel)] {
+            let tex = floptle_render::TextureData { pixels: px.clone(), width: 1280, height: 720 };
+            std::fs::write(std::path::Path::new(&out).join(format!("fog_{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        }
+    }
+    let n = march.len() / 4;
+    let mean = (0..n).map(|i| (0..3).map(|c| march[i * 4 + c].abs_diff(froxel[i * 4 + c]) as f64).fold(0.0, f64::max)).sum::<f64>() / n as f64;
+    let _ = (t_march, t_froxel);
+    assert!(mean > 0.0, "the fixture: the grid drew exactly the march, so it never ran");
+    assert!(mean < 2.0, "the froxel fog is {mean:.2}/255 from the marched fog on average");
+}
 
 /// **A stack of cut-out cards shades each visible pixel once.** Eighty
 /// cards one behind another, each a picture whose alpha runs from holes

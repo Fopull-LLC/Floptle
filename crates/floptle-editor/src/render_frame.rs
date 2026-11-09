@@ -753,6 +753,7 @@ impl Editor {
                 gpu_mark!("sky / environment");
                 raymarch.upload_globals(gpu, rm);
                 raymarch.capture_env(gpu);
+                raymarch.set_fog_grid(self.project.fog_method_resolved() == floptle_scene::FogMethodDoc::Grid);
                 // A custom shader that measures the gap to the surface behind it
                 // (`surfaceGap` — shoreline foam, soft particles, contact glow)
                 // needs the prepass too, even with nothing to raymarch. Without

@@ -927,6 +927,52 @@ fn fog_to_pixel(px: vec2<u32>, pdims: vec2<u32>) -> vec4<u32> {
     return fog_pack(fog_sky_march(srd, px), -1.0);
 }
 
+// One cell of the froxel fog grid (`Raymarch::set_fog_froxels`): the atlas
+// is the grid's cells across by its rows times its slices, slice by slice.
+// The cell's slab of air along its ray, from the near side of its slice to
+// the far side, lit once: the media's density and noise at the slab's
+// middle, and the light reaching it there (`fog_inscatter`, the sun, its
+// shafts and the lamps), where the march lit every step of every pixel.
+// What the slab scatters and lets through; `froxel_scan.wgsl` sums the
+// slabs front to back into what the camera sees to each slice.
+@fragment
+fn fs_froxel_inject(in: VOut) -> @location(0) vec4<u32> {
+    let g = vec3<u32>(G.fog_froxel.xyz);
+    let c = vec2<u32>(in.clip.xy);
+    let z = c.y / g.y;
+    let y = c.y % g.y;
+    let ndc = vec2<f32>(
+        (f32(c.x) + 0.5) / f32(g.x) * 2.0 - 1.0,
+        1.0 - (f32(y) + 0.5) / f32(g.y) * 2.0,
+    );
+    let wp = G.inv_view_proj * vec4<f32>(ndc, 0.5, 1.0);
+    let rd = normalize(wp.xyz / wp.w);
+    let near = max(G.fog_range.x, 1e-3);
+    let far = max(G.fog_range.y, near * 1.001);
+    let t0 = near * pow(far / near, f32(z) / f32(g.z));
+    let t1 = near * pow(far / near, f32(z + 1u) / f32(g.z));
+    let dt = t1 - t0;
+    let p = rd * (0.5 * (t0 + t1));
+    // The cell's own position stands in for a pixel wherever the light asks
+    // for one (its shadow dither).
+    let pix = vec2<u32>(c.x, y);
+    let layer = vol_fog_layer(p);
+    var sigma = 0.0;
+    if (layer > 1e-5) {
+        sigma = layer * vol_fog_noise(p, dt);
+    }
+    var radiance = G.fog_color.rgb;
+    let amt = clamp(G.vol_fog_c.x, 0.0, 1.0);
+    let gain = max(G.vol_fog_c.x, 1.0);
+    if (sigma > 1e-5 && amt > 0.0 && G.gi_meta.y < 0.5) {
+        let amb = gi_ambient(p, -rd, G.ambient.rgb);
+        radiance = G.fog_color.rgb * mix(vec3<f32>(1.0), fog_inscatter(p, rd, amb, pix) * gain, amt);
+    }
+    let a = 1.0 - exp(-sigma * dt);
+    let sc = radiance * a;
+    return vec4<u32>(bitcast<u32>(sc.r), bitcast<u32>(sc.g), bitcast<u32>(sc.b), bitcast<u32>(1.0 - a));
+}
+
 @fragment
 fn fs_fog(in: VOut) -> FogOut {
     let pdims = textureDimensions(prime_tex);

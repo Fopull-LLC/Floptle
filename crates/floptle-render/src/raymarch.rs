@@ -277,6 +277,13 @@ pub struct RaymarchGlobals {
     /// handed it over), y = its depth bias, z = its blur radius in map
     /// coordinates. Appended at the end.
     pub fog_sun: [f32; 4],
+    /// The froxel grid the fog was built in when `fog_cache.x` is 3
+    /// ([`Raymarch::set_fog_froxels`]): its cells across, down and deep.
+    /// Stamped by the renderer. Appended at the end.
+    pub fog_froxel: [f32; 4],
+    /// The froxel grid's nearest and farthest distance (its depth slices
+    /// run between them exponentially). Stamped by the renderer.
+    pub fog_range: [f32; 4],
 }
 
 impl RaymarchGlobals {
@@ -381,6 +388,8 @@ impl Default for RaymarchGlobals {
             fog_cache: [0.0; 4],
             fog_sun_vp: [[0.0; 4]; 4],
             fog_sun: [0.0; 4],
+            fog_froxel: [0.0; 4],
+            fog_range: [0.0; 4],
             probe_pos: [[0.0; 4]; crate::reflect::MAX_PROBES],
             probe_half: [[1.0; 4]; crate::reflect::MAX_PROBES],
         }
@@ -619,6 +628,20 @@ pub struct Raymarch {
     /// The fog pass ([`march_fog`](Self::march_fog)): `fs_fog` into the
     /// half-resolution fog and distance targets.
     fog_pipeline: wgpu::RenderPipeline,
+    /// The froxel fog's two passes: one lights every cell of the grid, one
+    /// sums the cells front to back (`froxel_scan.wgsl`), `log2(slices)`
+    /// times. See [`Self::set_fog_froxels`].
+    froxel_inject_pipeline: wgpu::RenderPipeline,
+    froxel_scan_pipeline: wgpu::RenderPipeline,
+    froxel_scan_layout: wgpu::BindGroupLayout,
+    /// The froxel grid this frame's fog is built in (cells across, down,
+    /// deep, and its farthest distance), or `None` for the half-resolution
+    /// march: the one a caller set ([`Self::set_fog_froxels`]), else one
+    /// sized to the view and the fog when the grid is on
+    /// ([`Self::set_fog_grid`]).
+    fog_froxels: Option<([u32; 3], f32)>,
+    fog_froxels_set: Option<([u32; 3], f32)>,
+    fog_grid_on: bool,
     /// The half-resolution fog targets, one per view size (a frame draws the
     /// window, a docked Game panel and render targets at different sizes),
     /// and which of them every bind group carries now.
@@ -867,7 +890,8 @@ impl Raymarch {
             immediate_size: 0,
         });
 
-        let (pipeline, mask_pipeline, fog_pipeline) = Self::build_pipelines(gpu, &layout, &module);
+        let (pipeline, mask_pipeline, fog_pipeline, froxel_inject_pipeline) = Self::build_pipelines(gpu, &layout, &module);
+        let (froxel_scan_layout, froxel_scan_pipeline) = froxel_scan_pipeline(gpu);
         let env = crate::env::EnvMap::new(device);
         let env_pipeline = Self::build_env_pipeline(gpu, &layout, &module);
 
@@ -971,6 +995,12 @@ impl Raymarch {
             pipeline,
             mask_pipeline,
             fog_pipeline,
+            froxel_inject_pipeline,
+            froxel_scan_pipeline,
+            froxel_scan_layout,
+            fog_froxels: None,
+            fog_froxels_set: None,
+            fog_grid_on: false,
             fog_slots: Vec::new(),
             fog_active: None,
             fog_ready: std::sync::atomic::AtomicBool::new(false),
@@ -1065,10 +1095,11 @@ impl Raymarch {
             label: Some("raymarch"),
             source: wgpu::ShaderSource::Wgsl(src.into()),
         });
-        let (pipeline, mask_pipeline, fog_pipeline) = Self::build_pipelines(gpu, &self.pipeline_layout, &module);
+        let (pipeline, mask_pipeline, fog_pipeline, froxel_inject_pipeline) = Self::build_pipelines(gpu, &self.pipeline_layout, &module);
         self.pipeline = pipeline;
         self.mask_pipeline = mask_pipeline;
         self.fog_pipeline = fog_pipeline;
+        self.froxel_inject_pipeline = froxel_inject_pipeline;
         // …and the capture, from the same module: a spliced Sky shader that did
         // not reach the environment map would leave every reflection showing
         // the previous sky.
@@ -1115,7 +1146,7 @@ impl Raymarch {
         gpu: &Gpu,
         layout: &wgpu::PipelineLayout,
         module: &wgpu::ShaderModule,
-    ) -> (wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline) {
+    ) -> (wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline) {
         let device = &gpu.device;
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("raymarch"),
@@ -1206,7 +1237,29 @@ impl Raymarch {
             multiview_mask: None,
             cache: gpu.pipeline_cache.as_ref(),
         });
-        (pipeline, mask_pipeline, fog_pipeline)
+        // The froxel fog's lighting pass: one target, one texel a cell.
+        let froxel_inject_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raymarch-froxel-inject"),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs_froxel_inject"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState { format: FOG_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            multiview_mask: None,
+            cache: gpu.pipeline_cache.as_ref(),
+        });
+        (pipeline, mask_pipeline, fog_pipeline, froxel_inject_pipeline)
     }
 
     /// Splice (or clear, with `None`) the scene's Field Shape code into this
@@ -2100,11 +2153,17 @@ impl Raymarch {
     fn patch_globals(&self, globals: &mut RaymarchGlobals) {
         let fog = self.fog_active.and_then(|i| self.fog_slots.get(i));
         globals.fog_cache = match fog {
-            Some(f) if self.fog_ready.load(std::sync::atomic::Ordering::Relaxed) => {
-                [if self.fog_debug { 2.0 } else { 1.0 }, f.size.0 as f32, f.size.1 as f32, f.stride as f32]
-            }
+            Some(f) if self.fog_ready.load(std::sync::atomic::Ordering::Relaxed) => match &f.froxel {
+                Some(x) => [3.0, x.view.0 as f32, x.view.1 as f32, x.stride as f32],
+                None => [if self.fog_debug { 2.0 } else { 1.0 }, f.size.0 as f32, f.size.1 as f32, f.stride as f32],
+            },
             _ => [0.0; 4],
         };
+        // The grid's shape the lighting pass builds it in, set before it runs.
+        if let Some((d, far)) = self.fog_froxels {
+            globals.fog_froxel = [d[0] as f32, d[1] as f32, d[2] as f32, 0.0];
+            globals.fog_range = [FROXEL_NEAR, far, 0.0, 0.0];
+        }
         let mut count = 0;
         for i in 0..MAX_VOLUMES {
             // The atlas region this instance samples: its own slot, or the one
@@ -2275,7 +2334,10 @@ impl Raymarch {
             return;
         }
         let half = (size.0.div_ceil(2), size.1.div_ceil(2));
-        let slot = match self.fog_slots.iter().position(|f| f.size == half) {
+        self.fog_froxels = self.fog_froxels_set.or_else(|| self.fog_grid_on.then(|| froxel_grid_for(&globals, size)));
+        let grid = self.fog_froxels.map(|(d, _)| d);
+        let fits = |f: &FogSlot| f.size == half && f.froxel.as_ref().map(|x| (x.dims, x.view)) == grid.map(|d| (d, size));
+        let slot = match self.fog_slots.iter().position(fits) {
             Some(i) => i,
             None => {
                 // A few view sizes at most; a resized window replaces the
@@ -2284,7 +2346,11 @@ impl Raymarch {
                     self.fog_slots.remove(0);
                     self.fog_active = None;
                 }
-                self.fog_slots.push(FogSlot::new(&gpu.device, half));
+                let mut f = FogSlot::new(&gpu.device, half);
+                if let Some(d) = grid {
+                    f = f.with_froxels(&gpu.device, &self.froxel_scan_layout, d, size);
+                }
+                self.fog_slots.push(f);
                 self.fog_slots.len() - 1
             }
         };
@@ -2296,6 +2362,64 @@ impl Raymarch {
         self.fog_ready.store(false, std::sync::atomic::Ordering::Relaxed);
         self.upload_globals(gpu, globals);
         let f = &self.fog_slots[slot];
+        if let Some(fr) = &f.froxel {
+            // The froxel grid: every cell lit once, then summed front to
+            // back, then copied where every surface and the sky read it.
+            let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raymarch-froxels") });
+            fn target(view: &wgpu::TextureView) -> [Option<wgpu::RenderPassColorAttachment<'_>>; 1] {
+                [Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })]
+            }
+            {
+                let att = target(&fr.atlas[0].1);
+                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("raymarch-froxel-inject"),
+                    color_attachments: &att,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                rp.set_pipeline(&self.froxel_inject_pipeline);
+                rp.set_bind_group(0, bind, &[]);
+                rp.draw(0..3, 0..1);
+            }
+            for (k, scan) in fr.scans.iter().enumerate() {
+                let att = target(&fr.atlas[(k + 1) % 2].1);
+                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("raymarch-froxel-scan"),
+                    color_attachments: &att,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                rp.set_pipeline(&self.froxel_scan_pipeline);
+                rp.set_bind_group(0, scan, &[]);
+                rp.draw(0..3, 0..1);
+            }
+            let done = &fr.atlas[fr.scans.len() % 2].0;
+            encoder.copy_texture_to_buffer(
+                done.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &f.buf,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(fr.stride * FOG_TEXEL),
+                        rows_per_image: Some(fr.dims[1] * fr.dims[2]),
+                    },
+                },
+                wgpu::Extent3d { width: fr.dims[0], height: fr.dims[1] * fr.dims[2], depth_or_array_layers: 1 },
+            );
+            gpu.queue.submit([encoder.finish()]);
+            self.fog_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.upload_globals(gpu, globals);
+            return;
+        }
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raymarch-fog") });
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2344,6 +2468,28 @@ impl Raymarch {
         // From here on the globals say the fog is there to read.
         self.fog_ready.store(true, std::sync::atomic::Ordering::Relaxed);
         self.upload_globals(gpu, globals);
+    }
+
+    /// Build the volumetric fog in a froxel grid of `dims` (cells across,
+    /// down and deep) reaching `far` world units, or march it at half
+    /// resolution as before (`None`). The grid lights each cell once, where
+    /// the march lit every step of every texel and twice at a foreground
+    /// edge, so its cost follows the grid, not the view's pixels or the
+    /// fog's steps; wisps finer than a cell soften.
+    pub fn set_fog_froxels(&mut self, grid: Option<([u32; 3], f32)>) {
+        self.fog_froxels_set = grid.map(|(d, far)| ([d[0].clamp(8, 512), d[1].clamp(8, 512), d[2].clamp(4, 128)], far.max(1.0)));
+    }
+
+    /// Build the volumetric fog in a froxel grid sized to the view and the
+    /// fog (`froxel_grid_for`) unless a caller set one, or march it (off,
+    /// the default): the project's Volumetric fog setting.
+    pub fn set_fog_grid(&mut self, on: bool) {
+        self.fog_grid_on = on;
+    }
+
+    /// The froxel grid the last frame's fog was built in, if it was.
+    pub fn fog_froxels(&self) -> Option<([u32; 3], f32)> {
+        self.fog_froxels
     }
 
     /// Turn the fog pass off (every fragment marches its own fog, as it did
@@ -2631,6 +2777,27 @@ fn make_bind(
 const FOG_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Uint;
 /// Bytes in one packed fog texel.
 const FOG_TEXEL: u32 = 16;
+/// Where the froxel grid's first slice starts, in world units: nearer air
+/// is too thin to see.
+const FROXEL_NEAR: f32 = 0.5;
+
+/// The froxel grid for a view `size` pixels across and the fog `g` asks
+/// for: a cell about every eight pixels (64×36 to 192×108), as many slices
+/// deep as the fog's steps ask for of the march (8 → 32, 12 → 48, 16 or
+/// more → 64), reaching to where the densest air has let through about a
+/// hundredth of the light (64 m to 4 km).
+fn froxel_grid_for(g: &RaymarchGlobals, size: (u32, u32)) -> ([u32; 3], f32) {
+    let steps = g.vol_fog_c[2];
+    let slices = if steps >= 16.0 {
+        64
+    } else if steps >= 12.0 {
+        48
+    } else {
+        32
+    };
+    let far = (4.6 / g.vol_fog_a[0].max(1e-4)).clamp(64.0, 4000.0);
+    ([(size.0 / 8).clamp(64, 192), (size.1 / 8).clamp(36, 108), slices], far)
+}
 
 /// One view size's fog: half the view's size, rounded up, in two layers
 /// (the nearest and the farthest surface of each texel's pixels). The pass
@@ -2644,6 +2811,73 @@ struct FogSlot {
     stride: u32,
     layers: [(wgpu::Texture, wgpu::TextureView); 2],
     buf: wgpu::Buffer,
+    /// The froxel grid this slot holds too, when the fog is built in one.
+    froxel: Option<Froxels>,
+}
+
+/// One view's froxel fog grid (`Raymarch::set_fog_froxels`): cells across,
+/// down and deep, laid out in two textures a cell a texel, the rows of
+/// every slice one under another, between which the summing passes go back
+/// and forth; one bind group a pass, its step written in; and the buffer
+/// row stride the grid is copied out at.
+struct Froxels {
+    dims: [u32; 3],
+    view: (u32, u32),
+    stride: u32,
+    atlas: [(wgpu::Texture, wgpu::TextureView); 2],
+    scans: Vec<wgpu::BindGroup>,
+}
+
+impl Froxels {
+    fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, dims: [u32; 3], view: (u32, u32)) -> Self {
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT / FOG_TEXEL;
+        let stride = dims[0].div_ceil(align) * align;
+        let tex = || {
+            let t = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("raymarch-froxels"),
+                size: wgpu::Extent3d { width: dims[0], height: dims[1] * dims[2], depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: FOG_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let v = t.create_view(&wgpu::TextureViewDescriptor::default());
+            (t, v)
+        };
+        let atlas = [tex(), tex()];
+        let mut scans = Vec::new();
+        let mut step = 1u32;
+        let mut k = 0usize;
+        while step < dims[2] {
+            let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("raymarch-froxel-scan"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM,
+                mapped_at_creation: true,
+            });
+            ubuf.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(&[step, dims[1], 0u32, 0u32]));
+            ubuf.unmap();
+            scans.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("raymarch-froxel-scan"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&atlas[k % 2].1) },
+                    wgpu::BindGroupEntry { binding: 1, resource: ubuf.as_entire_binding() },
+                ],
+            }));
+            step *= 2;
+            k += 1;
+        }
+        Self { dims, view, stride, atlas, scans }
+    }
+
+    /// Bytes the grid takes in the fog buffer.
+    fn bytes(dims: [u32; 3]) -> u64 {
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT / FOG_TEXEL;
+        (dims[0].div_ceil(align) * align * dims[1] * dims[2] * FOG_TEXEL) as u64
+    }
 }
 
 impl FogSlot {
@@ -2670,8 +2904,77 @@ impl FogSlot {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Self { size, stride, layers: [layer(), layer()], buf }
+        Self { size, stride, layers: [layer(), layer()], buf, froxel: None }
     }
+
+    /// Give the slot a froxel grid of `dims` for a view `view` pixels
+    /// across, growing its buffer to hold it.
+    fn with_froxels(mut self, device: &wgpu::Device, layout: &wgpu::BindGroupLayout, dims: [u32; 3], view: (u32, u32)) -> Self {
+        let need = Froxels::bytes(dims);
+        if self.buf.size() < need {
+            self.buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("raymarch-fog"),
+                size: need,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        self.froxel = Some(Froxels::new(device, layout, dims, view));
+        self
+    }
+}
+
+/// The froxel fog's summing pass (`froxel_scan.wgsl`) and its bind group
+/// layout: the grid as it stands, and the step this pass joins across.
+fn froxel_scan_pipeline(gpu: &Gpu) -> (wgpu::BindGroupLayout, wgpu::RenderPipeline) {
+    let device = &gpu.device;
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("raymarch-froxel-scan"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Uint,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            },
+        ],
+    });
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("raymarch-froxel-scan"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("froxel_scan.wgsl").into()),
+    });
+    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("raymarch-froxel-scan"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("raymarch-froxel-scan"),
+        layout: Some(&pl),
+        vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState { format: FOG_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+        }),
+        multiview_mask: None,
+        cache: gpu.pipeline_cache.as_ref(),
+    });
+    (layout, pipeline)
 }
 
 /// The fog binding, in both layouts that carry it.

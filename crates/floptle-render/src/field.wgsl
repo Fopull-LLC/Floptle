@@ -188,6 +188,10 @@ struct Globals {
     // Appended at the END.
     fog_sun_vp: mat4x4<f32>,
     fog_sun: vec4<f32>,
+    // When `fog_cache.x` is 3, the froxel grid the fog was built in: cells
+    // across, down and deep; and its nearest and farthest distance.
+    fog_froxel: vec4<f32>,
+    fog_range: vec4<f32>,
 };
 
 // One terrain palette slot, as the slot store holds it (`terrain_slots`,
@@ -1505,7 +1509,7 @@ fn fog_sky(color: vec3<f32>, rd: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     // Marched once for this pixel's neighbourhood by the fog pass, when it ran.
     let c = fog_cached(pix, -1.0);
     if (c.w >= 0.0) {
-        if (G.fog_cache.x > 1.5) {
+        if (abs(G.fog_cache.x - 2.0) < 0.5) {
             return vec3<f32>(1.0, 0.0, 1.0); // `Raymarch::set_fog_debug`
         }
         return color * c.w + c.rgb;
@@ -1578,6 +1582,9 @@ fn fog_cached(pix: vec2<u32>, dist: f32) -> vec4<f32> {
     if (G.fog_cache.x < 0.5) {
         return none;
     }
+    if (G.fog_cache.x > 2.5) {
+        return fog_froxel_read(pix, dist);
+    }
     let dims = vec2<i32>(i32(G.fog_cache.y), i32(G.fog_cache.z));
     let stride = u32(G.fog_cache.w);
     let f = vec2<f32>(pix) * 0.5;
@@ -1606,6 +1613,50 @@ fn fog_cached(pix: vec2<u32>, dist: f32) -> vec4<f32> {
     return acc / wsum;
 }
 
+// One froxel of the fog grid (`fs_froxel_inject`, then summed front to
+// back): the light scattered toward the camera on the way to the far side
+// of the cell, and the share of what is behind that gets through. Outside
+// the grid in front (nearer than its first cell) the air is clear.
+fn fog_froxel_cell(x: i32, y: i32, z: i32) -> vec4<f32> {
+    if (z < 0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    let g = vec3<i32>(G.fog_froxel.xyz);
+    let c = vec3<u32>(clamp(vec3<i32>(x, y, z), vec3<i32>(0), g - vec3<i32>(1)));
+    let t = fog_buf[(c.z * u32(g.y) + c.y) * u32(G.fog_cache.w) + c.x];
+    return vec4<f32>(bitcast<f32>(t.x), bitcast<f32>(t.y), bitcast<f32>(t.z), bitcast<f32>(t.w));
+}
+
+// The fog from the camera to `dist` along pixel `pix`'s ray (negative: out
+// through the sky) out of the froxel grid: the cells round the pixel and
+// the distance, blended. Depth slices run from `fog_range.x` to `.y`
+// exponentially, so a slice is as deep as it is far; a ray past the grid
+// takes its last slice. `fog_cache` = (3, view width, height, row stride).
+fn fog_froxel_read(pix: vec2<u32>, dist: f32) -> vec4<f32> {
+    let g = G.fog_froxel.xyz;
+    let uv = (vec2<f32>(pix) + 0.5) / max(G.fog_cache.yz, vec2<f32>(1.0));
+    let fx = uv.x * g.x - 0.5;
+    let fy = uv.y * g.y - 0.5;
+    let near = max(G.fog_range.x, 1e-3);
+    let far = max(G.fog_range.y, near * 1.001);
+    var fz = g.z - 1.0;
+    if (dist >= 0.0) {
+        // Slice z ends at near · (far / near)^((z + 1) / depth).
+        fz = clamp(g.z * log(max(dist, near) / near) / log(far / near) - 1.0, -1.0, g.z - 1.0);
+    }
+    let x0 = i32(floor(fx));
+    let y0 = i32(floor(fy));
+    let z0 = i32(floor(fz));
+    let w = vec3<f32>(fx - f32(x0), fy - f32(y0), fz - f32(z0));
+    var acc = vec4<f32>(0.0);
+    for (var k = 0; k < 8; k = k + 1) {
+        let o = vec3<i32>(k & 1, (k >> 1u) & 1, (k >> 2u) & 1);
+        let wt = select(1.0 - w.x, w.x, o.x == 1) * select(1.0 - w.y, w.y, o.y == 1) * select(1.0 - w.z, w.z, o.z == 1);
+        acc += fog_froxel_cell(x0 + o.x, y0 + o.y, z0 + o.z) * wt;
+    }
+    return acc;
+}
+
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     // Aerial perspective first: atmosphere + clouds BETWEEN the camera and this
     // surface (haze over a planet seen from orbit, cloud decks over its disc).
@@ -1626,7 +1677,7 @@ fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
         var m: FogMarch;
         let c = fog_cached(pix, dist);
         if (c.w >= 0.0) {
-            if (G.fog_cache.x > 1.5) {
+            if (abs(G.fog_cache.x - 2.0) < 0.5) {
                 return vec3<f32>(1.0, 0.0, 1.0); // `Raymarch::set_fog_debug`
             }
             m.scattered = c.rgb;

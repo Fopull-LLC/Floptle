@@ -1560,6 +1560,21 @@ pub enum ScreenDrawOrderDoc {
     TextOnTop,
 }
 
+/// How the volumetric fog is built.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FogMethodDoc {
+    /// Marched along every pixel's ray at half resolution, every step lit:
+    /// how every project's fog was drawn before the setting, which a project
+    /// from then keeps. Its cost follows the pixels and the steps.
+    March,
+    /// Built in a grid of cells over the view, each cell lit once, and read
+    /// by every pixel: a fraction of the march's cost, which no longer
+    /// follows the pixels or the steps. Wisps finer than a cell soften. New
+    /// projects start here.
+    #[default]
+    Grid,
+}
+
 /// How the terrain's dug, raised and sculpted ground is drawn.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TerrainShapeDoc {
@@ -3324,6 +3339,11 @@ pub struct ProjectConfigDoc {
     /// [`Faceted`](TerrainShapeDoc::Faceted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terrain_shape: Option<TerrainShapeDoc>,
+    /// How the volumetric fog is built; see [`FogMethodDoc`]. `None` means
+    /// the file predates the setting and resolves to
+    /// [`March`](FogMethodDoc::March).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fog_method: Option<FogMethodDoc>,
     /// How screen draws stack; see [`ScreenDrawOrderDoc`]. `None` means the
     /// file predates the setting and resolves to
     /// [`TextOnTop`](ScreenDrawOrderDoc::TextOnTop).
@@ -3432,6 +3452,7 @@ impl ProjectConfigDoc {
             antialias: Some(AntialiasDoc::Fxaa),
             wheel_friction: Some(WheelFrictionDoc::Single),
             terrain_shape: Some(TerrainShapeDoc::Natural),
+            fog_method: Some(FogMethodDoc::Grid),
             screen_draw_order: Some(ScreenDrawOrderDoc::CallOrder),
             terrain_border: Some(TerrainBorderDoc::Natural),
             example_scripts: true,
@@ -3494,6 +3515,12 @@ impl ProjectConfigDoc {
     /// before the setting gripped twice over, and still does.
     pub fn wheel_friction_resolved(&self) -> WheelFrictionDoc {
         self.wheel_friction.unwrap_or(WheelFrictionDoc::Classic)
+    }
+
+    /// How this project builds its volumetric fog. A project file from
+    /// before the setting marched it, and still does.
+    pub fn fog_method_resolved(&self) -> FogMethodDoc {
+        self.fog_method.unwrap_or(FogMethodDoc::March)
     }
 
     /// How this project draws its terrain's curved ground. A project file

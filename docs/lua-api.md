@@ -4075,7 +4075,7 @@ World distance where fog begins (fully clear nearer than this).
 
 ### `env.fogSteps`
 
-Volumetric: samples along each pixel's fog ray (2..64). The quality/cost dial — drop it on a weak machine.
+Volumetric: samples along each pixel's fog ray (2..64). The quality/cost dial — drop it on a weak machine. With the project's Volumetric fog setting at "grid" (new projects), the fog is built once per frame in a grid of cells over the view instead, each cell lit once and read by every pixel: its cost no longer follows the screen's pixels, and fogSteps sets how many slices deep the grid is (8 → 32, 12 → 48, 16 or more → 64). Projects made before the setting keep "march", the fog marched along every pixel's ray as before.
 
 ### `env.fogVolumetric`
 

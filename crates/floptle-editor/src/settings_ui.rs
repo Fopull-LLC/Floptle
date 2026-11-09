@@ -841,6 +841,33 @@ impl<'a> SettingsCtx<'a> {
         );
         row(
             ui,
+            "Volumetric fog",
+            Some("how the lit volumetric fog is built. \"grid\": in a grid of cells over the view, \
+                  each lit once and read by every pixel, a fraction of the cost and the same \
+                  whatever the resolution or the fog's steps; wisps finer than a cell soften. \
+                  \"march\": along every pixel's ray, every step lit, as projects made before \
+                  the setting draw it"),
+            |ui| {
+                use floptle_scene::FogMethodDoc as F;
+                let mut f = project.fog_method_resolved();
+                egui::ComboBox::from_id_salt("project-fog-method")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(match f {
+                        F::Grid => "grid",
+                        F::March => "march",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut f, F::Grid, "grid");
+                        ui.selectable_value(&mut f, F::March, "march");
+                    });
+                if f != project.fog_method_resolved() {
+                    project.fog_method = Some(f);
+                    out.save_project = true;
+                }
+            },
+        );
+        row(
+            ui,
             "Terrain border",
             Some("how a terrain palette slot meets its neighbours when it is first given a texture. \
                   \"natural\": a 1 m blend that the two slots' heights decide, so sand fills the \

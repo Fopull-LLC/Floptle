@@ -1433,6 +1433,7 @@ impl Editor {
             // build's first frame — drew every metal black, and a polished
             // metal model looked like a hole in the picture.
             raymarch.upload_globals(gpu, rm);
+            raymarch.set_fog_grid(self.project.fog_method_resolved() == floptle_scene::FogMethodDoc::Grid);
             // A camera with no sky reflects the one the frame's other views
             // captured: the map is shared, and the sky is the same sky.
             if opts.draws.sky {
