@@ -436,6 +436,125 @@ fn volumetric_fog_marched_once_per_four_pixels_draws_the_same_picture() {
 }
 
 
+/// **A stack of cut-out cards shades each visible pixel once.** Eighty
+/// cards one behind another, each a picture whose alpha runs from holes
+/// through half-transparent texels (which the colour pass draws solid) to
+/// solid, each shifted so its holes show different cards behind. The depth
+/// prepass primes exactly the texels the colour pass draws, and the colour
+/// pass then tests depth EQUAL with no cut of its own, so the GPU tests
+/// depth before shading and a hidden card is never shaded. The picture is
+/// the same, pixel for pixel, as the old pipeline over the same primed
+/// depth and as a colour pass that clears it; with the prepass priming only
+/// the certainly-opaque texels, as it did, the half-transparent ones vanish
+/// under EQUAL and the pictures differ. And the eighty cost about one.
+///
+/// Measured on an RTX 4060 (whole frames at 1600×1200, about 22 ms of each
+/// the readback): one card 22.4 ms; eighty 22.2 with this pipeline, 23.0
+/// with the old one over the same primed depth, 28.9 clearing it. This GPU
+/// tests depth early even for a shader that may discard, so the pipeline's
+/// own gain is small here; on GPUs that stop testing early at a discard it
+/// is the whole difference between those last two.
+#[cfg(feature = "editor-ui")]
+#[test]
+fn a_stack_of_cutout_cards_shades_each_visible_pixel_once() {
+    let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+    let dir = std::env::temp_dir().join(format!("floptle_cutstack_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
+    // Half holes, three in ten half-transparent (drawn solid), the rest
+    // solid, in cells two texels across, so most of each card shows the
+    // cards behind it.
+    let mut leaf = Vec::with_capacity(64 * 64 * 4);
+    let mut seed = 0x9e37_79b9u32;
+    let mut cells = [0u8; 32 * 32];
+    for c in &mut cells {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *c = match seed >> 24 {
+            0..=127 => 0,
+            128..=204 => 140,
+            _ => 255,
+        };
+    }
+    for y in 0..64u32 {
+        for x in 0..64u32 {
+            let a = cells[((y / 2) * 32 + x / 2) as usize];
+            leaf.extend_from_slice(&[60 + (x * 3) as u8, 140, 70 + (y * 2) as u8, a]);
+        }
+    }
+    let tex = floptle_render::TextureData { pixels: leaf, width: 64, height: 64 };
+    std::fs::write(dir.join("textures/leaf.png"), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+    ed.project_root = dir.clone();
+    let sun = ed.world.spawn();
+    ed.world.insert(sun, Transform { rotation: floptle_core::math::Quat::from_rotation_x(-1.0), ..Transform::IDENTITY });
+    // Contact shadows read the prepass, so the frame runs one.
+    ed.world.insert(sun, floptle_core::Light { intensity: 1.0, contact_shadows: true, ..Default::default() });
+    let card = floptle_core::Material {
+        texture: Some("textures/leaf.png".into()),
+        blend: floptle_core::BlendMode::Cutout,
+        alpha_cutoff: 0.5,
+        ..Default::default()
+    };
+    let mut cards = Vec::new();
+    for k in (0..80).rev() {
+        let b = ed.world.spawn();
+        ed.world.insert(
+            b,
+            Transform {
+                translation: DVec3::new((k % 7) as f64 * 0.37, (k % 5) as f64 * 0.29, -4.0 - k as f64 * 0.125),
+                scale: floptle_core::math::Vec3::new(12.0, 12.0, 0.02),
+                ..Transform::IDENTITY
+            },
+        );
+        ed.world.insert(b, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0, 1.0, 1.0] });
+        ed.world.insert(b, card.clone());
+        cards.push(b);
+    }
+    ed.camera.position = DVec3::ZERO;
+    ed.camera.pitch = 0.0;
+    ed.camera.yaw = 0.0;
+    let (w, h) = (1600u32, 1200u32);
+    let cam = ed.camera.render_camera();
+    let shoot = |ed: &mut crate::Editor, keep: bool, equal: bool, frames: u32| {
+        let r = ed.raster.as_mut().unwrap();
+        r.set_keep_primed_depth(keep);
+        r.set_use_primed_pipeline(equal);
+        let mut px = Vec::new();
+        let t = std::time::Instant::now();
+        for _ in 0..frames {
+            px = crate::shot::render_frame_pixels(ed, &cam, None, w, h, !0, false).expect("a frame");
+        }
+        (px, t.elapsed().as_secs_f64() / frames as f64)
+    };
+    // Warm every path up (the first frames upload the picture), then measure.
+    for (keep, equal) in [(true, true), (true, false), (false, false)] {
+        let _ = shoot(&mut ed, keep, equal, 2);
+    }
+    let (new, t_new) = shoot(&mut ed, true, true, 8);
+    let (old, t_old) = shoot(&mut ed, true, false, 8);
+    let (cleared, t_cleared) = shoot(&mut ed, false, false, 8);
+    // One card alone, for the cost of a single layer.
+    for b in cards.iter().skip(1) {
+        ed.world.despawn(*b);
+    }
+    let (_, t_one) = shoot(&mut ed, true, true, 8);
+    let _ = std::fs::remove_dir_all(&dir);
+    if let Ok(out) = std::env::var("FLOPTLE_CUTSTACK_PNG") {
+        let tex = floptle_render::TextureData { pixels: new.clone(), width: w, height: h };
+        std::fs::write(std::path::Path::new(&out).join("cutstack.png"), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+    }
+    let differ = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x.abs_diff(**y) > 1).count();
+    assert_eq!(differ(&new, &old), 0, "the depth-Equal pipeline drew a different picture from the old one");
+    assert_eq!(differ(&new, &cleared), 0, "the depth-Equal pipeline drew a different picture from a cleared depth");
+    assert!(
+        t_new < t_one * 1.15,
+        "eighty cut-out cards took {:.2} ms against {:.2} for one (the old pipeline {:.2}, a cleared depth {:.2})",
+        t_new * 1e3,
+        t_one * 1e3,
+        t_old * 1e3,
+        t_cleared * 1e3
+    );
+}
+
 /// **A frame the depth prepass primed keeps that depth in its colour pass.**
 /// The colour pass cleared the depth whenever it cleared the colour, throwing
 /// the priming away, so every hidden layer of a stack of surfaces (a meadow

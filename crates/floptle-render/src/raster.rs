@@ -378,6 +378,8 @@ struct CorePipelines {
     skin_transparent_pipeline: wgpu::RenderPipeline,
     skin_mask_pipeline: wgpu::RenderPipeline,
     skin_prepass_pipeline: wgpu::RenderPipeline,
+    primed_pipeline: wgpu::RenderPipeline,
+    skin_primed_pipeline: wgpu::RenderPipeline,
 }
 
 /// Build the group(0) bind group over the frame globals, the two paint stores,
@@ -853,6 +855,15 @@ pub struct Raster {
     skin_transparent_pipeline: wgpu::RenderPipeline,
     skin_mask_pipeline: wgpu::RenderPipeline,
     skin_prepass_pipeline: wgpu::RenderPipeline,
+    /// The colour pass for opaque buckets the depth prepass drew, when it
+    /// did: depth tested EQUAL and not written, and `fs` built with
+    /// `primed_depth` = 1 so it makes none of the coverage cuts the prepass
+    /// already made. With no discard left the GPU tests depth before
+    /// shading, so each visible pixel of a stack of cut-out cards is shaded
+    /// once, however many cards lie behind it. Positions are `@invariant`,
+    /// so a fragment meets its own prepass depth exactly.
+    primed_pipeline: wgpu::RenderPipeline,
+    skin_primed_pipeline: wgpu::RenderPipeline,
     /// The prepass's own sampleable depth targets, one per target SIZE, and
     /// which of them the last prepass wrote.
     ///
@@ -877,6 +888,10 @@ pub struct Raster {
     depth_primed: bool,
     /// Whether the last colour pass kept a primed depth buffer (for tests).
     last_pass_kept_primed_depth: bool,
+    /// Draw prepass-covered opaque buckets with [`Self::primed_pipeline`]
+    /// when the depth was primed (on). Off draws them as before, testing
+    /// LessEqual and cutting their own coverage: for tests to compare.
+    use_primed_pipeline: bool,
     /// Keep a primed depth buffer in the colour pass (on). Off clears it, as
     /// before: the same picture, every hidden layer shaded.
     keep_primed_depth: bool,
@@ -1935,12 +1950,15 @@ impl Raster {
             skin_transparent_pipeline: core.skin_transparent_pipeline,
             skin_mask_pipeline: core.skin_mask_pipeline,
             skin_prepass_pipeline: core.skin_prepass_pipeline,
+            primed_pipeline: core.primed_pipeline,
+            skin_primed_pipeline: core.skin_primed_pipeline,
             prepass: Vec::new(),
             prepass_seq: 0,
             prepass_active: None,
             depth_primed: false,
             last_pass_kept_primed_depth: false,
             keep_primed_depth: true,
+            use_primed_pipeline: true,
             globals_bind,
             globals_bind_sunpass,
             _sun_map: sun_map,
@@ -2066,6 +2084,38 @@ impl Raster {
             cache: gpu.pipeline_cache.as_ref(),
         });
 
+        let primed_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(&format!("raster-primed{tag}")),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some(vs_entry),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Equal),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs"),
+                compilation_options: wgpu::PipelineCompilationOptions { constants: &[("primed_depth", 1.0)], ..Default::default() },
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.scene_format(),
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: gpu.pipeline_cache.as_ref(),
+        });
+
         // Depth-only prepass (opaque instances, conservative alpha discard): primes
         // the frame's depth buffer so the color pass early-z-kills hidden fragments
         // (their shading marches the shadow field — the expensive part) and gives
@@ -2177,10 +2227,10 @@ impl Raster {
             multiview_mask: None,
             cache: gpu.pipeline_cache.as_ref(),
         });
-            (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline)
+            (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline, primed_pipeline)
         };
-        let (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline) = build("vs", "");
-        let (skin_pipeline, skin_transparent_pipeline, skin_mask_pipeline, skin_prepass_pipeline) =
+        let (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline, primed_pipeline) = build("vs", "");
+        let (skin_pipeline, skin_transparent_pipeline, skin_mask_pipeline, skin_prepass_pipeline, skin_primed_pipeline) =
             build("vs_skin", "-skin");
         CorePipelines {
             pipeline,
@@ -2191,6 +2241,8 @@ impl Raster {
             skin_transparent_pipeline,
             skin_mask_pipeline,
             skin_prepass_pipeline,
+            primed_pipeline,
+            skin_primed_pipeline,
         }
     }
 
@@ -2318,6 +2370,8 @@ impl Raster {
         self.skin_transparent_pipeline = core.skin_transparent_pipeline;
         self.skin_mask_pipeline = core.skin_mask_pipeline;
         self.skin_prepass_pipeline = core.skin_prepass_pipeline;
+        self.primed_pipeline = core.primed_pipeline;
+        self.skin_primed_pipeline = core.skin_primed_pipeline;
         // Rebuild every custom-shader pipeline against the new field module.
         for i in 0..self.flsl_shaders.len() {
             let (chunk, tex_slots, blend) = {
@@ -4256,10 +4310,19 @@ impl Raster {
                         rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
                     }
                 };
-            rp.set_pipeline(&self.pipeline);
+            // The opaque buckets are exactly those the prepass drew
+            // (`upload_opaque_depth_draws` keeps the same instances by the
+            // same rule), so once it primed this depth they draw where it
+            // stands and nowhere else. Only when nothing has drawn into the
+            // depth since (this pass clears the colour, so it owns the
+            // frame): a raymarch pass in between writes the depth it marched
+            // to, which is not bit for bit the depth the prepass wrote, and
+            // EQUAL would then lose the ground under it.
+            let equal = primed && clear.is_some() && self.use_primed_pipeline;
+            rp.set_pipeline(if equal { &self.primed_pipeline } else { &self.pipeline });
             draw(&mut rp, &opaque_buckets);
             if !skin_opaque.is_empty() {
-                rp.set_pipeline(&self.skin_pipeline);
+                rp.set_pipeline(if equal { &self.skin_primed_pipeline } else { &self.skin_pipeline });
                 draw(&mut rp, &skin_opaque);
             }
             draw_flsl(&mut rp, &flsl_opaque);
@@ -5023,6 +5086,12 @@ impl Raster {
     /// compares; only the work behind it differs.
     pub fn set_keep_primed_depth(&mut self, on: bool) {
         self.keep_primed_depth = on;
+    }
+
+    /// Draw prepass-covered opaque buckets with the depth-Equal pipeline
+    /// that makes no coverage cuts of its own (the default), or as before.
+    pub fn set_use_primed_pipeline(&mut self, on: bool) {
+        self.use_primed_pipeline = on;
     }
 }
 

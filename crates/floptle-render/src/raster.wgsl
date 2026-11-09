@@ -253,6 +253,14 @@ fn ext_at(idx: u32) -> Ext {
 // camera (the colour pass, the depth prepass, a `.flsl` surface) asks this
 // same function with the same inputs, so they cut the same pixels; the sun's
 // shadow map does not, because the wall is still there.
+// 1 in the colour pipeline for buckets the depth prepass has already drawn
+// (`Raster::primed_pipeline`): that pipeline tests depth EQUAL and writes
+// none, so the prepass's own choice of pixels decides coverage, and `fs`
+// skips its coverage discards. A shader with no discard in it keeps the
+// GPU's early depth test, so a hidden layer of cut-out cards is never shaded
+// at all. `fs_depth` makes the identical cuts, so the picture is the same.
+override primed_depth: f32 = 0.0;
+
 // A `.flsl` surface's near fade: its fragment entry asks this.
 fn surface_fade_cut(in: VsOut, pix: vec2<u32>) -> bool {
     return near_fade_cut(ext_at(imeta_ext(in)), in.view_pos, pix);
@@ -2410,13 +2418,16 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // the share let the soft texels round a leaf through, as dots outside it.
     let dissolving = !terrain && ext_has(ext, EXT_DISSOLVE);
     let cut_a = select(alpha, texel.a * in.vcolor.a, dissolving);
-    if (!terrain && !ext_has(ext, EXT_BLEND) && (in.color.a >= 0.999 || dissolving) && cut_a < ext_cutoff(ext)) {
+    // Every cut below is one `fs_depth` makes too; under a primed depth
+    // buffer (`primed_depth`) the prepass has made it already.
+    let cover = primed_depth < 0.5;
+    if (cover && !terrain && !ext_has(ext, EXT_BLEND) && (in.color.a >= 0.999 || dissolving) && cut_a < ext_cutoff(ext)) {
         discard;
     }
     // A single-sided surface is not drawn from behind. Nothing culls in the
     // pipeline, so the face is dropped here — after every sample above, which
     // keeps those in uniform control flow.
-    if (ext_has(ext, EXT_SINGLE_SIDED) && !front) {
+    if (cover && ext_has(ext, EXT_SINGLE_SIDED) && !front) {
         discard;
     }
 
@@ -2439,7 +2450,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // `fs_depth` runs the IDENTICAL test, so a fading chunk primes depth for
     // exactly the pixels it will shade. Both derive the threshold from
     // `in.clip` (invariant between the passes) and the same instance alpha.
-    if (terrain && in.color.a < 0.999 && ign(pix) > in.color.a) {
+    if (cover && terrain && in.color.a < 0.999 && ign(pix) > in.color.a) {
         discard;
     }
 
@@ -2448,17 +2459,17 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // needs no sorting at all. (`is_opaque` on the CPU side keeps it there; a
     // dithered surface in the blended pass would dither AND blend.)
     let door = select(bayer4(pix), 1.0 - bayer4(pix), ext_has(ext, EXT_DITHER_INVERT));
-    if (ext_has(ext, EXT_DITHER_ALPHA) && alpha < 0.999 && door >= alpha) {
+    if (cover && ext_has(ext, EXT_DITHER_ALPHA) && alpha < 0.999 && door >= alpha) {
         discard;
     }
     // Two LOD bands dissolve into each other by gradient noise, which reads
     // as the one becoming the other; a 4×4 grid read as a screen door over
     // every tree mid-fade. The arriving band keeps `n < share`, the leaving
     // one its complement, so between them every pixel is drawn once.
-    if (dissolving && dissolve_cut(ext, pix, in.color.a)) {
+    if (cover && dissolving && dissolve_cut(ext, pix, in.color.a)) {
         discard;
     }
-    if (near_fade_cut(ext, in.view_pos, pix)) {
+    if (cover && near_fade_cut(ext, in.view_pos, pix)) {
         discard;
     }
     // Once it dithers, what survives is fully opaque — anything less would blend
@@ -2747,11 +2758,15 @@ fn fs_depth(in: VsOut, @builtin(front_facing) front: bool) {
         }
         return;
     }
-    // An OPAQUE model (cutoff 0) draws every texel solid, so it primes depth
-    // for every one; otherwise only the certainly-opaque ones, as ever. A face
-    // the color pass will drop from behind must not prime depth either, or it
-    // would hide what is behind it and draw nothing in its place.
-    let solid = a >= 0.99 || (in.color.a >= 0.999 && ext_cutoff(ext) == 0.0 && !ext_has(ext, EXT_BLEND));
+    // For the camera, the colour pass's own cut: an opaque instance draws
+    // solid every texel at or past its material's cutoff (all of them at
+    // cutoff 0), so it primes depth for exactly those, and the colour pass
+    // can test depth EQUAL against them (`primed_depth`). The sun keeps the
+    // certainly-opaque texels, as ever. A face the colour pass will drop
+    // from behind must not prime depth either, or it would hide what is
+    // behind it and draw nothing in its place.
+    let drawn = in.color.a >= 0.999 && !ext_has(ext, EXT_BLEND) && a >= ext_cutoff(ext);
+    let solid = select(a >= 0.99 || (in.color.a >= 0.999 && ext_cutoff(ext) == 0.0 && !ext_has(ext, EXT_BLEND)), drawn, !sun_view);
     if (!solid || (ext_has(ext, EXT_SINGLE_SIDED) && !front)) {
         discard;
     }
