@@ -121,6 +121,8 @@ pub(crate) struct FrameInstances {
     pub(crate) skin_draws: Vec<floptle_render::SkinDraw>,
     pub(crate) flsl_draws: Vec<floptle_render::FlslDraw>,
     pub(crate) blobs: Vec<(DVec3, f32, MaterialParams)>,
+    /// The sun map's casters the camera culled (`shading::push_shadow_caster`).
+    pub(crate) shadow_casters: Vec<(MeshId, Option<TexId>, InstanceRaw)>,
 }
 
 /// The frame's view, as every gizmo pass reads it: the camera, its
@@ -437,7 +439,18 @@ impl Editor {
             skin_draws,
             flsl_draws,
             blobs,
-        } = self.gather_instances(&cam, view_proj, game_cull_mask, &lights_split, flat_camera, profile, chunk_now, terrain_base_mat)?;
+            shadow_casters,
+        } = self.gather_instances(
+            &cam,
+            view_proj,
+            game_cull_mask,
+            &lights_split,
+            flat_camera,
+            profile,
+            chunk_now,
+            terrain_base_mat,
+            crate::shading::sun_caster_frustum(&globals),
+        )?;
 
         // Live particle effects (play mode): pack every instance's billboards for
         // this frame. Owned data — drawn after the grid, before post, so particles
@@ -669,7 +682,6 @@ impl Editor {
         };
         crate::shading::note_shadow_casters(&mut profile.borrow_mut(), prox_count, &rm);
 
-        let shadow_casters = self.shadow_map_casters(&globals, cam.world_position, view_proj);
         Some(FrameGather {
             shadow_casters,
             aspect,
@@ -1802,7 +1814,11 @@ impl Editor {
         profile: &Rc<RefCell<floptle_core::profile::FrameProfile>>,
         chunk_now: Option<f32>,
         terrain_base_mat: crate::terrain_edit::TerrainMaterials,
+        sun: Option<floptle_render::Frustum>,
     ) -> Option<FrameInstances> {
+        // What comes before the node walk: the world passes the walk reads
+        // (2D order and lights, paint bases, the drag ghost), as a part.
+        let setup_t = floptle_core::profile::Span::new();
         let (Some(gpu), Some(raster), Some(egui)) =
             (self.gpu.as_mut(), self.raster.as_mut(), self.egui.as_ref())
         else {
@@ -1914,6 +1930,10 @@ impl Editor {
         let mut culled_nodes = 0usize;
         // The node walk and the cull test inside it, as render parts.
         let timing = profile.borrow().enabled();
+        if timing {
+            profile.borrow_mut().record_part("renderSetup", setup_t.ms());
+        }
+        let mut shadow_casters = Vec::new();
         let walk_t = floptle_core::profile::Span::new();
         let mut cull_ms = 0.0f32;
         for (e, matter) in &ents {
@@ -1930,9 +1950,21 @@ impl Editor {
                 continue;
             }
             // The active camera's layer cull mask (fullscreen game view only).
+            // A node this camera leaves out by its layer still casts into the
+            // sun map, as it always has.
+            let casters = crate::shading::CasterWorld {
+                world: &self.world,
+                mesh_registry: &self.mesh_registry,
+                poses: &self.anim.poses,
+                mesh_ids: &self.mesh_ids,
+            };
             if let Some(lt) = &game_layer_table
                 && (game_cull_mask >> lt.index_for(&self.world, *e)) & 1 == 0
             {
+                if let Some(sun) = &sun {
+                    let t = floptle_core::world_transform(&self.world, *e);
+                    crate::shading::push_shadow_caster(&casters, *e, matter, &t, cam.world_position, &frustum, None, sun, &mut shadow_casters);
+                }
                 continue;
             }
             // World transform (composes any parent chain) — a parent carries children.
@@ -1940,7 +1972,9 @@ impl Editor {
             // A sorting layer is a Z nudge on the drawn transform, so ordering a
             // flat scene never moves anything the physics or a script can see.
             // Resolved before the loop (`raster` is borrowed mutably in here).
-            t.translation += sort_z.get(e).copied().unwrap_or_default();
+            let nudge = sort_z.get(e).copied().unwrap_or_default();
+            let unnudged = (nudge != DVec3::ZERO).then_some(t);
+            t.translation += nudge;
             // Off screen? Skip the whole node — the material lookups, the matrix,
             // every arm below. Answers false for anything whose
             // extent the scene does not know, and for the Blob, which is an SDF
@@ -1966,6 +2000,15 @@ impl Editor {
             }
             if off_screen {
                 culled_nodes += 1;
+                if let Some(sun) = &sun {
+                    // The camera's answer stands for the caster test unless the
+                    // walk moved the node by its sorting nudge.
+                    let (at, known) = match &unnudged {
+                        Some(raw) => (raw, None),
+                        None => (&t, Some(true)),
+                    };
+                    crate::shading::push_shadow_caster(&casters, *e, matter, at, cam.world_position, &frustum, known, sun, &mut shadow_casters);
+                }
                 continue;
             }
             // A node's Material (if any) overrides the look; else fall back to the
@@ -2375,6 +2418,7 @@ impl Editor {
             skin_draws,
             flsl_draws,
             blobs,
+            shadow_casters,
         })
     }
 

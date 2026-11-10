@@ -1792,75 +1792,84 @@ mod light_split_tests {
     }
 }
 
-impl crate::Editor {
-    /// Opaque meshes the camera culled that the sun shadow map can still see:
-    /// the roof over a camera looking at a wall, a tower behind it. The map
-    /// is drawn from the camera's own draw list, so without these anything out
-    /// of view cast nothing, and a room lit by the map had sun on its floor.
-    /// Drawn into the map only, never into the picture.
-    ///
-    /// Static models, map meshes and primitives. A rigged model out of view
-    /// (a character behind the camera) is left out: posing it costs a skin
-    /// update for a shadow that is rarely in the frame.
-    pub(crate) fn shadow_map_casters(
-        &self,
-        globals: &floptle_render::Globals,
-        cam_world: DVec3,
-        view_proj: floptle_core::math::Mat4,
-    ) -> Vec<ShadowDraw> {
-        let mut out = Vec::new();
-        if globals.sun_map[0] < 0.5 {
-            return out;
-        }
-        let camera = floptle_render::Frustum::from_view_proj(view_proj);
-        let sun = floptle_render::Frustum::from_view_proj(floptle_core::math::Mat4::from_cols_array_2d(&globals.sun_vp));
-        for (e, matter) in self.world.query::<Matter>() {
-            if !matches!(matter, Matter::Mesh { .. } | Matter::MapMesh { .. } | Matter::Primitive { .. })
-                || floptle_core::is_hidden(&self.world, e)
-                || self.world.get::<floptle_core::CastShadow>(e).is_some_and(|c| !c.0)
-                || floptle_core::is_disabled(&self.world, e)
-            {
-                continue;
-            }
-            let t = floptle_core::world_transform(&self.world, e);
-            let off = |f: &floptle_render::Frustum| {
-                crate::node_bounds::node_is_off_screen(
-                    &self.world, &self.mesh_registry, &self.anim.poses, e, matter, &t, cam_world, f, None,
-                )
-            };
-            // On screen it is in the camera's list already; outside the map it
-            // casts on nothing the camera can see.
-            if !off(&camera) || off(&sun) {
-                continue;
-            }
-            let model = t.render_matrix(cam_world);
-            let mat = self.world.get::<floptle_core::Material>(e);
-            match matter {
-                Matter::Primitive { shape, color } => {
-                    if let Some((mesh, raw)) =
-                        crate::draw_2d::primitive_draw(*shape, *color, mat, model, &self.mesh_ids, None, None)
-                    {
-                        out.push((mesh, None, raw));
-                    }
-                }
-                Matter::Mesh { asset_path } => {
-                    if let Some(asset) = self.mesh_registry.get(asset_path).filter(|a| a.rig.is_none()) {
-                        let raw = shadow_instance(model, mat);
-                        out.extend(asset.parts.iter().map(|&mid| (mid, None, raw)));
-                    }
-                }
-                Matter::MapMesh { id } => {
-                    if let Some(asset) = self.mesh_registry.get(&crate::map_edit::map_key(*id)) {
-                        let raw = shadow_instance(model, mat);
-                        out.extend(asset.parts.iter().map(|&mid| (mid, None, raw)));
-                    }
-                }
-                _ => {}
-            }
-        }
-        out
-    }
+/// The sun shadow map's frustum, when the frame draws one: what picks the
+/// casters the camera culled ([`push_shadow_caster`]).
+pub(crate) fn sun_caster_frustum(globals: &floptle_render::Globals) -> Option<floptle_render::Frustum> {
+    (globals.sun_map[0] >= 0.5)
+        .then(|| floptle_render::Frustum::from_view_proj(floptle_core::math::Mat4::from_cols_array_2d(&globals.sun_vp)))
+}
 
+/// The world and the registries [`push_shadow_caster`] reads, borrowed
+/// field by field, so the node walk can hold the renderer while it asks.
+pub(crate) struct CasterWorld<'a> {
+    pub(crate) world: &'a floptle_core::World,
+    pub(crate) mesh_registry: &'a std::collections::HashMap<String, crate::MeshAsset>,
+    pub(crate) poses: &'a std::collections::HashMap<Entity, Vec<floptle_core::math::Mat4>>,
+    pub(crate) mesh_ids: &'a [floptle_render::MeshId],
+}
+
+/// An opaque mesh the node walk did not draw that the sun shadow map can
+/// still see: the roof over a camera looking at a wall, a tower behind it.
+/// The map is drawn from the camera's own draw list, so without these
+/// anything out of view cast nothing, and a room lit by the map had sun on
+/// its floor. Drawn into the map only, never into the picture.
+///
+/// Asked by the walk itself for every node it leaves out, past the hidden
+/// and switched-off ones, so the scene is walked once a frame rather than
+/// twice. `t` is the node's world transform as the scene has it (with no
+/// sorting nudge), and `camera_off` whether the camera culls it at that
+/// transform when the walk already knows (`None`: work it out).
+///
+/// Static models, map meshes and primitives. A rigged model out of view (a
+/// character behind the camera) is left out: posing it costs a skin update
+/// for a shadow that is rarely in the frame.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_shadow_caster(
+    w: &CasterWorld,
+    e: Entity,
+    matter: &Matter,
+    t: &floptle_core::transform::Transform,
+    cam_world: DVec3,
+    camera: &floptle_render::Frustum,
+    camera_off: Option<bool>,
+    sun: &floptle_render::Frustum,
+    out: &mut Vec<ShadowDraw>,
+) {
+    if !matches!(matter, Matter::Mesh { .. } | Matter::MapMesh { .. } | Matter::Primitive { .. })
+        || w.world.get::<floptle_core::CastShadow>(e).is_some_and(|c| !c.0)
+    {
+        return;
+    }
+    let off = |f: &floptle_render::Frustum| {
+        crate::node_bounds::node_is_off_screen(w.world, w.mesh_registry, w.poses, e, matter, t, cam_world, f, None)
+    };
+    // On screen it is in the camera's list already; outside the map it
+    // casts on nothing the camera can see.
+    if !camera_off.unwrap_or_else(|| off(camera)) || off(sun) {
+        return;
+    }
+    let model = t.render_matrix(cam_world);
+    let mat = w.world.get::<floptle_core::Material>(e);
+    match matter {
+        Matter::Primitive { shape, color } => {
+            if let Some((mesh, raw)) = crate::draw_2d::primitive_draw(*shape, *color, mat, model, w.mesh_ids, None, None) {
+                out.push((mesh, None, raw));
+            }
+        }
+        Matter::Mesh { asset_path } => {
+            if let Some(asset) = w.mesh_registry.get(asset_path).filter(|a| a.rig.is_none()) {
+                let raw = shadow_instance(model, mat);
+                out.extend(asset.parts.iter().map(|&mid| (mid, None, raw)));
+            }
+        }
+        Matter::MapMesh { id } => {
+            if let Some(asset) = w.mesh_registry.get(&crate::map_edit::map_key(*id)) {
+                let raw = shadow_instance(model, mat);
+                out.extend(asset.parts.iter().map(|&mid| (mid, None, raw)));
+            }
+        }
+        _ => {}
+    }
 }
 
 /// A depth-only stand-in for a model drawn into the sun shadow map: its

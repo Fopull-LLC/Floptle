@@ -628,7 +628,12 @@ impl Editor {
         // including the frustum cull, built from this camera's matrix.
         // The sun map's casters the camera culls, before the draw loop takes
         // the renderer: see `shadow_map_casters`.
-        let mut shadow_casters = self.shadow_map_casters(&globals, cam.world_position, view_proj);
+        // The sun map's casters the camera culls are picked out by the node
+        // walk below: see `shading::push_shadow_caster`.
+        let sun_casters = crate::shading::sun_caster_frustum(&globals);
+        let mut shadow_casters = Vec::new();
+        // What comes before the node walk: the world passes the walk reads.
+        let setup_t = floptle_core::profile::Span::new();
         let off_frustum = floptle_render::Frustum::from_view_proj(view_proj);
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
@@ -682,6 +687,9 @@ impl Editor {
         let mut culled_nodes = 0usize;
         // The node walk, and the cull test inside it, named as render parts.
         let timing = self.script_host.profile().borrow().enabled();
+        if timing {
+            self.script_host.profile().borrow_mut().record_part("renderSetup", setup_t.ms());
+        }
         let walk_t = floptle_core::profile::Span::new();
         let mut cull_ms = 0.0f32;
         for (ent, matter) in &ents {
@@ -692,16 +700,29 @@ impl Editor {
                 continue;
             }
             // Camera cull mask: skip nodes on layers this camera doesn't render.
+            // …and a node left out by its layer still casts into the sun map.
+            let casters = crate::shading::CasterWorld {
+                world: &self.world,
+                mesh_registry: &self.mesh_registry,
+                poses: &self.anim.poses,
+                mesh_ids: &self.mesh_ids,
+            };
             if let Some(lt) = &layer_table
                 && (cull_mask >> lt.index_for(&self.world, *ent)) & 1 == 0
             {
+                if let Some(sun) = &sun_casters {
+                    let t = floptle_core::world_transform(&self.world, *ent);
+                    crate::shading::push_shadow_caster(&casters, *ent, matter, &t, cam.world_position, &off_frustum, None, sun, &mut shadow_casters);
+                }
                 continue;
             }
             let mut t = floptle_core::world_transform(&self.world, *ent);
             // …and the same nudge here, or the Game view would sort differently
             // from the Scene view — the drift this file has already had three
             // times over.
-            t.translation += sort_z.get(ent).copied().unwrap_or_default();
+            let nudge = sort_z.get(ent).copied().unwrap_or_default();
+            let unnudged = (nudge != DVec3::ZERO).then_some(t);
+            t.translation += nudge;
             // …and the same cull the screen uses, against this
             // camera's frustum. An offscreen target that culled differently from
             // the window would be a mirror showing a different room.
@@ -726,6 +747,13 @@ impl Editor {
             }
             if off_screen {
                 culled_nodes += 1;
+                if let Some(sun) = &sun_casters {
+                    let (at, known) = match &unnudged {
+                        Some(raw) => (raw, None),
+                        None => (&t, Some(true)),
+                    };
+                    crate::shading::push_shadow_caster(&casters, *ent, matter, at, cam.world_position, &off_frustum, known, sun, &mut shadow_casters);
+                }
                 continue;
             }
             let mat = self.world.get::<Material>(*ent).cloned();
