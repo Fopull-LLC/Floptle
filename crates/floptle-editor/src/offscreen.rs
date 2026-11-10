@@ -1456,6 +1456,7 @@ impl Editor {
                 rm.volumetric_fog(),
                 raster.any_transmissive(&instances),
             );
+            let prepassed = opts.depth_tex.is_some() && (wants_depth || rm_draw);
             if let Some(dtex) = opts.depth_tex.filter(|_| wants_depth || rm_draw) {
                 let hist = history_bind.as_ref().map(|(v, s)| (v, s));
                 headless_mark!("depth prepass");
@@ -1474,7 +1475,15 @@ impl Editor {
                 raymarch.upload_globals(gpu, rm);
                 Some([0.0; 4])
             } else if rm_draw {
-                raymarch.draw_into(gpu, color, depth, rm);
+                // Over the primed depth, as the window path marches: the
+                // meshes' depth stands wherever the march's matter is not in
+                // front, so the colour pass shades each visible card once
+                // here too. Cleared, it would leave nothing to test against.
+                if prepassed {
+                    raymarch.draw_into_primed(gpu, color, depth, rm);
+                } else {
+                    raymarch.draw_into(gpu, color, depth, rm);
+                }
                 None
             } else {
                 // Nothing to raymarch, but the raster field group still needs this

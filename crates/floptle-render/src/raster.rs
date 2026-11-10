@@ -902,6 +902,8 @@ pub struct Raster {
     depth_primed: bool,
     /// Whether the last colour pass kept a primed depth buffer (for tests).
     last_pass_kept_primed_depth: bool,
+    /// How many opaque buckets the last colour pass drew depth-Equal.
+    last_pass_equal_buckets: usize,
     /// Draw prepass-covered opaque buckets with [`Self::primed_pipeline`]
     /// when the depth was primed (on). Off draws them as before, testing
     /// LessEqual and cutting their own coverage: for tests to compare.
@@ -1976,6 +1978,7 @@ impl Raster {
             prepass_active: None,
             depth_primed: false,
             last_pass_kept_primed_depth: false,
+            last_pass_equal_buckets: 0,
             keep_primed_depth: true,
             use_primed_pipeline: true,
             globals_bind,
@@ -4296,6 +4299,7 @@ impl Raster {
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster") });
+        let equal_buckets;
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("raster"),
@@ -4352,14 +4356,34 @@ impl Raster {
             // The opaque buckets are exactly those the prepass drew
             // (`upload_opaque_depth_draws` keeps the same instances by the
             // same rule), so once it primed this depth they draw where it
-            // stands and nowhere else. Only when nothing has drawn into the
-            // depth since (this pass clears the colour, so it owns the
-            // frame): a raymarch pass in between writes the depth it marched
-            // to, which is not bit for bit the depth the prepass wrote, and
-            // EQUAL would then lose the ground under it.
-            let equal = primed && clear.is_some() && self.use_primed_pipeline;
-            rp.set_pipeline(if equal { &self.primed_pipeline } else { &self.pipeline });
-            draw(&mut rp, &opaque_buckets);
+            // stands and nowhere else, each visible pixel shaded once.
+            //
+            // A raymarch pass in between (this pass then loads the colour)
+            // writes depth only where its matter wins the test against the
+            // primed depth: in front of a mesh, the mesh is hidden and EQUAL
+            // rightly fails; behind it, nothing is written and the prepass
+            // depth stands. Raster terrain keeps the ordinary test all the
+            // same, as a precaution rather than a demonstrated need: where the
+            // field also marches the terrain, its surface and the meshed
+            // ground coincide, and a march landing a hair nearer would lose
+            // the ground under EQUAL. A slab of terrain with a blob in front
+            // drew the same either way. Every other bucket, leaves and cards
+            // above all, keeps EQUAL.
+            let equal = primed && self.use_primed_pipeline;
+            let owns = clear.is_some();
+            if equal && !owns {
+                let (ground, rest): (Vec<_>, Vec<_>) =
+                    opaque_buckets.iter().partition(|&&(_, _, start, _)| raws.get(start as usize).is_some_and(is_terrain));
+                rp.set_pipeline(&self.pipeline);
+                draw(&mut rp, &ground);
+                rp.set_pipeline(&self.primed_pipeline);
+                draw(&mut rp, &rest);
+                equal_buckets = rest.len();
+            } else {
+                rp.set_pipeline(if equal { &self.primed_pipeline } else { &self.pipeline });
+                draw(&mut rp, &opaque_buckets);
+                equal_buckets = if equal { opaque_buckets.len() } else { 0 };
+            }
             if !skin_opaque.is_empty() {
                 rp.set_pipeline(if equal { &self.skin_primed_pipeline } else { &self.skin_pipeline });
                 draw(&mut rp, &skin_opaque);
@@ -4376,6 +4400,7 @@ impl Raster {
             draw_flsl(&mut rp, &flsl_blended);
         }
         gpu.queue.submit([encoder.finish()]);
+        self.last_pass_equal_buckets = equal_buckets;
     }
 
     /// Draw the `.flsl` surfaces that read `sceneColor`, once the scene behind
@@ -5186,6 +5211,12 @@ impl Raster {
     /// than clearing it: true for a pass drawn straight after a prepass.
     pub fn last_pass_kept_primed_depth(&self) -> bool {
         self.last_pass_kept_primed_depth
+    }
+
+    /// How many opaque buckets the last colour pass drew through the
+    /// depth-Equal pipeline, each visible pixel shaded once.
+    pub fn last_pass_equal_buckets(&self) -> usize {
+        self.last_pass_equal_buckets
     }
 
     /// Keep the depth the prepass primed in the colour pass (the default), or

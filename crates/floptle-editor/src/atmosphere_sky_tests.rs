@@ -575,29 +575,15 @@ fn froxel_fog_draws_the_marched_fog() {
     assert!(mean < 2.0, "the froxel fog is {mean:.2}/255 from the marched fog on average");
 }
 
-/// **A stack of cut-out cards shades each visible pixel once.** Eighty
-/// cards one behind another, each a picture whose alpha runs from holes
-/// through half-transparent texels (which the colour pass draws solid) to
-/// solid, each shifted so its holes show different cards behind. The depth
-/// prepass primes exactly the texels the colour pass draws, and the colour
-/// pass then tests depth EQUAL with no cut of its own, so the GPU tests
-/// depth before shading and a hidden card is never shaded. The picture is
-/// the same, pixel for pixel, as the old pipeline over the same primed
-/// depth and as a colour pass that clears it; with the prepass priming only
-/// the certainly-opaque texels, as it did, the half-transparent ones vanish
-/// under EQUAL and the pictures differ. And the eighty cost about one.
-///
-/// Measured on an RTX 4060 (whole frames at 1600×1200, about 22 ms of each
-/// the readback): one card 22.4 ms; eighty 22.2 with this pipeline, 23.0
-/// with the old one over the same primed depth, 28.9 clearing it. This GPU
-/// tests depth early even for a shader that may discard, so the pipeline's
-/// own gain is small here; on GPUs that stop testing early at a discard it
-/// is the whole difference between those last two.
+/// Eighty cut-out cards one behind another, for the two tests below: each a
+/// picture whose alpha runs from holes through half-transparent texels (which
+/// the colour pass draws solid) to solid, each shifted so its holes show
+/// different cards behind. The editor, the cards, and the folder holding the
+/// picture.
 #[cfg(feature = "editor-ui")]
-#[test]
-fn a_stack_of_cutout_cards_shades_each_visible_pixel_once() {
-    let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
-    let dir = std::env::temp_dir().join(format!("floptle_cutstack_{}", std::process::id()));
+fn cutout_card_stack(tag: &str) -> Option<(crate::Editor, Vec<floptle_core::Entity>, std::path::PathBuf)> {
+    let mut ed = crate::offscreen::test_editor_with_gpu()?;
+    let dir = std::env::temp_dir().join(format!("floptle_cutstack_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
     // Half holes, three in ten half-transparent (drawn solid), the rest
@@ -651,6 +637,31 @@ fn a_stack_of_cutout_cards_shades_each_visible_pixel_once() {
     ed.camera.position = DVec3::ZERO;
     ed.camera.pitch = 0.0;
     ed.camera.yaw = 0.0;
+    Some((ed, cards, dir))
+}
+
+/// **A stack of cut-out cards shades each visible pixel once.** Eighty
+/// cards one behind another, each a picture whose alpha runs from holes
+/// through half-transparent texels (which the colour pass draws solid) to
+/// solid, each shifted so its holes show different cards behind. The depth
+/// prepass primes exactly the texels the colour pass draws, and the colour
+/// pass then tests depth EQUAL with no cut of its own, so the GPU tests
+/// depth before shading and a hidden card is never shaded. The picture is
+/// the same, pixel for pixel, as the old pipeline over the same primed
+/// depth and as a colour pass that clears it; with the prepass priming only
+/// the certainly-opaque texels, as it did, the half-transparent ones vanish
+/// under EQUAL and the pictures differ. And the eighty cost about one.
+///
+/// Measured on an RTX 4060 (whole frames at 1600×1200, about 22 ms of each
+/// the readback): one card 22.4 ms; eighty 22.2 with this pipeline, 23.0
+/// with the old one over the same primed depth, 28.9 clearing it. This GPU
+/// tests depth early even for a shader that may discard, so the pipeline's
+/// own gain is small here; on GPUs that stop testing early at a discard it
+/// is the whole difference between those last two.
+#[cfg(feature = "editor-ui")]
+#[test]
+fn a_stack_of_cutout_cards_shades_each_visible_pixel_once() {
+    let Some((mut ed, cards, dir)) = cutout_card_stack("plain") else { return };
     let (w, h) = (1600u32, 1200u32);
     let cam = ed.camera.render_camera();
     let shoot = |ed: &mut crate::Editor, keep: bool, equal: bool, frames: u32| {
@@ -833,4 +844,51 @@ fn sun_map_draws_stop_at_the_shadow_distance() {
     assert!(c.triangles >= 12 * near as u64 / 2 && c.triangles % 12 == 0, "perf.counts triangles {} for a frame of cubes", c.triangles);
     let differ = all.iter().zip(&culled).filter(|(a, b)| a != b).count();
     assert_eq!(differ, 0, "leaving out what lies outside the sun's box changed {differ} channel values of the picture");
+}
+
+/// **…and does so with raymarched matter in the frame.** The same eighty
+/// cards with a blob in front of part of them: the blob is marched between
+/// the depth prepass and the colour pass, which then loads the colour
+/// rather than clearing it. The cards still draw through the depth-Equal
+/// pipeline (the march writes depth only where its matter is in front, so
+/// the prepass depth stands under every card it did not cover), and the
+/// picture is the same as the ordinary test's.
+///
+/// Measured on an RTX 4060 (whole frames at 1600×1200): 24 ms either way,
+/// this GPU testing depth early even for a shader that may discard. What
+/// cost was the offscreen path marching over a cleared depth, which left
+/// every hidden card to be shaded: 31.9 ms.
+#[cfg(feature = "editor-ui")]
+#[test]
+fn cutout_cards_shade_once_under_raymarched_matter() {
+    let Some((mut ed, _cards, dir)) = cutout_card_stack("marched") else { return };
+    let blob = ed.world.spawn();
+    ed.world.insert(blob, Transform { translation: DVec3::new(-1.5, 0.0, -3.0), ..Transform::IDENTITY });
+    ed.world.insert(blob, Matter::Blob { scale: 1.2 });
+    let (w, h) = (1600u32, 1200u32);
+    let cam = ed.camera.render_camera();
+    let shoot = |ed: &mut crate::Editor, equal: bool, frames: u32| {
+        ed.raster.as_mut().unwrap().set_use_primed_pipeline(equal);
+        let mut px = Vec::new();
+        let t = std::time::Instant::now();
+        for _ in 0..frames {
+            px = crate::shot::render_frame_pixels(ed, &cam, None, w, h, !0, false).expect("a frame");
+        }
+        let r = ed.raster.as_ref().unwrap();
+        (px, t.elapsed().as_secs_f64() / frames as f64, (r.last_pass_kept_primed_depth(), r.last_pass_equal_buckets()))
+    };
+    let _ = shoot(&mut ed, true, 2);
+    let _ = shoot(&mut ed, false, 2);
+    let (new, t_new, (owned, equal)) = shoot(&mut ed, true, 8);
+    let (old, t_old, _) = shoot(&mut ed, false, 8);
+    let _ = std::fs::remove_dir_all(&dir);
+    if let Ok(out) = std::env::var("FLOPTLE_CUTSTACK_PNG") {
+        let tex = floptle_render::TextureData { pixels: new.clone(), width: w, height: h };
+        std::fs::write(std::path::Path::new(&out).join("cutstack_marched.png"), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+    }
+    let _ = (t_new, t_old);
+    assert!(!owned, "the fixture: no raymarch pass drew between the prepass and the colour pass");
+    assert!(equal > 0, "under raymarched matter no card bucket drew depth-Equal");
+    let differ = new.iter().zip(&old).filter(|(x, y)| x.abs_diff(**y) > 1).count();
+    assert_eq!(differ, 0, "under raymarched matter the depth-Equal pipeline drew a different picture from the old one");
 }
