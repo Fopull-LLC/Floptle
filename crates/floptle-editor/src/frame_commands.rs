@@ -1507,6 +1507,18 @@ impl Editor {
                     self.terrain_gpu_dirty = true;
                 }
             }
+        if let Some(f) = cmd.set_fine_paint.take()
+            && let Some(e) = self.target_terrain()
+            && self.world.get::<floptle_core::TerrainFinePaint>(e).map_or(0, |f| f.0) != f {
+                // The switch is the node's, so it saves with the scene and undoes
+                // with it; the field follows it in `sync_terrain_meshes`.
+                self.record();
+                if f == 0 {
+                    self.world.remove::<floptle_core::TerrainFinePaint>(e);
+                } else {
+                    self.world.insert(e, floptle_core::TerrainFinePaint(f));
+                }
+            }
         if cmd.fill_bounds
             && let Some(e) = self.target_terrain() {
                 let id = match self.world.get::<Matter>(e) {

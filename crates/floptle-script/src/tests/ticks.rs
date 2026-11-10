@@ -1274,3 +1274,44 @@ fn a_game_chooses_how_its_terrain_s_curved_ground_is_drawn() {
     host.set_playing(false);
     assert_eq!(host.terrain_shape(), None, "Stop kept the game's choice");
 }
+
+/// `node:setTerrainFinePaint` writes the node's switch, which saves with the
+/// scene, and `node:terrainFinePaint` reads it back; a factor the field does
+/// not paint at is an error naming the ones it does, not a silent nothing.
+#[test]
+fn a_terrain_node_says_and_takes_how_finely_it_paints() {
+    let dir = std::env::temp_dir().join(format!("floptle-finepaint-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "fine",
+        r#"
+function look(node)
+  node.x = node:terrainFinePaint()
+  node:setTerrainFinePaint(2)
+  local ok, err = pcall(function() node:setTerrainFinePaint(3) end)
+  node.y = ok and 1 or 0
+  assert(tostring(err):find("0 %(whole voxels%), 2 or 4"), tostring(err))
+end
+function off(node)
+  node.x = node:terrainFinePaint()
+  node:setTerrainFinePaint(nil)
+end
+"#,
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, floptle_core::Name("Ground".into()));
+    world.insert(e, Matter::Terrain { id: 1, collision: Default::default() });
+    world.insert(e, floptle_core::TerrainFinePaint(4));
+    let mut host = ScriptHost::new();
+    assert!(host.call_action(&mut world, &dir, e.index(), "fine", "look"), "{:?}", host.errors());
+    let at = world.get::<Transform>(e).unwrap().translation;
+    assert_eq!((at.x, at.y), (4.0, 0.0), "it read the 4 the node held, and 3 was refused");
+    assert_eq!(world.get::<floptle_core::TerrainFinePaint>(e), Some(&floptle_core::TerrainFinePaint(2)));
+    assert!(host.call_action(&mut world, &dir, e.index(), "fine", "off"), "{:?}", host.errors());
+    assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 2.0, "it read its own write back");
+    assert!(world.get::<floptle_core::TerrainFinePaint>(e).is_none(), "nil paints whole voxels again");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1035,6 +1035,20 @@ pub struct NavMeshExclude;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TerrainGen(pub String);
 
+/// Paint finer than the voxels on this Terrain node: each voxel painted
+/// with a texture slot holds 2 or 4 smaller cells a side, so a stroke
+/// narrower than a voxel keeps its own shape. 0 (or no component) paints
+/// whole voxels, as every terrain did before. Only blocks someone paints
+/// fine cost memory. Written by the Terrain tab and
+/// `node:setTerrainFinePaint`; read by `floptle_field::ChunkField::set_fine_paint`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerrainFinePaint(pub u8);
+
+impl TerrainFinePaint {
+    /// The factors a terrain can paint at: off, 2 or 4 cells a voxel side.
+    pub const FACTORS: [u8; 3] = [0, 2, 4];
+}
+
 /// The planet generator's current version: what a spec made today is stamped
 /// with, so ground generated from it stays as it is when a later engine
 /// changes how a planet is made. Each change to the generator's output takes

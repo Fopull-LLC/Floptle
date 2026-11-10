@@ -178,6 +178,7 @@ impl EditorTabViewer<'_> {
         let project_root = self.project_root;
         let terrain_present = self.terrain_present;
         let terrain_stats = self.terrain_stats;
+        let terrain_fine_paint = self.terrain_fine_paint;
 
         // Voxel density for new terrains — an honest units-per-voxel (Terrain 2.0),
         // not a cell count. Cells are always cubic; existing terrains keep theirs.
@@ -258,6 +259,27 @@ impl EditorTabViewer<'_> {
                                 }
                             }
                         });
+                    }
+                });
+            }
+            // Fine paint: the target terrain's own switch. Shown with what it
+            // costs, since the cost is per painted block and only grows.
+            if let Some((factor, bytes)) = terrain_fine_paint {
+                ui.horizontal(|ui| {
+                    ui.label("fine paint")
+                        .on_hover_text(
+                            "Paint textures finer than the voxels on this terrain: a stroke narrower than a voxel keeps \
+                             its own shape. Only blocks painted fine cost memory: 4 KiB each at 2×, 32 KiB at 4×. \
+                             Off keeps what was painted fine and draws it whole-voxel. Moving between 2× and 4× \
+                             resamples it, which undo does not reverse.",
+                        );
+                    for (f, name) in [(0u8, "Off"), (2, "2×"), (4, "4×")] {
+                        if ui.selectable_label(factor == f, name).clicked() && factor != f {
+                            cmd.set_fine_paint = Some(f);
+                        }
+                    }
+                    if bytes > 0 {
+                        ui.small(format!("{:.1} MB", bytes as f64 / 1.0e6));
                     }
                 });
             }

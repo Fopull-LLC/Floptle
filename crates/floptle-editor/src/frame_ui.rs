@@ -1335,6 +1335,12 @@ impl Editor {
         scene_name: &String,
         tool: Tool,
     ) {
+        // The Terrain tab's Fine paint row: read before the dock borrows self.
+        let terrain_fine_paint = self.target_terrain().map(|e| {
+            let f = self.world.get::<floptle_core::TerrainFinePaint>(e).map_or(0, |f| f.0);
+            let bytes = self.terrains.get(&e).map_or(0, |t| t.field.fine_bytes());
+            (f, bytes)
+        });
         let dock_state = self.dock_state.get_or_insert_with(default_dock);
         // ⚙ Settings tab inputs. Only gathered when the tab is actually open,
         // so a closed Settings tab costs nothing per frame.
@@ -1554,6 +1560,7 @@ impl Editor {
             terrain_border_default: self.project.terrain_border_resolved(),
             terrain_present,
             terrain_stats,
+            terrain_fine_paint,
             assets_grid: &mut self.assets_grid,
             assets_grid_dir: &mut self.assets_grid_dir,
             asset_thumbs: &mut self.asset_thumbs,

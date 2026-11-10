@@ -647,6 +647,8 @@ struct EditorCmd {
     focus_tiles: bool,
     /// Fill the whole target terrain with a color or texture slot.
     fill_terrain: Option<TerrainFill>,
+    /// The Terrain tab's Fine paint: the target terrain's new factor (0, 2, 4).
+    set_fine_paint: Option<u8>,
     /// "Fill bounds" tool: lay flat ground across the active terrain (uses the brush's
     /// fill_top / fill_floor / fill_inset settings).
     fill_bounds: bool,
@@ -1139,6 +1141,9 @@ struct EditorTabViewer<'a> {
     terrain_present: bool,
     /// Terrain stats for the tab: `(volumes, data chunks, resident bytes)`.
     terrain_stats: Option<(usize, usize, usize)>,
+    /// How finely the terrain the tab paints paints (`TerrainFinePaint`), and
+    /// the bytes its fine cells hold; None when no one terrain is the target.
+    terrain_fine_paint: Option<(u8, usize)>,
     /// Asset browser view mode (false = tree, true = grid) + the grid's folder.
     assets_grid: &'a mut bool,
     assets_grid_dir: &'a mut PathBuf,

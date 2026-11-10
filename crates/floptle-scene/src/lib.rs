@@ -133,6 +133,10 @@ pub struct NodeDoc {
     /// See [`floptle_core::TerrainGen`] (G2 galaxy streaming).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terrain_gen: Option<String>,
+    /// Paint finer than the voxels: 2 or 4 cells a voxel side, on a Terrain
+    /// node. See [`floptle_core::TerrainFinePaint`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terrain_fine_paint: Option<u8>,
     /// The "collidable" switch: a static collider auto-shaped from this node's geometry
     /// (no dynamic rigidbody needed). See [`floptle_core::Collidable`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -4779,6 +4783,9 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if let Some(spec) = &node.terrain_gen {
         world.insert(e, floptle_core::TerrainGen(spec.clone()));
     }
+    if let Some(f) = node.terrain_fine_paint.filter(|f| *f != 0) {
+        world.insert(e, floptle_core::TerrainFinePaint(f));
+    }
     if node.trigger {
         world.insert(e, floptle_core::Trigger);
     }
@@ -5059,6 +5066,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let paint = world.get::<floptle_core::VertexPaint>(e).map(|p| p.id);
         let tex_paint = world.get::<floptle_core::TexturePaint>(e).map(|p| p.id);
         let terrain_gen = world.get::<floptle_core::TerrainGen>(e).map(|g| g.0.clone());
+        let terrain_fine_paint = world.get::<floptle_core::TerrainFinePaint>(e).map(|f| f.0).filter(|f| *f != 0);
         let trigger = world.get::<floptle_core::Trigger>(e).is_some();
         let nav_exclude = world.get::<floptle_core::NavMeshExclude>(e).is_some();
         let visible = world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
@@ -5155,6 +5163,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             paint,
             tex_paint,
             terrain_gen,
+            terrain_fine_paint,
             collidable,
             trigger,
             nav_exclude,
@@ -5912,6 +5921,7 @@ mod tests {
                     tex_paint: None,
                     // exercise the genspec round-trip (G2 on-demand terrain)
                     terrain_gen: Some("(seed:99,radius:42.0)".into()),
+                    terrain_fine_paint: Some(4), // and how finely it paints
                     collidable: true,    // exercise the collidable round-trip
                     nav_exclude: false,
                     trigger: true,       // exercise the trigger round-trip
@@ -5999,6 +6009,7 @@ mod tests {
                     id: None,
                     parent_id: None,
                     terrain_gen: None,
+                    terrain_fine_paint: None,
                     name: "blob".into(),
                     transform: TransformDoc::default(),
                     matter: MatterDoc::Blob { scale: 1.3 },
@@ -6052,6 +6063,7 @@ mod tests {
                     id: None,
                     parent_id: None,
                     terrain_gen: None,
+                    terrain_fine_paint: None,
                     name: "lamp".into(),
                     transform: TransformDoc::default(),
                     matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default(), shadows: false, spot: None },
@@ -6102,6 +6114,7 @@ mod tests {
                     id: None,
                     parent_id: None,
                     terrain_gen: None,
+                    terrain_fine_paint: None,
                     name: "eye".into(),
                     transform: TransformDoc::default(),
                     matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new(), post_after: false, draws: Default::default(), near: 0.05, far: 300_000.0 },
@@ -6257,6 +6270,7 @@ mod tests {
         // everything the author disabled back on — silently, and all at once.
         assert!(cube.disabled, "disabled flag lost in round-trip");
         assert!(cube.collidable, "collidable flag lost in round-trip");
+        assert_eq!(cube.terrain_fine_paint, Some(4), "the fine-paint switch lost in round-trip");
         assert!(!cube.visible, "visible flag lost in round-trip");
         assert!(!cube.cast_shadow, "cast_shadow opt-out lost in round-trip");
         assert_eq!(cube.surface_friction, Some(0.1), "surface friction lost in round-trip");

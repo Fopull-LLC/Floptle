@@ -1777,6 +1777,12 @@ impl Editor {
                     r.stale.extend(drawn);
                 }
             }
+            // How finely its ground is painted: the node's own switch. The
+            // pages follow in `sync_fine_paint`, which sees the factor move.
+            let want_fine = self.world.get::<floptle_core::TerrainFinePaint>(*e).map_or(0, |f| f.0);
+            if t.field.fine_paint() != want_fine {
+                t.field.set_fine_paint(want_fine);
+            }
             let want_reach = edge_reach_for(&self.terrain_tex_blend, &self.terrain_tex_rough, t.field.voxel());
             if t.field.slot_edge_reach() != want_reach {
                 t.field.set_slot_edge_reach(want_reach);
@@ -2970,6 +2976,18 @@ impl Editor {
                 }
                 m => terrain.field.sculpt(m, hit, r_local, brush.strength, brush.profile),
             };
+            // A texture dab under half a voxel on a terrain that paints fine
+            // writes only the cells finer than a voxel: no chunk to re-mesh,
+            // but an edit all the same, which the stroke's undo step and the
+            // unsaved scene must hold. Its blocks reach the GPU through
+            // `sync_fine_paint`.
+            if is_paint
+                && brush.tex_slot >= 0
+                && terrain.field.fine_paint() != 0
+                && r_local < 0.5 * terrain.field.voxel()
+            {
+                self.stroke_dabbed = true;
+            }
             if !touched.is_empty() {
                 self.stroke_dabbed = true; // mark this stroke as worth an undo step
                 // Shadow-proxy refresh + atlas partial upload + chunk remesh queue.

@@ -57,7 +57,7 @@ pub use matter::{
     Parent,
     Parallax, ParticleSystem, Persistent, RepeatIndex, RigidBody, SceneTag, ScreenShader, Shadow2D, Shape, SortMode, Sorting, Spin, Sprite, Sprites,
     Tags,
-    TerrainGen, TexturePaint, Trigger, VertexPaint, WaterKind, TERRAIN_GENERATOR,
+    TerrainFinePaint, TerrainGen, TexturePaint, Trigger, VertexPaint, WaterKind, TERRAIN_GENERATOR,
     Visible, DEFAULT_SORTING_LAYER, EMPTY_TILE, SORT_LAYER_STEP, SORT_ORDER_STEP,
     SORT_Y_BANDS, infers_2d, rank_offset, resolve_2d, resolve_shadow_2d, sorting_offset,
 };

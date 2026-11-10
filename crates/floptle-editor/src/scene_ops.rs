@@ -219,6 +219,9 @@ impl Editor {
             // …and its joint, so a duplicated wheel is still a wheel.
             joint: self.world.get::<floptle_core::joint::Joint>(e).map(floptle_scene::JointDoc::from),
             terrain_gen,
+            // …and how finely its ground is painted, so a duplicated terrain
+            // keeps the strokes it can draw.
+            terrain_fine_paint: self.world.get::<floptle_core::TerrainFinePaint>(e).map(|f| f.0).filter(|f| *f != 0),
             name,
             transform,
             matter: MatterDoc::from(matter),
@@ -475,6 +478,7 @@ impl Editor {
             paint,
             tex_paint,
             terrain_gen,
+            terrain_fine_paint,
             collidable,
             trigger,
             nav_exclude,
@@ -521,6 +525,7 @@ impl Editor {
         self.world.remove::<floptle_core::Disabled>(e);
         self.world.remove::<floptle_core::SurfaceFriction>(e);
         self.world.remove::<floptle_core::Collidable>(e);
+        self.world.remove::<floptle_core::TerrainFinePaint>(e);
         self.world.remove::<floptle_core::Trigger>(e);
         self.world.remove::<floptle_core::NavMeshExclude>(e);
         self.world.remove::<floptle_core::Visible>(e);
@@ -616,6 +621,7 @@ impl Editor {
             camera_2d: None,
             joint: None,
             terrain_gen: None,
+            terrain_fine_paint: None,
             name: name.into(),
             transform,
             matter,
@@ -866,6 +872,7 @@ impl Editor {
                 camera_2d: None,
                 joint: None,
                 terrain_gen: None,
+                terrain_fine_paint: None,
                 name,
                 transform: TransformDoc {
                     translation: [pos.x, pos.y, pos.z],

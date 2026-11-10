@@ -1852,6 +1852,9 @@ pub(crate) struct SceneMirror {
     /// rather than as nil, because "Default layer, order 0" is the true answer
     /// and nil would make every caller write the same fallback.
     pub(crate) sorting: HashMap<u32, (String, i32, &'static str)>,
+    /// Each Terrain node's fine-paint factor (2 or 4), for
+    /// `node:terrainFinePaint()`. Absent means it paints whole voxels.
+    pub(crate) fine_paint: HashMap<u32, u8>,
     /// UI elements' current text (so a script can read `node.text`).
     ui_texts: HashMap<u32, String>,
     /// UI elements' current style name (so a script can read `node.style`).
@@ -2357,6 +2360,9 @@ pub enum RichSet {
     /// On-demand generation spec (RON `PlanetFill`) for a Terrain node —
     /// `None` clears it. See `floptle_core::TerrainGen` (G2 galaxy streaming).
     TerrainGen(Option<String>),
+    /// `node:setTerrainFinePaint(factor)`: 0, 2 or 4 (checked at the call).
+    /// See `floptle_core::TerrainFinePaint`.
+    TerrainFinePaint(u8),
     /// `node:setParent(other | nil [, { keepWorld = false }])` — move the node
     /// under another (or to the top level). `keep_world` holds it where it is
     /// in the world; off, its local numbers are kept and it moves with the

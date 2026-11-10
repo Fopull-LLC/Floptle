@@ -16,7 +16,7 @@ each group, and meant to be searched.
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 231
 - [node — transform & body fields](#node--transform--body-fields) — 45
-- [node — methods & handles](#node--methods--handles) — 39
+- [node — methods & handles](#node--methods--handles) — 41
 - [vectors, directions & easing](#vectors-directions--easing) — 51
 - [scene lookups & raycast](#scene-lookups--raycast) — 18
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
@@ -1438,6 +1438,10 @@ node:setSurfaceFriction(0.1) — how slippery this node's surface is (a static b
 
 node:setTerrain(id) — make the node a Terrain volume with that id; fill it with terrain.generatePlanet(id, opts).
 
+### `node:setTerrainFinePaint`
+
+node:setTerrainFinePaint(factor) — paint finer than the voxels on this Terrain node: 2 or 4 cells to a voxel side, so a texture stroke narrower than a voxel keeps its own shape instead of filling whole voxels. 0 or nil paints whole voxels, as a terrain always has. Only the blocks someone paints fine cost memory (terrain.stats().finePaint). Turning it off keeps what was painted fine, saved, and draws it whole-voxel; turning it on again shows it. Moving between 2 and 4 resamples what was painted, which does not undo. The Terrain tab's Fine paint sets the same.
+
 ### `node:setTerrainGen`
 
 node:setTerrainGen(opts) — attach an ON-DEMAND generation spec (the same opts table terrain.generatePlanet takes): the body's field generates in the background when something first approaches, so no field file is needed at all — a rolled galaxy is playable instantly and unvisited worlds cost one scene node. Player edits saved under terrain.saveDir take priority over regeneration. nil clears.
@@ -1463,6 +1467,10 @@ Not a Material. A Material says what a thing is MADE OF and supersedes the mater
 ### `node:sound`
 
 node:sound() — the handle for this node's Audio Source component. :play() (restarts), :stop(), :pause(), :resume(), :setClip("audio/x.ogg"), :seek(secs), :isPlaying(), :isLoading(), :position(). Tunables (volume/pitch/distances/…) live on node:getcomponent("AudioSource").
+
+### `node:terrainFinePaint`
+
+node:terrainFinePaint() → 0, 2 or 4: how finely this Terrain node paints (see node:setTerrainFinePaint). 0 for a node that paints whole voxels, or is not a terrain.
 
 ### `node:uiRect`
 
@@ -3016,7 +3024,7 @@ terrain.paint(x,y,z, radius, r,g,b [, strength [, brush]]) → receipt — recol
 
 ### `terrain.paintTexture`
 
-terrain.paintTexture(x,y,z, radius, slot [, brush]) → receipt — paint a terrain-palette texture slot (1-based, the Terrain tab's palette; 0 clears to flat color). With no brush every voxel in the ball takes the slot, a hard edge. A brush table { hardness, falloff } as terrain.paint takes softens it: a voxel holds one slot, so past the hard core each voxel takes it by chance, its chance the brush's weight there, and the edge comes out ragged at the voxel scale instead of stepped; the same dab twice paints the same voxels, so a seam painted along a path fills in where dabs overlap. Answers the edit's id, or 0 when the queue was full and the edit was refused (see terrain.capacity). How wide a slot fades into its neighbours is the palette's, set per slot in the Terrain tab (blend, in metres, and rough); see Blending materials in the planet-generator guide.
+terrain.paintTexture(x,y,z, radius, slot [, brush]) → receipt — paint a terrain-palette texture slot (1-based, the Terrain tab's palette; 0 clears to flat color). With no brush every voxel in the ball takes the slot, a hard edge. A brush table { hardness, falloff } as terrain.paint takes softens it: a voxel holds one slot, so past the hard core each voxel takes it by chance, its chance the brush's weight there, and the edge comes out ragged at the voxel scale instead of stepped; the same dab twice paints the same voxels, so a seam painted along a path fills in where dabs overlap. Answers the edit's id, or 0 when the queue was full and the edit was refused (see terrain.capacity). How wide a slot fades into its neighbours is the palette's, set per slot in the Terrain tab (blend, in metres, and rough); see Blending materials in the planet-generator guide. On a terrain that paints fine (node:setTerrainFinePaint, or Fine paint in the Terrain tab) a dab narrower than a voxel keeps its own shape: the ball is painted in cells 2 or 4 to a voxel side. A dab under half a voxel across paints only those cells and leaves the voxels, so it reshapes nothing and costs no remesh.
 
 ### `terrain.pending`
 
@@ -3084,7 +3092,7 @@ terrain.slotMaterial(slot) → the palette slot's own Material as a table of nod
 
 ### `terrain.stats`
 
-terrain.stats([id]) → what the terrains hold in memory, in bytes: { total=, field= (voxels at full detail), standIns= (chunks put away as coarse stand-ins), tables=, meshesGpu= (drawn chunk meshes, at their capacity), meshesCpu=, collision= (the physics' triangles for ground near a body: ground no body is within about 64 m of, plus a second of its travel, is let go about once a second and meshed again if anything reaches it), shadow= (the volume shadows and AO are marched through), undo=, dataChunks=, standInChunks=, terrains=, age=, budget=, detail= }, every terrain summed, or terrain id's alone (nil when there is no such terrain). Counted once a second while a game runs; age is how many seconds old the count is (-1 before the first). Chunks shared between copies of a field (the physics' copy, Play's snapshot) are counted once. budget is what terrain.setBudget set (nil for none), and detail how much of its detail the terrain keeps to stay in it, 0 to 1.
+terrain.stats([id]) → what the terrains hold in memory, in bytes: { total=, field= (voxels at full detail), standIns= (chunks put away as coarse stand-ins), tables=, meshesGpu= (drawn chunk meshes, at their capacity), meshesCpu=, collision= (the physics' triangles for ground near a body: ground no body is within about 64 m of, plus a second of its travel, is let go about once a second and meshed again if anything reaches it), shadow= (the volume shadows and AO are marched through), undo=, finePaint= (the cells of fine paint, in the blocks painted fine; 0 when none), dataChunks=, standInChunks=, terrains=, age=, budget=, detail= }, every terrain summed, or terrain id's alone (nil when there is no such terrain). Counted once a second while a game runs; age is how many seconds old the count is (-1 before the first). Chunks shared between copies of a field (the physics' copy, Play's snapshot) are counted once. budget is what terrain.setBudget set (nil for none), and detail how much of its detail the terrain keeps to stay in it, 0 to 1.
 
 ### `terrain.warm`
 

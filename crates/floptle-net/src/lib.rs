@@ -446,6 +446,7 @@ mod tests {
             id: None,
             parent_id: None,
             terrain_gen: None,
+            terrain_fine_paint: None,
             disabled: false,
             name: "arrow".into(),
             transform: floptle_scene::TransformDoc {

@@ -1300,6 +1300,7 @@ mod tests {
                 paint: None,
                 tex_paint: None,
                 terrain_gen: None,
+                terrain_fine_paint: None,
                 collidable: false,
                 trigger: false,
                 nav_exclude: false,

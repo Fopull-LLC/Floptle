@@ -2750,6 +2750,13 @@ pub(crate) fn apply_rich_sets(
                     rb.outline = outline;
                 }
             }
+            RichSet::TerrainFinePaint(f) => {
+                if f == 0 {
+                    world.remove::<floptle_core::TerrainFinePaint>(e);
+                } else {
+                    world.insert(e, floptle_core::TerrainFinePaint(f));
+                }
+            }
             RichSet::TerrainGen(spec) => match spec {
                 Some(s) => {
                     world.insert(e, floptle_core::TerrainGen(s));
@@ -6689,6 +6696,35 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                 };
                 q.borrow_mut().push((e, crate::RichSet::TerrainGen(spec)));
                 Ok(())
+            })?,
+        )?;
+    }
+    {
+        // node:setTerrainFinePaint(factor): paint finer than the voxels on
+        // this Terrain node, 2 or 4 cells a voxel side; 0 (or nil) paints
+        // whole voxels. What the Terrain tab's "Fine paint" sets.
+        let q = q.clone();
+        methods.set(
+            "setTerrainFinePaint",
+            lua.create_function(move |_, (this, f): (Table, Option<f64>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let f = f.unwrap_or(0.0);
+                let Some(&factor) = floptle_core::TerrainFinePaint::FACTORS.iter().find(|k| **k as f64 == f) else {
+                    return Err(mlua::Error::runtime(format!(
+                        "node:setTerrainFinePaint({f}): the factor is 0 (whole voxels), 2 or 4"
+                    )));
+                };
+                q.borrow_mut().push((e, crate::RichSet::TerrainFinePaint(factor)));
+                Ok(())
+            })?,
+        )?;
+        // node:terrainFinePaint() -> 0, 2 or 4: the read half.
+        let scene = shared.scene.clone();
+        methods.set(
+            "terrainFinePaint",
+            lua.create_function(move |_, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                Ok(scene.borrow().fine_paint.get(&e).copied().unwrap_or(0))
             })?,
         )?;
     }

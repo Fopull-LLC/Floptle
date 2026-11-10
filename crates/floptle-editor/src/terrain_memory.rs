@@ -24,6 +24,7 @@ impl crate::Editor {
                 s.field += m.data as u64;
                 s.stand_ins += m.stand_ins as u64;
                 s.tables += m.tables as u64;
+                s.fine_paint += m.fine as u64;
                 if chunks {
                     s.data_chunks = m.data_chunks as u64;
                     s.stand_in_chunks = m.stand_in_chunks as u64;

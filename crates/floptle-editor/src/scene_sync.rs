@@ -1150,7 +1150,7 @@ mod shadow_atlas_tests {
     /// the camera; the number of blue pixels in the picture, the picture, and
     /// the editor (for a second look).
     #[cfg(feature = "editor-ui")]
-    fn fine_paint_view(tag: &str, factor: u8, dabs: &[(f32, f32)], draw_factor: u8) -> Option<(usize, Vec<u8>)> {
+    fn fine_paint_view(tag: &str, factor: u8, dabs: &[(f32, f32)], draw_factor: u8, border: u32) -> Option<(usize, Vec<u8>)> {
         let mut ed = crate::offscreen::test_editor_with_gpu()?;
         let dir = std::env::temp_dir().join(format!("floptle_fine_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1169,6 +1169,9 @@ mod shadow_atlas_tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        // The blue slot's border style, the one fine paint draws its outline in.
+        ed.terrain_tex_border = vec![crate::terrain_edit::SlotBorder::default(); 3];
+        ed.terrain_tex_border[2].style = border;
         let mut field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
             seed: 8,
             radius: 120.0,
@@ -1185,8 +1188,11 @@ mod shadow_atlas_tests {
         for &(dx, r) in dabs {
             field.paint_texture(top + Vec3::new(dx, 0.0, 0.0), r, 3);
         }
-        field.set_fine_paint(draw_factor);
-        add_body(&mut ed, 1, DVec3::ZERO, &field);
+        // Drawn as the node says, as a scene's Terrain tab would set it.
+        let body = add_body(&mut ed, 1, DVec3::ZERO, &field);
+        if draw_factor != 0 {
+            ed.world.insert(body, floptle_core::TerrainFinePaint(draw_factor));
+        }
         settle(&mut ed);
         let sun = ed.world.spawn();
         ed.world.insert(sun, Transform { rotation: floptle_core::math::Quat::from_rotation_x(-1.2), ..Transform::IDENTITY });
@@ -1221,9 +1227,9 @@ mod shadow_atlas_tests {
         let px_m2 = (2.0 * 4.0 * 30f32.to_radians().tan() / 320.0).powi(2);
         let mut seen = Vec::new();
         for f in [2u8, 4] {
-            let Some((small, _)) = fine_paint_view(&format!("small{f}"), f, &[(0.0, 0.35)], f) else { return };
-            let (big, _) = fine_paint_view(&format!("big{f}"), f, &[(0.0, 0.7)], f).unwrap();
-            let (off, _) = fine_paint_view(&format!("off{f}"), f, &[(0.0, 0.7)], 0).unwrap();
+            let Some((small, _)) = fine_paint_view(&format!("small{f}"), f, &[(0.0, 0.35)], f, 0) else { return };
+            let (big, _) = fine_paint_view(&format!("big{f}"), f, &[(0.0, 0.7)], f, 0).unwrap();
+            let (off, _) = fine_paint_view(&format!("off{f}"), f, &[(0.0, 0.7)], 0, 0).unwrap();
             seen.push((f, off, small as f32 * px_m2, big as f32 * px_m2));
         }
         for &(f, off, small, big) in &seen {
@@ -1237,6 +1243,40 @@ mod shadow_atlas_tests {
         assert!(big > 8.0 * small, "at 4x a stroke of twice the radius drew {big:.3} m² against {small:.3}: the fine shape is lost");
     }
 
+    /// **A sharp border draws a fine stroke's outline crisp.** The blue
+    /// slot's border style decides how fine paint's outline is drawn, as it
+    /// decides a border between voxels: soft fades across a sub-voxel,
+    /// sharp is one anti-aliased pixel. At 4× a sub-voxel is 0.375 m, 26
+    /// pixels here, so a soft outline is a wide band of part-blue pixels
+    /// and a sharp one a thin line, round the same shape.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn a_sharp_border_follows_the_fine_shape() {
+        // Blue against red: the painted slot draws about +170, the ground
+        // about -170, and a pixel part way between them is the outline.
+        let split = |px: &[u8]| {
+            let (mut inside, mut fringe) = (0usize, 0usize);
+            for p in px.as_chunks::<4>().0 {
+                let d = p[2] as i32 - p[0] as i32;
+                if d > 120 {
+                    inside += 1;
+                } else if d > -120 {
+                    fringe += 1;
+                }
+            }
+            (inside, fringe)
+        };
+        let dabs = [(0.0, 0.7)];
+        let Some((_, soft)) = fine_paint_view("soft", 4, &dabs, 4, 0) else { return };
+        let (_, sharp) = fine_paint_view("sharp", 4, &dabs, 4, 1).unwrap();
+        let ((soft_in, soft_fringe), (sharp_in, sharp_fringe)) = (split(&soft), split(&sharp));
+        let seen = format!("soft {soft_in} inside + {soft_fringe} fringe, sharp {sharp_in} + {sharp_fringe}");
+        assert!(soft_fringe > 200, "the fixture: a soft outline at 4x is a wide band ({seen})");
+        assert!(sharp_fringe * 4 < soft_fringe, "a sharp outline is as wide as a soft one ({seen})");
+        let (a, b) = ((soft_in + soft_fringe) as f32, (sharp_in + sharp_fringe) as f32);
+        assert!((b / a - 1.0).abs() < 0.5, "a sharp outline drew a different shape: {b} pixels of blue against {a} ({seen})");
+    }
+
     /// **Fine paint switched on draws nothing new until something is
     /// painted fine.** A terrain with fine paint on and no pages draws
     /// exactly, pixel for pixel, what it draws with fine paint off: a
@@ -1245,8 +1285,8 @@ mod shadow_atlas_tests {
     #[test]
     fn fine_paint_off_is_pixel_identical() {
         // A voxel-sized dab, so the picture has a border in it.
-        let Some((_, off)) = fine_paint_view("idoff", 0, &[(0.0, 2.0)], 0) else { return };
-        let (_, on) = fine_paint_view("idon", 0, &[(0.0, 2.0)], 2).unwrap();
+        let Some((_, off)) = fine_paint_view("idoff", 0, &[(0.0, 2.0)], 0, 0) else { return };
+        let (_, on) = fine_paint_view("idon", 0, &[(0.0, 2.0)], 2, 0).unwrap();
         let differ = off.iter().zip(&on).filter(|(a, b)| a != b).count();
         assert_eq!(differ, 0, "fine paint on with no pages changed {differ} bytes of the picture");
     }

@@ -37,6 +37,9 @@ pub struct TerrainStats {
     pub shadow: u64,
     /// Undo snapshots of its edits.
     pub undo: u64,
+    /// Fine paint: the cells finer than a voxel, in the blocks that were
+    /// painted fine (`node:setTerrainFinePaint`). 0 when nobody did.
+    pub fine_paint: u64,
     /// Chunks at full detail, and chunks that are stand-ins.
     pub data_chunks: u64,
     pub stand_in_chunks: u64,
@@ -45,7 +48,7 @@ pub struct TerrainStats {
 impl TerrainStats {
     /// Every byte counted.
     pub fn total(&self) -> u64 {
-        self.field + self.stand_ins + self.tables + self.meshes_gpu + self.meshes_cpu + self.collision + self.shadow + self.undo
+        self.field + self.stand_ins + self.tables + self.meshes_gpu + self.meshes_cpu + self.collision + self.shadow + self.undo + self.fine_paint
     }
 
     fn add(&mut self, o: &TerrainStats) {
@@ -57,6 +60,7 @@ impl TerrainStats {
         self.collision += o.collision;
         self.shadow += o.shadow;
         self.undo += o.undo;
+        self.fine_paint += o.fine_paint;
         self.data_chunks += o.data_chunks;
         self.stand_in_chunks += o.stand_in_chunks;
     }
@@ -179,6 +183,7 @@ pub(crate) fn install(lua: &Lua, state: Rc<RefCell<Counted>>) -> mlua::Result<()
             out.set("collision", sum.collision)?;
             out.set("shadow", sum.shadow)?;
             out.set("undo", sum.undo)?;
+            out.set("finePaint", sum.fine_paint)?;
             out.set("dataChunks", sum.data_chunks)?;
             out.set("standInChunks", sum.stand_in_chunks)?;
             out.set("terrains", if id.is_some() { 1 } else { s.terrains.len() })?;

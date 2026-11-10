@@ -121,6 +121,15 @@ textures/grass_pixel.png|blend=1|border=pixel|dither=0.4
 
 Projects keep their soft borders exactly as they were until a slot sets any of these.
 
+### Painting finer than a voxel
+
+A voxel holds one slot, so a texture stroke narrower than a voxel normally fills whole voxels. Turn on **Fine paint** for a terrain in the Terrain tab's paint settings (or `node:setTerrainFinePaint(2)` from a script) and each voxel holds 2 or 4 smaller cells a side, so a thin path or a painted stripe keeps its own shape.
+
+- A dab under half a voxel across paints only the fine cells. It reshapes nothing and costs no remesh.
+- Only blocks you paint fine cost memory: 4 KiB each at 2×, 32 KiB at 4×. `terrain.stats().finePaint` reports the total.
+- The painted slot's border style draws the stroke's outline: soft fades across one fine cell, sharp is a crisp anti-aliased line with its wobble, and pixel steps on the slot's texel grid with its dither. Blending by height does not apply to a fine outline.
+- Turning it off keeps what was painted fine, saved with the terrain, and draws it whole-voxel. Turning it on again shows it. Switching between 2× and 4× resamples what was painted, and undo does not reverse that.
+
 ## Hiding a texture's repeat
 
 A ground texture usually repeats every couple of metres, which looks right up close. From 30 m up, though, the repeat shows as a grid. Two more settings per slot in the Terrain tab break it up. Both are off by default, so a palette that doesn't use them looks exactly as it did.

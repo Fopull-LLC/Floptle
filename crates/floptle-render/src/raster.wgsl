@@ -2144,6 +2144,11 @@ struct FineSplat {
 // sub-voxel that says what its voxel says, or is in a block with no page,
 // is the voxels' share: so a stroke narrower than a voxel keeps its shape,
 // fades out across a block face, and nothing else changes.
+// The share's half-way line is the stroke's outline, and the slot painted
+// most draws it in its own border style, as a border between voxels is:
+// soft fades across a sub-voxel; sharp is one anti-aliased pixel, wobbled;
+// pixel steps on the slot's texel grid with its dither. Derivatives are not
+// to be had in here, so the share's slope is worked out from the corners.
 fn fine_splat(in: VsOut, k: u32, tint: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> FineSplat {
     var out: FineSplat;
     out.w = 0.0;
@@ -2152,13 +2157,14 @@ fn fine_splat(in: VsOut, k: u32, tint: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>
     if (f == 0) {
         return out;
     }
-    let g = in.lpos * bitcast<f32>(fine_word(h + 8u));
-    let s0 = vec3<i32>(floor(g));
-    let fw = g - floor(g);
+    let per_m = bitcast<f32>(fine_word(h + 8u));
+    let gs = in.lpos * per_m;
+    let s0 = vec3<i32>(floor(gs));
+    let fw = gs - floor(gs);
     let bw = 8 * f;
     // The block of the pixel's nearest sub-voxel. Without a page, and with
     // every corner in it, no corner is fine paint.
-    let home = vec3<i32>(round(g));
+    let home = vec3<i32>(round(gs));
     let cp = fine_locate(h, home, f);
     let cb = home - ((home % bw) + bw) % bw;
     if (cp.x == FINE_NONE) {
@@ -2171,6 +2177,8 @@ fn fine_splat(in: VsOut, k: u32, tint: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>
     var wts: array<f32, 8>;
     var n_slots = 0;
     var wp = 0.0;
+    // The share's slope, per sub-voxel.
+    var grad = vec3<f32>(0.0);
     for (var corner = 0u; corner < 8u; corner = corner + 1u) {
         let o = vec3<i32>(i32(corner & 1u), i32((corner >> 1u) & 1u), i32((corner >> 2u) & 1u));
         let wv = mix(vec3<f32>(1.0) - fw, fw, vec3<f32>(o));
@@ -2188,6 +2196,8 @@ fn fine_splat(in: VsOut, k: u32, tint: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>
         let sl = fine_slot(at);
         if (sl == 255u) { continue; }
         wp = wp + w;
+        let sg = vec3<f32>(o) * 2.0 - vec3<f32>(1.0);
+        grad = grad + sg * vec3<f32>(wv.y * wv.z, wv.x * wv.z, wv.x * wv.y);
         var found = false;
         for (var j = 0; j < n_slots; j = j + 1) {
             if (slots[j] == sl) { wts[j] = wts[j] + w; found = true; }
@@ -2197,15 +2207,62 @@ fn fine_splat(in: VsOut, k: u32, tint: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>
     if (wp < 1e-4) {
         return out;
     }
+    // The outline in the style of the slot painted most.
+    var top = 0;
+    for (var j = 1; j < n_slots; j = j + 1) {
+        if (wts[j] > wts[top]) { top = j; }
+    }
+    let t = fine_outline(i32(slots[top]) - 1, wp, grad * per_m, in.lpos, in.lnorm, dpx, dpy);
+    if (t < 1e-4) {
+        return out;
+    }
     // The surface maps are weighed by what each part covers; the voxels'
     // part adds its own at a total weight of one, so scale ours to match.
-    let scale = select(1.0 / (1.0 - wp), 1.0, wp > 0.999);
+    let cover = select(t, 1.0, t > 0.999);
+    let scale = select(1.0 / (1.0 - cover), 1.0, cover >= 1.0) * cover / wp;
     for (var j = 0; j < n_slots; j = j + 1) {
         wts[j] = wts[j] * scale;
     }
-    out.w = select(wp, 1.0, wp > 0.999);
+    out.w = cover;
     out.color = splat_weighted(in, slots, wts, n_slots, tint, dpx, dpy);
     return out;
+}
+
+// How much of a pixel fine paint covers, from `wp`, the share its corners
+// give it, and `grad`, that share's slope per metre: in the border style of
+// palette slot `slot` (0-based; untextured ground, -1, is soft). See
+// `fine_splat`.
+fn fine_outline(slot: i32, wp: f32, grad: vec3<f32>, p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> f32 {
+    if (slot < 0) {
+        return wp;
+    }
+    let r = slot_rec(slot);
+    let style = r.flags.w;
+    if (style == 1u) {
+        // The wobble is metres of noise; the slope turns it into share.
+        let ws = select(0.25, r.border.y, r.border.y > 0.0);
+        let wob = (vnoise(p / ws) - 0.5) * r.border.x * length(grad);
+        let e = max(abs(dot(grad, dpx)) + abs(dot(grad, dpy)), 1e-4);
+        return smoothstep(-e, e, wp - 0.5 + wob);
+    }
+    if (style == 2u) {
+        // The share at the centre of the slot's texel the pixel is in, so
+        // the whole texel shows one or the other.
+        let art = select(f32(textureDimensions(terrain_pal).x), r.classic.w, r.classic.w > 0.0);
+        let texels = art * g.terrain_mask.y * terrain_slot_scale(slot);
+        let pc = (floor(p * texels) + vec3<f32>(0.5)) / texels;
+        let an = abs(n);
+        var cell = vec2<f32>(pc.x, pc.y);
+        if (an.x >= an.y && an.x >= an.z) {
+            cell = pc.zy;
+        } else if (an.y >= an.z) {
+            cell = pc.xz;
+        }
+        let ci = vec2<i32>(floor(cell * texels));
+        let dither = (bayer4(vec2<u32>(bitcast<u32>(ci.x), bitcast<u32>(ci.y))) - 0.5) * r.border.z;
+        return step(0.5, wp + dot(grad, pc - p) + dither);
+    }
+    return wp;
 }
 
 // The slots round a pixel blended by their weights: untextured (slot 0)

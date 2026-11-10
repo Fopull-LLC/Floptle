@@ -1056,6 +1056,18 @@ impl ChunkField {
     }
 
     /// Resident bytes of voxel data — what the 192 MB dense field is measured against.
+    /// Bytes the fine paint's pages hold ([`Self::set_fine_paint`]), as
+    /// cheap as [`Self::memory_bytes`]: one pass over the chunks.
+    pub fn fine_bytes(&self) -> usize {
+        self.chunks
+            .values()
+            .map(|c| match c {
+                Chunk::Data(d) => d.fine_bytes(),
+                _ => 0,
+            })
+            .sum()
+    }
+
     pub fn memory_bytes(&self) -> usize {
         self.chunks
             .values()

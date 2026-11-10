@@ -2848,6 +2848,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         id: None,
         parent_id: None,
         terrain_gen: None,
+        terrain_fine_paint: None,
         name: "Camera".into(),
         transform: floptle_scene::TransformDoc {
             translation: [pos.x as f64, pos.y as f64, pos.z as f64],

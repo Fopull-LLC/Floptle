@@ -7790,6 +7790,7 @@ impl ScriptHost {
         s.sprite_batches.clear();
         s.sprites.clear();
         s.sorting.clear();
+        s.fine_paint.clear();
         s.by_kind.clear();
         s.by_tag.clear();
         for (e, tr) in world.query::<Transform>() {
@@ -8297,6 +8298,9 @@ impl ScriptHost {
                     floptle_core::SortMode::Order => "order",
                 };
                 s.sorting.insert(id, (so.layer.clone(), so.order, mode));
+            }
+            if let Some(f) = world.get::<floptle_core::TerrainFinePaint>(e).filter(|f| f.0 != 0) {
+                s.fine_paint.insert(id, f.0);
             }
             if let Some(spec) = world.get::<floptle_ui::ElementSpec>(e) {
                 if let Some(t) = spec.text.as_ref() {
