@@ -838,7 +838,10 @@ struct DynSlot {
 fn group_by_key<K: Eq + std::hash::Hash + Copy, T: Copy>(
     items: impl Iterator<Item = (K, T)>,
 ) -> Vec<(K, Vec<T>)> {
-    let mut index: std::collections::HashMap<K, usize> = std::collections::HashMap::new();
+    // Fx, not SipHash: the keys are the renderer's own small ids, nothing an
+    // outsider chooses, and this runs per instance in every pass. Order comes
+    // from `groups`, never the map, so the hasher cannot reorder draws.
+    let mut index: rustc_hash::FxHashMap<K, usize> = rustc_hash::FxHashMap::default();
     let mut groups: Vec<(K, Vec<T>)> = Vec::new();
     for (k, v) in items {
         match index.get(&k) {
