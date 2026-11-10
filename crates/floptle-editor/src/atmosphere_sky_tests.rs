@@ -652,12 +652,12 @@ fn cutout_card_stack(tag: &str) -> Option<(crate::Editor, Vec<floptle_core::Enti
 /// the certainly-opaque texels, as it did, the half-transparent ones vanish
 /// under EQUAL and the pictures differ. And the eighty cost about one.
 ///
-/// Measured on an RTX 4060 (whole frames at 1600×1200, about 22 ms of each
-/// the readback): one card 22.4 ms; eighty 22.2 with this pipeline, 23.0
-/// with the old one over the same primed depth, 28.9 clearing it. This GPU
-/// tests depth early even for a shader that may discard, so the pipeline's
-/// own gain is small here; on GPUs that stop testing early at a discard it
-/// is the whole difference between those last two.
+/// The time asserted here is the whole frame's wall clock, about 22 ms of it
+/// reading the picture back, which hides most of what the pipeline saves
+/// (one card 22.4 ms; eighty 22.2 with this pipeline, 23.0 with the old one
+/// over the same primed depth, 28.9 clearing it). By the GPU's own clock the
+/// old pipeline shades the hidden cards: `tests/cutout_cards_cost.rs` holds
+/// that ratio.
 #[cfg(feature = "editor-ui")]
 #[test]
 fn a_stack_of_cutout_cards_shades_each_visible_pixel_once() {
@@ -854,10 +854,10 @@ fn sun_map_draws_stop_at_the_shadow_distance() {
 /// the prepass depth stands under every card it did not cover), and the
 /// picture is the same as the ordinary test's.
 ///
-/// Measured on an RTX 4060 (whole frames at 1600×1200): 24 ms either way,
-/// this GPU testing depth early even for a shader that may discard. What
-/// cost was the offscreen path marching over a cleared depth, which left
-/// every hidden card to be shaded: 31.9 ms.
+/// What it costs is `tests/cutout_cards_cost.rs`'s to measure, by the GPU's
+/// clock: whole frames here are mostly the readback (24 ms either way).
+/// The offscreen path marching over a cleared depth, which left every hidden
+/// card to be shaded, showed even through that: 31.9 ms.
 #[cfg(feature = "editor-ui")]
 #[test]
 fn cutout_cards_shade_once_under_raymarched_matter() {
