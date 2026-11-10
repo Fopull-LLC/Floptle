@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       PKG: ${{ inputs.binary == 'player' && 'floptle-player' || 'floptle-editor' }}
       BIN: ${{ inputs.binary == 'player' && 'floptle-player' || 'floptle' }}
