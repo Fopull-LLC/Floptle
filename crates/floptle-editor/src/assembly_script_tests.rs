@@ -2766,3 +2766,50 @@ fn a_held_force_does_nothing_to_a_coasting_craft_and_coast_false_keeps_it_live()
     let (first, last) = (off[0].1, off[off.len() - 1].1);
     assert!(last > first + 0.1, "off the rails the push must keep turning it, {first} → {last}");
 }
+
+/// A craft coasting on its conic at ×10 toward a wall that stands far above
+/// the body's mean radius: the rails used to carry it straight through,
+/// since the warp's surface rule knew only the radius. Now the step ahead is
+/// swept against what is solid, and the warp drops short of the wall.
+#[test]
+fn time_warp_drops_before_a_coasting_craft_meets_a_wall() {
+    let (mut ed, dir) = project(
+        "warpwall",
+        r#"
+local n, ship = 0, nil
+function fixedUpdate(node, dt)
+  n = n + 1
+  ship = ship or find("Ship")
+  if not ship then return end
+  local i = assembly.info(ship)
+  if n == 2 then assembly.impulseAt(ship, vec3(100 * i.mass, 0, 0), i.com) end
+  if n == 40 then space.warp(10) end
+  if n > 40 then log(string.format("WALL %.1f %.2f %d", space.warp(), i.com.x, n)) end
+end
+"#,
+    );
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 1.0e8;
+    vessel_node(&mut ed, "Ship", DVec3::ZERO, [0.5, 0.5, 0.5], 2.0);
+    // A slab 600 m out, 100 km above the star's surface: nothing the radius
+    // rule would ever see.
+    let wall = ed.world.spawn();
+    ed.world.insert(wall, Transform::from_translation(DVec3::new(610.0, 0.0, 0.0)));
+    ed.world.insert(wall, Name("Wall".into()));
+    ed.world.insert(wall, Matter::Empty);
+    ed.world.insert(wall, RigidBody { kind: BodyKind::Box, mode: floptle_core::BodyMode::Static, half_extents: [10.0, 200.0, 200.0], ..Default::default() });
+    ed.toggle_play();
+    run(&mut ed, 200);
+    let out: Vec<(f64, f64)> = lines(&mut ed, "WALL")
+        .iter()
+        .map(|l| {
+            let v: Vec<&str> = l.split(' ').collect();
+            (v[0].parse().unwrap(), v[1].parse().unwrap())
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.iter().any(|&(w, _)| w >= 10.0 - 1e-6), "the warp never engaged: {out:?}");
+    assert!(out.last().is_some_and(|&(w, _)| w < 1.0 + 1e-6), "the warp never dropped: {out:?}");
+    let deepest = out.iter().map(|&(_, x)| x).fold(f64::MIN, f64::max);
+    assert!(deepest < 600.0, "the craft went into the wall's face at 600 m, reaching {deepest:.1}: {out:?}");
+}

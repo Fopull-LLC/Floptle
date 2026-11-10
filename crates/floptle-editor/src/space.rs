@@ -46,6 +46,11 @@ pub(crate) enum CompoundLod {
     Coast { dom: u32, k: Kepler },
 }
 
+/// How far past a coasting craft's next rails step the way is swept for
+/// ground, metres: room for the craft's own size, so warp drops before the
+/// hull reaches the hill rather than as its centre does.
+const WARP_LOOKAHEAD: f64 = 10.0;
+
 /// Beyond this distance from the camera a compound drops to its LOD…
 const LOD_FAR: f64 = 700.0;
 /// …and inside this one it wakes back to live physics (hysteresis).
@@ -747,6 +752,27 @@ impl Editor {
                         continue;
                     }
                     let target = DVec3::from(bodies[j].pos) + r;
+                    // The radius rule above knows the body's mean radius, not
+                    // the hill or the building in the craft's way: a conic
+                    // carried a coasting craft into ground standing higher
+                    // than that. So the step the rails are about to take is
+                    // swept against what is solid (terrain colliders, static
+                    // bodies), a little beyond, and anything in the way drops
+                    // the warp the same way.
+                    let step = target - com;
+                    let len = step.length();
+                    if len > 1e-6
+                        && sim.raycast_surface(com, (step / len).as_vec3(), (len + WARP_LOOKAHEAD) as f32).is_some()
+                    {
+                        self.space_warp = 1.0;
+                        self.compound_coast.remove(&eid);
+                        self.console.push(
+                            floptle_script::LogLevel::Debug,
+                            "time-warp dropped to 1× — ground ahead".into(),
+                            None,
+                        );
+                        continue;
+                    }
                     sim.shift_compound(eid, target - com);
                     sim.set_compound_velocity(eid, v.as_vec3());
                     // Tick-sampled SOI seam: recapture in the new dominant
