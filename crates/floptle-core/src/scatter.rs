@@ -219,6 +219,15 @@ pub struct ScatterSource {
     /// any reason but distance (its chunk settling, a source declared near
     /// the camera, a prop put back): 0, the default, draws it at once.
     pub appear: f32,
+    /// Whether its props cast sun shadows at all: off for grass and ferns,
+    /// whose shadows nobody misses and whose cards are most of what the
+    /// shadow map draws. On by default, as every prop always did.
+    pub cast_shadow: bool,
+    /// Past this many metres from the camera its props cast no sun shadow;
+    /// 0, the default, casts to the end of their range. A tree's shadow
+    /// matters near the player and is a blur of the shadow map's texels far
+    /// away.
+    pub shadow_distance: f32,
     /// Props drawn in a look of their own, by id: the plant a harvest is
     /// aimed at, the rock a build would replace. Read at draw time, so marking
     /// one prop every frame costs a map write and re-rolls nothing; an empty
@@ -783,6 +792,8 @@ mod tests {
             look: Default::default(),
             bend: 0.0,
             appear: 0.0,
+            cast_shadow: true,
+            shadow_distance: 0.0,
             leaving: HashMap::new(),
             dying: None,
             marks: Default::default(),

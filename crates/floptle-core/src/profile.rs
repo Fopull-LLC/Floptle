@@ -456,8 +456,9 @@ pub struct Counts {
     pub shadow_volumes: usize,
     /// Opaque instances the sun's shadow map drew last frame…
     pub sun_map_draws: usize,
-    /// …and those it was given but left out, lying outside the sun's box
-    /// (terrain past the shadow distance, flora beyond it).
+    /// …and those it was given but left out: lying outside the sun's box
+    /// (terrain past the shadow distance, flora beyond it), or casting no
+    /// shadow (a scatter source's `castShadow` and `shadowDistance`).
     pub sun_map_culled: usize,
     /// Triangles the frame's colour pass was given: every instance's mesh,
     /// whole, before the GPU culls a back face or clips one off screen.

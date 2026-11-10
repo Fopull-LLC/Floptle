@@ -232,3 +232,69 @@ fn a_scattered_plant_sways_like_the_same_plant_on_a_node() {
     let (still_x, windy_x) = (top(&still), top(&windy));
     assert!(windy_x > still_x + 20.0, "the scattered blade did not lean downwind: {still_x} → {windy_x}");
 }
+
+/// **A scatter source casts sun shadows only as it says.** Posts scattered
+/// over a lit floor, the sun low enough that their shadows cross the floor
+/// in front of the camera. With `castShadow = false` the floor is drawn
+/// exactly as with no shadow from them at all: the same picture as a
+/// `shadowDistance` shorter than the camera's distance to any post. With a
+/// `shadowDistance` past every post the picture is exactly the default's,
+/// and that one differs, the shadows being there.
+#[test]
+fn a_scattered_field_casts_sun_shadows_only_as_its_source_says() {
+    let shoot = |opts: &str, tag: &str| -> Option<image::RgbaImage> {
+        let d = temp(tag);
+        let out = Command::new(bin()).args(["new", &d.to_string_lossy()]).output().expect("run floptle new");
+        assert!(out.status.success(), "scaffold failed: {}", String::from_utf8_lossy(&out.stderr));
+        for dir in ["models", "prefabs", "scripts"] {
+            std::fs::create_dir_all(d.join(dir)).unwrap();
+        }
+        std::fs::write(d.join("models/post.glb"), box_glb(0.3, 3.0)).unwrap();
+        std::fs::write(
+            d.join("prefabs/post.prefab.ron"),
+            "[(name: \"Post\", transform: (translation: (0.0, 1.5, 0.0)), matter: Mesh(asset_path: \"models/post.glb\"), \
+             material: Some((color: (0.8, 0.2, 0.2))))]",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("scripts/field.lua"),
+            format!(
+                "scatter.create{{ asset = \"prefabs/post.prefab.ron\", seed = 5, perChunk = 3, chunk = 2, \
+                 center = vec3(0, 0, -4), halfX = 3, halfZ = 3, align = \"world\"{opts} }}\n"
+            ),
+        )
+        .unwrap();
+        let scene = r#"(name: "field", lighting: (direction: (0.6, 0.35, 0.5), ambient: (0.15, 0.15, 0.15), shadows: true, shadow_map: true), nodes: [
+            (name: "Camera", transform: (translation: (0.0, 5.0, 6.0), rotation: (-0.25, 0.0, 0.0, 0.968), scale: (1.0, 1.0, 1.0)), matter: Camera(fov_y: 1.0, active: true), scripts: []),
+            (name: "Ground", transform: (translation: (0.0, -0.5, -4.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (30.0, 1.0, 30.0)), matter: Primitive(shape: Cube, color: (0.8, 0.8, 0.75)), scripts: [], collidable: true),
+            (name: "Field", transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), matter: Empty, scripts: [(kind: "field")]),
+        ])"#;
+        std::fs::write(d.join("scenes/field.ron"), scene).unwrap();
+        let png = d.join("field.png");
+        let r = Command::new(bin())
+            .args(["shot", &d.to_string_lossy(), "--scene", "field", "--size", "480x270", "--after", "0.5"])
+            .args(["--out", &png.to_string_lossy()])
+            .output()
+            .expect("run shot");
+        if !r.status.success() {
+            let why = String::from_utf8_lossy(&r.stderr);
+            assert!(why.contains("no GPU") || why.contains("could not build the renderer"), "shot failed:\n{why}");
+            let _ = std::fs::remove_dir_all(&d);
+            return None;
+        }
+        let img = image::open(&png).expect("a PNG was written").to_rgba8();
+        if let Ok(dir) = std::env::var("FLOPTLE_SCATTER_SHADOW_PNG") {
+            let _ = std::fs::copy(&png, Path::new(&dir).join(format!("{tag}.png")));
+        }
+        let _ = std::fs::remove_dir_all(&d);
+        Some(img)
+    };
+    let Some(casts) = shoot("", "shadow-default") else { return };
+    let Some(quiet) = shoot(", castShadow = false", "shadow-off") else { return };
+    let Some(near) = shoot(", shadowDistance = 1", "shadow-near") else { return };
+    let Some(far) = shoot(", shadowDistance = 200", "shadow-far") else { return };
+    let differ = |a: &image::RgbaImage, b: &image::RgbaImage| a.pixels().zip(b.pixels()).filter(|(p, q)| p != q).count();
+    assert!(differ(&casts, &quiet) > 500, "castShadow = false drew the same picture as the default: no shadow went, or none was there ({} pixels differ)", differ(&casts, &quiet));
+    assert_eq!(differ(&quiet, &near), 0, "a shadow distance nearer than every post is not the same as no shadow");
+    assert_eq!(differ(&casts, &far), 0, "a shadow distance past every post changed the picture");
+}

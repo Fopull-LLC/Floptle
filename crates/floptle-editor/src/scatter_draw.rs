@@ -434,7 +434,7 @@ pub(crate) fn push_scatter(
     cache.settled_out = publish.then(|| script_host.scatter_settled());
     cache.interactors = script_host.scatter_interactors();
     cache.time = script_host.weather_time();
-    build_instances(
+    build_instances_with(
         cache,
         &sources,
         eye,
@@ -444,16 +444,15 @@ pub(crate) fn push_scatter(
         frustum,
         SCATTER_BUDGET,
         out,
+        &mut |e| raster.shadowless_extras(e),
     );
     out.len().saturating_sub(before)
 }
 
-/// Everything visible from `eye`, packed as instanced draws.
-///
-/// Returns `(mesh, texture, raw)` triples in the same shape `draw_scene` takes,
-/// so scatter is drawn by the ordinary raster path and gets the ordinary
-/// lighting, fog and shadows — including the underwater fog, which is how a
-/// forest at a shoreline goes murky at the same rate as the ground it stands on.
+/// [`build_instances_with`] for the tests, where a prop that casts no
+/// shadow keeps its surface entry: they ask what is drawn, not what the sun
+/// map leaves out.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_instances(
     cache: &mut ScatterCache,
@@ -466,6 +465,35 @@ pub(crate) fn build_instances(
     budget: usize,
     out: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
 ) {
+    build_instances_with(cache, sources, eye, mesh_of, radius_of, ground, frustum, budget, out, &mut |e| e);
+}
+
+/// Everything visible from `eye`, packed as instanced draws.
+///
+/// Returns `(mesh, texture, raw)` triples in the same shape `draw_scene` takes,
+/// so scatter is drawn by the ordinary raster path and gets the ordinary
+/// lighting, fog and shadows — including the underwater fog, which is how a
+/// forest at a shoreline goes murky at the same rate as the ground it stands on.
+///
+/// `shadowless` turns a part's surface-extras entry into the same look
+/// casting no sun shadow (`Raster::shadowless_extras`): what a prop of a
+/// source with `cast_shadow` off, or past its `shadow_distance`, is drawn
+/// with.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_instances_with(
+    cache: &mut ScatterCache,
+    sources: &[ScatterSource],
+    eye: DVec3,
+    mesh_of: &mut impl FnMut(&str) -> Option<Vec<Part>>,
+    radius_of: &mut impl FnMut(&str) -> Option<f32>,
+    ground: &mut impl FnMut(DVec3, Vec3, f32) -> Option<(f32, Vec3)>,
+    frustum: &floptle_render::Frustum,
+    budget: usize,
+    out: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
+    shadowless: &mut impl FnMut(u32) -> u32,
+) {
+    // Each surface entry's shadowless twin, asked of the renderer once.
+    let mut quiet: HashMap<u32, u32> = HashMap::new();
     // The budget is scatter's own: `out` arrives holding the frame's meshes,
     // terrain and decals, and counted against the cap they cut a busy
     // scene's plants short, by whatever else happened to be on screen. It is
@@ -854,6 +882,9 @@ pub(crate) fn build_instances(
         // This one prop's own look (`scatter.setTint`), asked only of
         // a source that has marked any.
         let mark = if src.marks.is_empty() { None } else { src.marks.get(&inst.id) };
+        // Its sun shadow: as the source says, and none past its shadow
+        // distance. Measured as the bands are, in the source's frame.
+        let casts = src.cast_shadow && (src.shadow_distance <= 0.0 || c.d <= src.shadow_distance);
         let mut push = |b: usize, alpha: f32, arriving: bool| {
             let Some(Some(parts)) = band_parts.get(b) else { return };
             // The per-instance roll rides the albedo, so a game can
@@ -902,6 +933,9 @@ pub(crate) fn build_instances(
                         mp.rim = m.rim;
                         mp.rim_strength = m.rim_strength;
                     }
+                }
+                if !casts {
+                    mp.ext_index = *quiet.entry(mp.ext_index).or_insert_with(|| shadowless(mp.ext_index));
                 }
                 out.push((*mesh, *tex, instance_of_mat(model * *local, &mp)));
             }
@@ -1285,6 +1319,8 @@ end
             look: Default::default(),
             bend: 0.0,
             appear: 0.0,
+            cast_shadow: true,
+            shadow_distance: 0.0,
             leaving: HashMap::new(),
             dying: None,
             marks: Default::default(),

@@ -574,6 +574,26 @@ Two things the engine does so a big field degrades instead of stopping:
   resident at all, so a map zooming out from a planet stops costing scatter
   work instead of re-settling a disc of props under wherever it looks.
 
+### Shadows cost a second drawing
+
+Every prop that casts a sun shadow is drawn twice: once for the camera and
+once into the sun's shadow map. A meadow's grass is thousands of cards, and
+their shadows are a speckle nobody misses. Two options say which props cast:
+
+* `castShadow = false`: the source's props cast no sun shadow at all. Use it for
+  grass, ferns and flowers. They are still lit and still receive shadows.
+* `shadowDistance = 60`: past that many metres from the camera, the props cast
+  no sun shadow. A tree's shadow matters near the player and is a blur of the
+  shadow map's texels far away. 0, the default, casts to the end of the range.
+
+```lua
+scatter.create{ asset = "grass.glb", castShadow = false, ... }
+scatter.create{ asset = "oak.glb", shadowDistance = 80, ... }
+```
+
+`perf.counts().sunMapDraws` and `.sunMapCulled` say what the shadow map drew
+and what it left out.
+
 ### Harvesting
 
 ```lua

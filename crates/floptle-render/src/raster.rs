@@ -638,6 +638,9 @@ pub(crate) const EXT_THIN: u32 = 1 << 18;
 /// out of a back face inferred from the front's curvature and the thickness
 /// ([`floptle_core::Refraction::Auto`]).
 pub(crate) const EXT_SHAPED: u32 = 1 << 19;
+/// Cast no sun shadow: left out of the sun's shadow map, drawn everywhere
+/// else. Read on the CPU only ([`Raster::shadowless_extras`]).
+pub(crate) const EXT_NO_CAST: u32 = 1 << 20;
 
 impl SurfaceExtras {
     /// Read a material's extras. `Classic` still carries the normal and
@@ -2764,6 +2767,19 @@ impl Raster {
         };
         let flags = lanes[1][0] as u32 | EXT_DISSOLVE | if invert { EXT_DITHER_INVERT } else { 0 };
         lanes[1][0] = flags as f32;
+        self.push_ext_lanes(lanes)
+    }
+
+    /// The surface-extras entry `ext` with its sun shadow off: the same look,
+    /// left out of the sun's shadow map. A scatter source whose props cast no
+    /// shadow, or none past a distance, draws them through this.
+    pub fn shadowless_extras(&mut self, ext: u32) -> u32 {
+        let start = ext as usize * EXT_LANES;
+        let Some(Ok(mut lanes)) = self.mat_ext_cpu.get(start..start + EXT_LANES).map(<[[f32; 4]; EXT_LANES]>::try_from)
+        else {
+            return ext;
+        };
+        lanes[1][0] = (lanes[1][0] as u32 | EXT_NO_CAST) as f32;
         self.push_ext_lanes(lanes)
     }
 
@@ -4992,8 +5008,24 @@ impl Raster {
         self.meshes.get(id.0 as usize).map_or(0, |m| m.gpu_mesh.index_count / 3)
     }
 
+    /// The instances that cast a sun shadow at all: every one but those whose
+    /// surface extras say not ([`shadowless_extras`](Self::shadowless_extras)).
+    fn casters_of<'a>(
+        &self,
+        instances: &'a [(MeshId, Option<TexId>, InstanceRaw)],
+    ) -> std::borrow::Cow<'a, [(MeshId, Option<TexId>, InstanceRaw)]> {
+        let quiet: Vec<bool> =
+            self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| (c[1][0] as u32) & EXT_NO_CAST != 0).collect();
+        if !quiet.iter().any(|&q| q) {
+            return std::borrow::Cow::Borrowed(instances);
+        }
+        let casts = |raw: &InstanceRaw| !quiet.get(ext_index_of(raw) as usize).copied().unwrap_or(false);
+        std::borrow::Cow::Owned(instances.iter().filter(|(_, _, raw)| casts(raw)).copied().collect())
+    }
+
     /// The last sun shadow map's opaque instances: how many it drew, of how
-    /// many the frame gave it. The rest lay outside the sun's box.
+    /// many the frame gave it. The rest lay outside the sun's box or cast
+    /// no shadow.
     pub fn sun_map_draws(&self) -> (usize, usize) {
         self.sun_map_casts
     }
@@ -5018,7 +5050,8 @@ impl Raster {
         // camera does not thin its shadow.
         g.sun_extra[1] = 1.0;
         self.begin_pass(gpu, g);
-        let casters = if self.sun_map_cull { self.sun_casters(&g, instances) } else { std::borrow::Cow::Borrowed(instances) };
+        let casters = self.casters_of(instances);
+        let casters = if self.sun_map_cull { std::borrow::Cow::Owned(self.sun_casters(&g, &casters).into_owned()) } else { casters };
         self.sun_map_casts = (casters.len(), instances.len());
         let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, &casters, flsl, skins);
         let mut encoder = gpu
