@@ -59,6 +59,9 @@ pub struct AssemblyInfo {
     /// sleep, kept while it counts, or `settling` while it counts after
     /// stopping on its own (`WakeReason::name`).
     pub wake: &'static str,
+    /// The warp rails carry it this tick: its position and velocity come from
+    /// a conic, and forces held on it do nothing, torque included.
+    pub coasting: bool,
 }
 
 /// One part's contact load over the last physics tick, refreshed by the editor
@@ -115,6 +118,9 @@ pub enum AssemblyCmd {
     /// craft stays in full physics however far the camera roams (so you can
     /// fly it from the map view, where the camera pulls far back).
     KeepLive { root: u32, on: bool },
+    /// Whether time warp may carry this compound on a conic (`true`, the
+    /// default) or must leave it to realtime physics.
+    Coast { root: u32, on: bool },
     /// Re-pose the compound's collision shapes to match its part nodes' current
     /// transforms — for articulated parts (a folding landing leg) so the
     /// collider follows the moving geometry. Mass properties stay frozen.
@@ -331,6 +337,20 @@ pub(crate) fn install_assembly_api(
         })?;
         t.set("keepLive", f)?;
     }
+    // assembly.coast(node, on) — whether time warp may carry this compound on
+    // its conic (on, the default) or must leave it in realtime physics (off):
+    // a glider, a balloon, a craft under a parachute, a boat, anything whose
+    // forces are the point. Left off the rails it keeps its velocity and its
+    // contacts through a warp, and the game integrates it as it likes.
+    {
+        let q = cmds.clone();
+        let f = lua.create_function(move |_, (node, on): (Value, bool)| {
+            let root = node_eid(&node, "assembly.coast(node, on)")?;
+            q.borrow_mut().push(AssemblyCmd::Coast { root, on });
+            Ok(())
+        })?;
+        t.set("coast", f)?;
+    }
     // assembly.syncColliders(node) — re-pose the compound's collision shapes to
     // match its part nodes' current transforms. Call it after moving articulated
     // parts (a folding landing leg) so their colliders follow the geometry:
@@ -422,6 +442,7 @@ pub(crate) fn install_assembly_api(
             out.set("inertia", inertia)?;
             out.set("grounded", i.grounded)?;
             out.set("anchored", i.anchored)?;
+            out.set("coasting", i.coasting)?;
             out.set("gripped", i.gripped)?;
             // Its axes this tick, the way node:worldRight/worldUp/worldForward
             // give a node's.

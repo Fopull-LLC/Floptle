@@ -1262,6 +1262,7 @@ impl Editor {
             self.water_ratio_warned.clear();
             self.compound_lod.clear(); // distant-craft LOD restarts with them
             self.lod_keep_live.clear(); // keep-live exemptions don't persist runs
+            self.coast_off.clear(); // nor do warp opt-outs
             self.lod_woken.clear();
             self.compound_coast.clear();
             self.script_lines.clear(); // no stale map lines across runs

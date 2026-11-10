@@ -63,6 +63,10 @@ pub struct Sim {
     /// Scripted forces held on compounds for the current tick (re-armed each
     /// substep, cleared at tick end). World-frame; converted per substep.
     held: Vec<HeldForce>,
+    /// Compounds the host's warp rails own this tick (root entity index):
+    /// their position and velocity are set from a conic, so a held force
+    /// would be discarded and only its torque would act. Neither does.
+    coasting: std::collections::HashSet<u32>,
     accum: f32,
     pub fixed_dt: f32,
     /// The project's resolved layer table (names → bit indices + collision
@@ -384,6 +388,7 @@ impl Sim {
             cmap,
             tick_prev_c: Vec::new(),
             held: Vec::new(),
+            coasting: std::collections::HashSet::new(),
             accum: 0.0,
             fixed_dt: 1.0 / 120.0,
             layers,
@@ -1607,6 +1612,12 @@ impl Sim {
             // re-arm them each substep. World→sim conversion happens here,
             // after any rebase, so held entries survive an origin shift.
             for h in &self.held {
+                // On the rails the conic is the motion: the push would be
+                // thrown away next tick, and its torque alone would spin the
+                // craft (a parachute's pendulum turned a pod until it broke).
+                if self.coasting.contains(&h.eid) {
+                    continue;
+                }
                 if let Some(link) = self.cmap.iter().find(|l| l.entity.index() == h.eid) {
                     let c = &mut self.world.compounds[link.compound];
                     match h.at {
@@ -1633,6 +1644,19 @@ impl Sim {
     /// through the CoM), plus an optional pure `torque`. Scripts re-arm this
     /// every tick they're thrusting; it applies through every substep and
     /// clears at tick end (a dropped call = thrust stops, no latching).
+    /// The compounds (root entity indices) the host's warp rails carry this
+    /// tick. Their held forces and torques are dropped whole while they are
+    /// on the rails; see [`Self::hold_compound_force`].
+    pub fn set_coasting(&mut self, eids: impl IntoIterator<Item = u32>) {
+        self.coasting.clear();
+        self.coasting.extend(eids);
+    }
+
+    /// Whether the warp rails carry compound `eid` this tick.
+    pub fn is_coasting(&self, eid: u32) -> bool {
+        self.coasting.contains(&eid)
+    }
+
     pub fn hold_compound_force(&mut self, eid: u32, force: Vec3, at: Option<DVec3>, torque: Vec3) {
         self.held.push(HeldForce { eid, force, at, torque });
     }

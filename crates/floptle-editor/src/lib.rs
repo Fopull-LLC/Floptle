@@ -3287,6 +3287,9 @@ struct Editor {
     /// in full physics however far the camera roams — the piloted vessel sets
     /// this while the map view is open so it remains controllable (see space.rs).
     lod_keep_live: std::collections::HashSet<u32>,
+    /// Compounds a script took off the warp rails (`assembly.coast(node,
+    /// false)`): time warp leaves them in realtime physics (see space.rs).
+    coast_off: std::collections::HashSet<u32>,
     /// Compounds a script has pushed lately (root eid → seconds of grace
     /// left): far from the camera they stay live until a second after the
     /// last push, rather than being re-filed as frozen between one tick's

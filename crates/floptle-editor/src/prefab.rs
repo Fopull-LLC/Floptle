@@ -632,6 +632,8 @@ impl Editor {
                     carry: self.tick_carry.get(&eid).copied().unwrap_or([0.0; 3]),
                     asleep: c.asleep,
                     wake: c.wake.name(),
+                    coasting: self.compound_coast.contains_key(&eid)
+                        || matches!(self.compound_lod.get(&eid), Some(crate::space::CompoundLod::Coast { .. })),
                 },
             );
         }
@@ -742,6 +744,13 @@ impl Editor {
                 floptle_script::AssemblyCmd::Anchor { root, on } => {
                     if let Some(sim) = self.sim.as_mut() {
                         sim.set_compound_anchored(root, on);
+                    }
+                }
+                floptle_script::AssemblyCmd::Coast { root, on } => {
+                    if on {
+                        self.coast_off.remove(&root);
+                    } else {
+                        self.coast_off.insert(root);
                     }
                 }
                 floptle_script::AssemblyCmd::KeepLive { root, on } => {

@@ -2701,3 +2701,68 @@ end
         "a destroyed node's handle came back as the node that took its slot"
     );
 }
+
+/// A craft pushed off-centre every tick, then time-warped: on the rails the
+/// conic is its motion, so `assembly.info` says it is coasting and the held
+/// force does nothing, neither push nor torque. Only the torque used to act,
+/// and a parachute's pull spun a pod on the rails until it broke. With
+/// `assembly.coast(node, false)` the same craft stays in realtime physics
+/// through the warp and the push keeps turning it.
+fn warp_a_pushed_craft(tag: &str, coast: bool) -> Vec<(bool, f64, f64)> {
+    let script = format!(
+        r#"
+local n, ship = 0, nil
+function fixedUpdate(node, dt)
+  n = n + 1
+  ship = ship or find("Ship")
+  if not ship then return end
+  local i = assembly.info(ship)
+  if n == 2 then
+    assembly.impulseAt(ship, vec3(100 * i.mass, 0, 0), i.com)
+    {opt}
+  end
+  if n > 2 then
+    -- 1 m above the centre of mass, pushing forward: a torque about x.
+    assembly.forceAt(ship, vec3(0, 0, 0.5 * i.mass), vec3(i.com.x, i.com.y + 1, i.com.z))
+  end
+  if n == 40 then space.warp(10) end
+  if n > 60 then
+    local w = i.angVel
+    log(string.format("COAST %s %.6f %.1f %d", tostring(i.coasting), math.sqrt(w.x * w.x + w.y * w.y + w.z * w.z), space.warp(), n))
+  end
+end
+"#,
+        opt = if coast { "" } else { "assembly.coast(ship, false)" }
+    );
+    let (mut ed, dir) = project(tag, &script);
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 1.0e8;
+    vessel_node(&mut ed, "Ship", DVec3::ZERO, [0.5, 0.5, 0.5], 2.0);
+    ed.toggle_play();
+    run(&mut ed, 400);
+    let out = lines(&mut ed, "COAST")
+        .iter()
+        .map(|l| {
+            let v: Vec<&str> = l.split(' ').collect();
+            (v[0] == "true", v[1].parse().unwrap(), v[2].parse().unwrap())
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+#[test]
+fn a_held_force_does_nothing_to_a_coasting_craft_and_coast_false_keeps_it_live() {
+    let on = warp_a_pushed_craft("coast_on", true);
+    assert!(on.len() > 20, "{on:?}");
+    assert!(on.iter().all(|&(c, _, w)| c && w >= 10.0 - 1e-6), "warping in flight, it must read as coasting: {on:?}");
+    let (first, last) = (on[0].1, on[on.len() - 1].1);
+    assert!(first > 0.1, "the push turned it before the warp, so the test can see a torque act: {on:?}");
+    assert!((last - first).abs() < 1e-3, "on the rails the held torque still turned it, {first} → {last}");
+
+    let off = warp_a_pushed_craft("coast_off", false);
+    assert!(off.len() > 20, "{off:?}");
+    assert!(off.iter().all(|&(c, _, w)| !c && w >= 10.0 - 1e-6), "taken off the rails, it must not read as coasting: {off:?}");
+    let (first, last) = (off[0].1, off[off.len() - 1].1);
+    assert!(last > first + 0.1, "off the rails the push must keep turning it, {first} → {last}");
+}

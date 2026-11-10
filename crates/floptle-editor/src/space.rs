@@ -705,7 +705,11 @@ impl Editor {
                     let Some(c) = sim.compound_of(eid) else { continue };
                     // On the ground through its wheels counts: a parked rover
                     // is not in flight, however its suspension jiggles.
-                    if c.anchored || sim.compound_grounded(eid) || c.vel.length_squared() < 0.01 {
+                    if c.anchored
+                        || sim.compound_grounded(eid)
+                        || c.vel.length_squared() < 0.01
+                        || self.coast_off.contains(&eid)
+                    {
                         self.compound_coast.remove(&eid);
                         continue;
                     }
@@ -771,6 +775,10 @@ impl Editor {
                 // realtime physics resumes exactly where the rails left off.
                 self.compound_coast.clear();
             }
+            // What the rails own this tick, the conic its motion: the held
+            // forces scripts arm for these are dropped whole, push and torque
+            // alike, and `assembly.info().coasting` says so.
+            sim.set_coasting(self.compound_coast.keys().copied());
             // Distant-craft LOD (hundreds of deployed craft, cheaply): far
             // compounds leave live physics — landed/slow ones freeze in the
             // carried frame, in-flight ones snap to their own Kepler rails —

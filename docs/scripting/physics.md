@@ -243,6 +243,17 @@ compound from that LOD so it stays in full physics — live throttle, steering
 and orbital velocity — however far the camera is; `assembly.keepLive(node,
 false)` rejoins the LOD.
 
+**Time warp and held forces:** while `space.warp()` is above 1, a compound in
+flight rides its orbit on rails: each tick its position and velocity come from
+the conic. On those ticks `assembly.info(node).coasting` is true, and forces
+held with `assembly.force*` do nothing, torque included, so drag or thrust
+cannot spin a craft the rails are carrying. A game can skip its aero while
+`coasting` holds, and a HUD can say "on rails". A craft whose forces are the
+point (a glider, a balloon, a pod under a parachute, a boat) can stay in
+realtime physics through a warp with `assembly.coast(node, false)`: it keeps
+its velocity and its contacts, and `assembly.coast(node, true)` puts it back
+on the rails.
+
 **Placing a live assembly:** the compound writeback owns the root node's
 transform, so plain `node.x = …` writes are overwritten every frame —
 `assembly.teleport(node, pos)` is THE way to move one (velocity untouched):

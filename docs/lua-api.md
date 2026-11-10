@@ -34,7 +34,7 @@ each group, and meant to be searched.
 - [weather — wind](#weather--wind) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 12
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 38
-- [vessels — assembly.*](#vessels--assembly) — 16
+- [vessels — assembly.*](#vessels--assembly) — 17
 - [the camera & the screen](#the-camera--the-screen) — 9
 - [physics controls — pause & step](#physics-controls--pause--step) — 5
 - [frame cost — perf.*](#frame-cost--perf) — 26
@@ -3490,6 +3490,10 @@ tm:worldAt(x, y) → the world position of that square's CENTRE (a vec3), or nil
 
 Multi-part vessels: hold forces and torques, split parts off, latch parts on, and read the compound's mass and centre of mass. A vessel is one physics body built from many nodes.
 
+### `assembly.coast`
+
+assembly.coast(node, false) — keep this compound in realtime physics through a time warp instead of carrying it on its orbit: a glider, a balloon, a craft under a parachute, a boat, anything whose forces are the point. It keeps its velocity and its contacts, and the game integrates it as it likes. assembly.coast(node, true) puts it back on the rails, the default. Reset each run.
+
 ### `assembly.force`
 
 assembly.force(node, force) — a HELD force through the centre of mass, re-applied every tick until you change it (engines, thrusters). Through the CoM means no torque: the vessel accelerates without turning.
@@ -3512,7 +3516,7 @@ assembly.impulseAt(node, impulse, at) — a one-shot kick at a world point, appl
 
 ### `assembly.info`
 
-assembly.info(node) — { mass, com, origin, vel, angVel, inertia, grounded, anchored, gripped, parts, right, up, forward, carry, asleep, wake } (mass and com are the welded parts' only: a wheel on a wheel joint, or anything else jointed on, is a body of its own and is not in them, so a craft's whole weight adds each such body's RigidBody mass). carry is node.carry for the craft: how far the frame it rides in moved this tick. asleep and wake are node.asleep and node.wake for the craft: whether it is asleep, and why it is awake. right, up and forward are the craft's axes as they are this tick, the way node:worldRight/worldUp/worldForward give a node's drawn ones: read in fixedUpdate they are that tick's, where the node's are a frame's. com is the world-space centre of mass as a vec3 — the number a flight controller, a CoM gizmo and a landing check all need. inertia is the tensor the solver turns torques with, about the centre of mass in world axes, as three rows: inertia[1].x .. inertia[3].z. A torque of I × (wanted change in angVel) / dt stops a spin in one tick without overshooting.
+assembly.info(node) — { mass, com, origin, vel, angVel, inertia, grounded, anchored, gripped, coasting, parts, right, up, forward, carry, asleep, wake } (mass and com are the welded parts' only: a wheel on a wheel joint, or anything else jointed on, is a body of its own and is not in them, so a craft's whole weight adds each such body's RigidBody mass). carry is node.carry for the craft: how far the frame it rides in moved this tick. asleep and wake are node.asleep and node.wake for the craft: whether it is asleep, and why it is awake. right, up and forward are the craft's axes as they are this tick, the way node:worldRight/worldUp/worldForward give a node's drawn ones: read in fixedUpdate they are that tick's, where the node's are a frame's. com is the world-space centre of mass as a vec3 — the number a flight controller, a CoM gizmo and a landing check all need. inertia is the tensor the solver turns torques with, about the centre of mass in world axes, as three rows: inertia[1].x .. inertia[3].z. A torque of I × (wanted change in angVel) / dt stops a spin in one tick without overshooting. coasting is true on the ticks time warp carries the craft on its orbit: its position and velocity come from the conic, and forces held on it with assembly.force* do nothing, torque included, so a game can skip its aero and a HUD can say "on rails".
 
 ### `assembly.keepLive`
 
