@@ -1500,6 +1500,19 @@ fn key_light_ggx(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, rough:
         out.spec = G.light_color.rgb * r.xyz * sh;
         return out;
     }
+    // One star: straight-line code, as `key_light` does (see there).
+    if (ns == 1u) {
+        let l = star_dir_at(0u, p);
+        let scol = star_col_at(0u, p);
+        let r = ggx_light(n, v, l, f0, rough);
+        var sh = vec3<f32>(1.0);
+        if (r.w > 0.0 || dot(r.xyz, r.xyz) > 0.0) {
+            sh = star_shadow(0u, p, n, pix);
+        }
+        out.diffuse = scol * r.w * sh;
+        out.spec = scol * r.xyz * sh;
+        return out;
+    }
     for (var i = 0u; i < min(ns, 4u); i++) {
         let l = star_dir_at(i, p);
         let scol = star_col_at(i, p);

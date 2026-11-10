@@ -2385,6 +2385,24 @@ fn key_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, shininess: f32, pix: vec2
         out.spec = G.light_color.rgb * sp * sh;
         return out;
     }
+    // One star lights almost every system scene (the rest fall under the
+    // faint-star floor): straight-line code for it, not a trip round a loop
+    // the shader compiler cannot see the end of, which cost a planet's lit
+    // pixels about a tenth of their shading.
+    if (ns == 1u) {
+        let l = star_dir_at(0u, p);
+        let scol = star_col_at(0u, p);
+        let ndl = max(dot(n, l), 0.0);
+        var sh = vec3<f32>(1.0);
+        if (ndl > 0.0) {
+            sh = star_shadow(0u, p, n, pix);
+        }
+        out.diffuse = scol * ndl * sh;
+        let h = normalize(l + v);
+        let sp = pow(max(dot(n, h), 0.0), shininess) * select(0.0, 1.0, ndl > 0.0);
+        out.spec = scol * sp * sh;
+        return out;
+    }
     for (var i = 0u; i < min(ns, 4u); i++) {
         let l = star_dir_at(i, p);
         let scol = star_col_at(i, p);
