@@ -571,6 +571,7 @@ mod tint_tests {
             terrain_paint_base: 0,
             paint_modulate: false,
             terrain_splat: false,
+            terrain_fine: 0,
             ext_index: 0,
         }
     }

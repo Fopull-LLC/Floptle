@@ -183,7 +183,8 @@ pub struct InstanceRaw {
     /// that does not exist:
     ///   - `normal_mat[0].w` = the instance's TERRAIN color base.
     ///   - `normal_mat[1].w` = the paint-modulate flag (0/1; see `MaterialParams`).
-    ///   - `normal_mat[2].w` = the terrain-splat flag (0/1) — read on the CPU too,
+    ///   - `normal_mat[2].w` = the terrain-splat flag (0, or 1 + the fine paint
+    ///     volume + 1, [`MaterialParams::terrain_fine`]) — read on the CPU too,
     ///     by [`is_terrain`], because terrain reads its `color.a` differently.
     pub normal_mat: [[f32; 4]; 3],
     /// Base color tint (rgb) + alpha.
@@ -261,6 +262,10 @@ pub struct MaterialParams {
     /// and triplanar-sample the terrain palette (× the rgb tint), instead of treating alpha
     /// as opacity. True only for terrain chunk instances. Rides `normal_mat[2].w`.
     pub terrain_splat: bool,
+    /// The fine paint volume a terrain instance reads, plus one; 0 reads
+    /// none ([`Raster::fine_paint`]). Rides `normal_mat[2].w` with the
+    /// splat flag.
+    pub terrain_fine: u32,
 }
 
 impl MaterialParams {
@@ -286,6 +291,7 @@ impl MaterialParams {
             terrain_paint_base: 0,
             paint_modulate: false,
             terrain_splat: false,
+            terrain_fine: 0,
             ext_index: 0,
         }
     }
@@ -345,6 +351,7 @@ impl MaterialParams {
             terrain_paint_base: 0,
             paint_modulate: false,
             terrain_splat: false,
+            terrain_fine: 0,
             ext_index: 0,
         }
     }
@@ -382,6 +389,15 @@ struct CorePipelines {
     skin_primed_pipeline: wgpu::RenderPipeline,
 }
 
+fn new_fine_buffer(device: &wgpu::Device, words: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("raster-fine-paint"),
+        size: (words * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
 /// Build the group(0) bind group over the frame globals, the two paint stores,
 /// the terrain palette and the three skinning stores. A free function so
 /// [`Raster::new`] can call it before a `Raster` exists;
@@ -404,6 +420,7 @@ fn make_globals_bind(
     mat_ext: &wgpu::Buffer,
     sun_map: &wgpu::TextureView,
     sun_samp: &wgpu::Sampler,
+    fine: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("raster-globals"),
@@ -430,6 +447,7 @@ fn make_globals_bind(
                 resource: wgpu::BindingResource::TextureView(pal_view),
             },
             wgpu::BindGroupEntry { binding: 14, resource: slots.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 15, resource: fine.as_entire_binding() },
         ],
     })
 }
@@ -988,6 +1006,9 @@ pub struct Raster {
     /// The terrain slot store (binding 14); the raymarch is handed the same
     /// buffer ([`Self::terrain_slots_buffer`]).
     terrain_slots: wgpu::Buffer,
+    /// Fine paint (binding 15) and its CPU copy ([`Self::fine_paint`]).
+    fine_buf: wgpu::Buffer,
+    fine: crate::fine_paint::FineMirror,
     /// Per-slot nearest bitmask, carried into every frame's `Globals.terrain_mask.x`.
     terrain_nearest_mask: u32,
     tex_layout: wgpu::BindGroupLayout,
@@ -1617,6 +1638,9 @@ impl Raster {
                 // settings (`terrain_slots.rs`). Storage, so it takes no
                 // sampled-texture slot from custom shaders.
                 crate::terrain_slots::slot_layout_entry(14),
+                // Binding 15: fine paint, the pages of slots terrain paints
+                // finer than its voxels (`fine_paint.rs`). Storage too.
+                crate::fine_paint::layout_entry(15),
                 // Bindings 6/7/8: GPU skinning — per-vertex joint
                 // indices and weights, and the frame's bone palettes. Same shape and
                 // same vertex-only visibility as `vpaint`, and here for the same
@@ -1750,6 +1774,11 @@ impl Raster {
         };
         let terrain_samp = repeat(wgpu::FilterMode::Linear);
         let terrain_slots = crate::terrain_slots::new_slot_buffer(device);
+        let mut fine = crate::fine_paint::FineMirror::new();
+        fine.take_grown();
+        fine.take_dirty();
+        let fine_buf = new_fine_buffer(device, fine.words().len());
+        gpu.queue.write_buffer(&fine_buf, 0, bytemuck::cast_slice(fine.words()));
         let terrain_samp_nearest = repeat(wgpu::FilterMode::Nearest);
 
         // The skinning stores start at their reserved slot 0 — `skin_base == 0`
@@ -1821,6 +1850,7 @@ impl Raster {
             &mat_ext_buf,
             &sun_map_view,
             &sun_samp,
+            &fine_buf,
         );
         let globals_bind_sunpass = make_globals_bind(
             device,
@@ -1839,6 +1869,7 @@ impl Raster {
             &mat_ext_buf,
             &sun_stub_view,
             &sun_samp,
+            &fine_buf,
         );
 
         // 1×1 white default for meshes registered without a texture (the tint then
@@ -2009,6 +2040,8 @@ impl Raster {
             terrain_samp,
             terrain_samp_nearest,
             terrain_slots,
+            fine_buf,
+            fine,
             terrain_nearest_mask: 0,
             light2d: crate::light2d::Light2d::new(gpu, &tex_layout, gpu.scene_format()),
             palette: crate::palette::Palette::new(gpu, gpu.scene_format()),
@@ -3219,6 +3252,7 @@ impl Raster {
             &self.mat_ext_buf,
             &self.sun_map_view,
             &self.sun_samp,
+            &self.fine_buf,
         );
         self.globals_bind_sunpass = make_globals_bind(
             device,
@@ -3237,6 +3271,7 @@ impl Raster {
             &self.mat_ext_buf,
             &self.sun_stub_view,
             &self.sun_samp,
+            &self.fine_buf,
         );
     }
 
@@ -3266,6 +3301,27 @@ impl Raster {
     /// The raymarch reads the same buffer when given it.
     pub fn set_terrain_slots(&self, gpu: &Gpu, slots: &[crate::terrain_slots::TerrainSlotRaw]) {
         crate::terrain_slots::write_slots(&gpu.queue, &self.terrain_slots, slots);
+    }
+
+    /// The fine paint's CPU copy: set volumes and pages here, then
+    /// [`Self::upload_fine_paint`]. A terrain instance reads volume `k` with
+    /// [`MaterialParams::terrain_fine`] = `k + 1`.
+    pub fn fine_paint(&mut self) -> &mut crate::fine_paint::FineMirror {
+        &mut self.fine
+    }
+
+    /// Send what changed in the fine paint to the GPU, making the buffer
+    /// again (and the bind groups over it) when it grew.
+    pub fn upload_fine_paint(&mut self, gpu: &Gpu) {
+        if self.fine.take_grown() {
+            self.fine_buf = new_fine_buffer(&gpu.device, self.fine.words().len());
+            gpu.queue.write_buffer(&self.fine_buf, 0, bytemuck::cast_slice(self.fine.words()));
+            self.rebuild_globals_bind(&gpu.device);
+            return;
+        }
+        for (at, n) in self.fine.take_dirty() {
+            gpu.queue.write_buffer(&self.fine_buf, at as u64 * 4, bytemuck::cast_slice(&self.fine.words()[at..at + n]));
+        }
     }
 
     /// The terrain slot store's buffer, for the raymarch to share.
@@ -5503,7 +5559,8 @@ pub fn instance_of_mat(model: Mat4, m: &MaterialParams) -> InstanceRaw {
                 nm.y_axis.z,
                 (u32::from(m.paint_modulate) | (m.ext_index << 1)) as f32,
             ],
-            [nm.z_axis.x, nm.z_axis.y, nm.z_axis.z, f32::from(m.terrain_splat)],
+            // n2.w: 0 not terrain, else 1 + (the fine paint volume + 1, 0 none).
+            [nm.z_axis.x, nm.z_axis.y, nm.z_axis.z, if m.terrain_splat { 1.0 + m.terrain_fine.min(crate::fine_paint::VOLUMES as u32) as f32 } else { 0.0 }],
         ],
         color: [m.color[0], m.color[1], m.color[2], m.alpha],
         emissive: [m.emissive[0], m.emissive[1], m.emissive[2], m.emissive_strength],

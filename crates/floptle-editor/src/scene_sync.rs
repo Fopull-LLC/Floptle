@@ -1145,6 +1145,112 @@ mod shadow_atlas_tests {
         assert!(bumps > 50, "the red ground's height map changed {bumps} pixels of the border: it is not being read");
     }
 
+    /// A flat red planet seen from straight above, fine paint at `factor`
+    /// (0 off), with `dabs` of slot 3 (blue) painted on it at the point under
+    /// the camera; the number of blue pixels in the picture, the picture, and
+    /// the editor (for a second look).
+    #[cfg(feature = "editor-ui")]
+    fn fine_paint_view(tag: &str, factor: u8, dabs: &[(f32, f32)], draw_factor: u8) -> Option<(usize, Vec<u8>)> {
+        let mut ed = crate::offscreen::test_editor_with_gpu()?;
+        let dir = std::env::temp_dir().join(format!("floptle_fine_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
+        for (name, c) in [("red", [200u8, 40, 40, 255]), ("green", [40, 200, 40, 255]), ("blue", [40, 40, 200, 255])] {
+            let tex = floptle_render::TextureData { pixels: c.repeat(16 * 16), width: 16, height: 16 };
+            std::fs::write(dir.join(format!("textures/{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        }
+        ed.project_root = dir.clone();
+        ed.terrain_textures = vec!["textures/red.png".into(), "textures/green.png".into(), "textures/blue.png".into()];
+        ed.terrain_textures_dirty = true;
+        for _ in 0..20_000 {
+            ed.sync_terrain_palette(false);
+            if ed.terrain_palette_job.is_none() && !ed.terrain_textures_dirty {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 8,
+            radius: 120.0,
+            voxel: 1.5,
+            relief: 0.0,
+            cave_depth: 0.0,
+            surface_a: floptle_field::procgen::LayerPaint { slot: 1, color: [1.0; 3] },
+            surface_b: floptle_field::procgen::LayerPaint { slot: 1, color: [1.0; 3] },
+            subsoil_depth: 0.0,
+            ..Default::default()
+        });
+        let top = field.raycast(Vec3::new(0.0, 250.0, 0.0), Vec3::NEG_Y, 250.0).unwrap();
+        field.set_fine_paint(factor);
+        for &(dx, r) in dabs {
+            field.paint_texture(top + Vec3::new(dx, 0.0, 0.0), r, 3);
+        }
+        field.set_fine_paint(draw_factor);
+        add_body(&mut ed, 1, DVec3::ZERO, &field);
+        settle(&mut ed);
+        let sun = ed.world.spawn();
+        ed.world.insert(sun, Transform { rotation: floptle_core::math::Quat::from_rotation_x(-1.2), ..Transform::IDENTITY });
+        ed.world.insert(sun, floptle_core::Light { intensity: 1.0, shadows: false, ..Default::default() });
+        ed.camera.position = DVec3::new(top.x as f64, top.y as f64 + 4.0, top.z as f64);
+        // Just short of straight down, where the look basis is undefined.
+        ed.camera.pitch = -std::f32::consts::FRAC_PI_2 + 1e-4;
+        ed.camera.yaw = 0.0;
+        let at = ed.camera.position;
+        ed.settle_terrain_meshes(at, std::time::Duration::from_secs(60));
+        let cam = ed.camera.render_camera();
+        let (w, h) = (320u32, 320u32);
+        let px = crate::shot::render_frame_pixels(&mut ed, &cam, None, w, h, !0, false).expect("a frame");
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Ok(out) = std::env::var("FLOPTLE_FINE_PNG") {
+            let tex = floptle_render::TextureData { pixels: px.clone(), width: w, height: h };
+            std::fs::write(std::path::Path::new(&out).join(format!("fine_{tag}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        }
+        let blue = px.as_chunks::<4>().0.iter().filter(|p| p[2] > 60 && p[2] as f32 > 1.6 * p[0].max(p[1]) as f32).count();
+        Some((blue, px))
+    }
+
+    /// **A stroke painted finer than a voxel draws its own shape.** On 1.5 m
+    /// voxels, a dab under half a voxel writes no voxel slot, only the fine
+    /// pages, so without the GPU reading them it draws nothing at all. Read,
+    /// it is a blue spot smaller than one voxel's square of ground; and at
+    /// 4× a dab of twice the radius is a much bigger one. The camera is 4 m up with a 60°
+    /// view, so a pixel is 1.44 cm across. At 2× and 4×.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn a_fine_stroke_paints_a_shape_narrower_than_a_voxel() {
+        let px_m2 = (2.0 * 4.0 * 30f32.to_radians().tan() / 320.0).powi(2);
+        let mut seen = Vec::new();
+        for f in [2u8, 4] {
+            let Some((small, _)) = fine_paint_view(&format!("small{f}"), f, &[(0.0, 0.35)], f) else { return };
+            let (big, _) = fine_paint_view(&format!("big{f}"), f, &[(0.0, 0.7)], f).unwrap();
+            let (off, _) = fine_paint_view(&format!("off{f}"), f, &[(0.0, 0.7)], 0).unwrap();
+            seen.push((f, off, small as f32 * px_m2, big as f32 * px_m2));
+        }
+        for &(f, off, small, big) in &seen {
+            assert_eq!(off, 0, "the fixture at {f}x: a dab under half a voxel paints no voxel, so fine paint off draws no blue ({seen:?})");
+            assert!(small > 0.005, "a 0.35 m stroke at {f}x drew {small:.3} m² of blue: the fine pages are not being read ({seen:?})");
+            assert!(big < 2.25, "a 0.7 m stroke at {f}x drew {big:.2} m², more than a voxel's 2.25 ({seen:?})");
+        }
+        // At 4× sub-voxels are 0.375 m apart: the small dab is one of them
+        // and the big one a 3×3 patch. Measured 0.014 and 0.84 m².
+        let (small, big) = (seen[1].2, seen[1].3);
+        assert!(big > 8.0 * small, "at 4x a stroke of twice the radius drew {big:.3} m² against {small:.3}: the fine shape is lost");
+    }
+
+    /// **Fine paint switched on draws nothing new until something is
+    /// painted fine.** A terrain with fine paint on and no pages draws
+    /// exactly, pixel for pixel, what it draws with fine paint off: a
+    /// pixel with no page goes down the voxel paths it always did.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn fine_paint_off_is_pixel_identical() {
+        // A voxel-sized dab, so the picture has a border in it.
+        let Some((_, off)) = fine_paint_view("idoff", 0, &[(0.0, 2.0)], 0) else { return };
+        let (_, on) = fine_paint_view("idon", 0, &[(0.0, 2.0)], 2).unwrap();
+        let differ = off.iter().zip(&on).filter(|(a, b)| a != b).count();
+        assert_eq!(differ, 0, "fine paint on with no pages changed {differ} bytes of the picture");
+    }
+
     /// **Up close, a blend between two slots shows only those two.** A
     /// triangle whose corners carry slots 1 and 3 interpolates its slot from
     /// one to the other, through 2; up close it changes so little across a

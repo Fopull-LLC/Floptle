@@ -945,6 +945,52 @@ impl ChunkField {
         out
     }
 
+    /// Every block that holds a fine page, as (chunk, block), in order: what
+    /// a renderer sends when it takes the field whole.
+    pub fn fine_blocks(&self) -> Vec<([i32; 3], u8)> {
+        let mut out: Vec<([i32; 3], u8)> = self
+            .chunks
+            .iter()
+            .filter_map(|(c, ch)| match ch {
+                Chunk::Data(d) => Some((*c, d.fine_mask())),
+                _ => None,
+            })
+            .flat_map(|(c, m)| (0..64u8).filter(move |b| m >> b & 1 == 1).map(move |b| (c, b)))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Block `block` of chunk `c`'s fine page as a renderer draws it over
+    /// the voxels: each sub-voxel's slot where it differs from its voxel's
+    /// (the one its page was filled from), and 255 where it does not, so
+    /// the voxels' own blending draws it. 255 is never a slot.
+    ///
+    /// Drawn whole, a page blended in the slots of the voxels a sub-voxel
+    /// above or below the ground (air, or the subsoil just under it) where
+    /// the voxels draw only the ground's own.
+    pub fn fine_overlay(&self, c: [i32; 3], block: u8) -> Option<Vec<u8>> {
+        let Some(Chunk::Data(d)) = self.chunks.get(&c) else { return None };
+        let page = d.fine_page(block as usize)?;
+        let f = self.fine_factor;
+        let n = 8 * f as usize;
+        let b = block as usize;
+        let origin = [(b % 4) * n, (b / 4 % 4) * n, (b / 16) * n];
+        let mut out = page.to_vec();
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let sub = [origin[0] + x, origin[1] + y, origin[2] + z];
+                    let i = (z * n + y) * n + x;
+                    if d.color(crate::chunk_data::ChunkData::fine_nearest_li(sub, f))[3] == out[i] {
+                        out[i] = 255;
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+
     /// The fine page of block `block` of chunk `c` at full detail, if it has
     /// one: `(8·factor)³` slots, x fastest. Factor as [`Self::fine_factor`].
     pub fn fine_page(&self, c: [i32; 3], block: u8) -> Option<&[u8]> {

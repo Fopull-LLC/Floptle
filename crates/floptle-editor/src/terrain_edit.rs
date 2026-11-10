@@ -349,6 +349,9 @@ pub(crate) struct TerrainRender {
     /// for a later frame because the workers were full: with [`Self::pending`],
     /// what `perf.counts().meshesPending` reports.
     pub waiting: usize,
+    /// The fine paint volume this terrain's pages are in on the GPU
+    /// ([`floptle_render::Raster::fine_paint`]), while its fine paint is on.
+    pub fine: Option<usize>,
 }
 
 /// Chunks along each edge of a far group: the coarsest chunks are drawn this
@@ -1812,6 +1815,8 @@ impl Editor {
             self.terrain_cold.retain(|e, _| world.is_alive(*e));
         }
 
+        sync_fine_paint(&mut self.terrains, &mut self.terrain_render, raster, gpu, full_rebuild);
+
         // ---- 1: land finished worker meshes (stale results drop silently) ----
         if let Some(w) = self.terrain_worker.as_mut() {
             while let Some(done) = w.try_recv() {
@@ -2183,6 +2188,78 @@ impl Editor {
 
 }
 
+/// Keep the GPU's fine paint in step with each terrain's
+/// (`ChunkField::set_fine_paint`): a terrain painting fine holds a volume
+/// of the raster's fine paint buffer, and its changed blocks are sent each
+/// frame. A volume is filled whole when it is first given, and again on a
+/// structural change (`full`), because loading a field marks none of its
+/// pages changed. A terrain whose fine paint is off, or that is gone, gives
+/// its volume back.
+fn sync_fine_paint(
+    terrains: &mut HashMap<Entity, EditorTerrain>,
+    render: &mut HashMap<Entity, TerrainRender>,
+    raster: &mut floptle_render::Raster,
+    gpu: &floptle_render::Gpu,
+    full: bool,
+) {
+    use floptle_render::fine_paint::VOLUMES;
+    let mut held = [false; VOLUMES];
+    for r in render.values() {
+        if let Some(k) = r.fine {
+            held[k] = true;
+        }
+    }
+    for (e, r) in render.iter_mut() {
+        let Some(t) = terrains.get_mut(e) else {
+            if let Some(k) = r.fine.take() {
+                raster.fine_paint().clear_volume(k);
+                held[k] = false;
+            }
+            continue;
+        };
+        let factor = t.field.fine_paint();
+        let dirty = t.field.take_fine_dirty();
+        if factor == 0 {
+            if let Some(k) = r.fine.take() {
+                raster.fine_paint().clear_volume(k);
+                held[k] = false;
+            }
+            continue;
+        }
+        let k = match r.fine {
+            Some(k) => k,
+            None => {
+                // No room for another terrain: it draws from its voxels.
+                let Some(k) = held.iter().position(|h| !h) else { continue };
+                held[k] = true;
+                r.fine = Some(k);
+                raster.fine_paint().clear_volume(k);
+                k
+            }
+        };
+        let fine = raster.fine_paint();
+        let whole = full || fine.volume(k) != Some((factor, t.field.voxel()));
+        fine.set_volume(k, factor, t.field.voxel());
+        let blocks = if whole {
+            fine.clear_volume(k);
+            fine.set_volume(k, factor, t.field.voxel());
+            t.field.fine_blocks()
+        } else {
+            dirty
+        };
+        for (c, b) in blocks {
+            fine.set_page(k, c, b, t.field.fine_overlay(c, b).as_deref());
+        }
+    }
+    // Volumes no terrain holds any more.
+    for (k, h) in held.iter().enumerate() {
+        if !h && raster.fine_paint().volume(k).is_some() {
+            raster.fine_paint().clear_volume(k);
+        }
+    }
+    raster.upload_fine_paint(gpu);
+}
+
 /// What terrain `e` shades with: its own [`Material`], or `shared` (see
 /// `Editor::terrain_material`) when it has none.
 pub(crate) fn terrain_instance_material(world: &floptle_core::World, e: Entity, mats: &TerrainMaterials) -> MaterialParams {
@@ -2364,6 +2441,7 @@ pub(crate) fn push_terrain_instances(
             let mut mp = mat;
             mp.terrain_paint_base = raster.dyn_paint_base(mid);
             mp.terrain_splat = true;
+            mp.terrain_fine = render.fine.map_or(0, |k| k as u32 + 1);
             instances.push((mid, None, floptle_render::instance_of_mat(model, &mp)));
         }
         for (coord, &(mid, _)) in &render.slots {
@@ -2388,6 +2466,7 @@ pub(crate) fn push_terrain_instances(
             // Splat: interpret the chunk color's alpha as a palette slot + triplanar-sample
             // the terrain palette (bound to the raster in `set_terrain_palette`).
             mp.terrain_splat = true;
+            mp.terrain_fine = render.fine.map_or(0, |k| k as u32 + 1);
             // Dissolve-in for a chunk that just arrived. The
             // alpha lane is free on terrain — the shader forces terrain opaque
             // because its vertex alpha is a palette slot — so this rides an

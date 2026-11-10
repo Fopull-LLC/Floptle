@@ -24,6 +24,7 @@ pub mod compute;
 pub mod cull;
 pub mod device;
 pub mod env;
+pub mod fine_paint;
 pub mod frame;
 pub mod gi;
 pub mod gpu_timer;

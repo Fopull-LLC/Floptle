@@ -119,6 +119,10 @@ fn fog_sun_tap(p: vec3<f32>) -> f32 {
 @group(0) @binding(3) var terrain_pal: texture_2d_array<f32>;
 // Every palette slot's settings (`struct TerrainSlot` in field.wgsl).
 @group(0) @binding(14) var<storage, read> terrain_slots: array<TerrainSlot>;
+// Fine paint: texture slots a terrain paints finer than its voxels, in pages
+// per 8³ block (`floptle_render::fine_paint`, where the layout is drawn).
+// Words, so one store holds the header, the tables and the pages.
+@group(0) @binding(15) var<storage, read> fine_paint: array<u32>;
 @group(0) @binding(4) var terrain_pal_samp: sampler;
 @group(0) @binding(11) var terrain_pal_nearest: texture_2d_array<f32>;
 @group(0) @binding(5) var terrain_pal_samp_nearest: sampler;
@@ -269,7 +273,7 @@ fn surface_fade_cut(in: VsOut, pix: vec2<u32>) -> bool {
 // The instance's surface extras index, and whether it is a meshed terrain
 // chunk (see `VsOut.imeta`).
 fn imeta_ext(in: VsOut) -> u32 {
-    return in.imeta.x & 0x7fffffffu;
+    return in.imeta.x & 0x00ffffffu;
 }
 fn imeta_terrain(in: VsOut) -> bool {
     return (in.imeta.x >> 31u) != 0u;
@@ -1137,7 +1141,11 @@ fn build_vs(in: VsIn, pos: vec3<f32>, normal: vec3<f32>, tbase_in: u32, tsplat_i
     let modul = (nw & 1u) != 0u;
     let ext_index = nw >> 1u;
     let ext = ext_at(ext_index);
-    out.imeta = vec4<u32>(ext_index | select(0u, 0x80000000u, tsplat_in > 0.5), 0u, 0u, 0u);
+    // A terrain chunk's `n2.w` is 1 + its fine paint volume (0 none, k for
+    // volume k − 1), which rides bits 24..30 above the extras index (that
+    // came off an f32 lane, so it is under 2²³).
+    let fine = select(0u, min(u32(round(tsplat_in)) - 1u, FINE_VOLUMES), tsplat_in > 0.5);
+    out.imeta = vec4<u32>(ext_index | (fine << 24u) | select(0u, 0x80000000u, tsplat_in > 0.5), 0u, 0u, 0u);
 
     var view_pos = model * vec4<f32>(pos, 1.0);
     // SWAY — the game's wind bends the surface. Measured from the node's own
@@ -2083,7 +2091,163 @@ fn terrain_junction(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, duvx: vec2<f32>, 
     return vec4<f32>(c * in.vcolor.rgb, glow);
 }
 
+// FINE PAINT. The layout is `floptle_render::fine_paint`'s, word for word.
+const FINE_VOLUMES: u32 = 32u;
+const FINE_VOL_WORDS: u32 = 12u;
+const FINE_NONE: u32 = 0xffffffffu;
+
+fn fine_word(i: u32) -> u32 {
+    return fine_paint[min(i, arrayLength(&fine_paint) - 1u)];
+}
+
+// Where global sub-voxel `s` of the volume whose header is at `h` lives:
+// x its block's page, y its place in the page; x FINE_NONE when its block
+// has no page.
+fn fine_locate(h: u32, s: vec3<i32>, f: i32) -> vec2<u32> {
+    let n = 32 * f;
+    let bw = 8 * f;
+    let c = (s - select(vec3<i32>(0), vec3<i32>(n - 1), s < vec3<i32>(0))) / n;
+    let sub = s - c * n;
+    let lo = vec3<i32>(bitcast<i32>(fine_word(h)), bitcast<i32>(fine_word(h + 1u)), bitcast<i32>(fine_word(h + 2u)));
+    let dims = vec3<i32>(i32(fine_word(h + 4u)), i32(fine_word(h + 5u)), i32(fine_word(h + 6u)));
+    let l = c - lo;
+    if (any(l < vec3<i32>(0)) || any(l >= dims)) {
+        return vec2<u32>(FINE_NONE, 0u);
+    }
+    let bt = fine_word(fine_word(h + 7u) + u32((l.z * dims.y + l.y) * dims.x + l.x));
+    if (bt == FINE_NONE) {
+        return vec2<u32>(FINE_NONE, 0u);
+    }
+    let b = sub / bw;
+    let page = fine_word(bt + u32((b.z * 4 + b.y) * 4 + b.x));
+    let q = sub - b * bw;
+    return vec2<u32>(page, u32((q.z * bw + q.y) * bw + q.x));
+}
+
+// The slot a page holds at `at`; 255 where fine paint left the sub-voxel
+// as its voxel says (`ChunkField::fine_overlay`).
+fn fine_slot(at: vec2<u32>) -> u32 {
+    return (fine_word(at.x + at.y / 4u) >> ((at.y % 4u) * 8u)) & 255u;
+}
+
+struct FineSplat {
+    // The share of the pixel fine paint covers, 0 to 1...
+    w: f32,
+    // ...and what it draws there.
+    color: vec4<f32>,
+};
+
+// Path (0): fine paint, drawn over the voxels. A sub-voxel a terrain painted
+// finer than its voxels holds its slot in its block's page; the eight round
+// a pixel are weighed as the voxels are below, and the share that is fine
+// paint draws its slots while the rest is the voxel paths' picture. A
+// sub-voxel that says what its voxel says, or is in a block with no page,
+// is the voxels' share: so a stroke narrower than a voxel keeps its shape,
+// fades out across a block face, and nothing else changes.
+fn fine_splat(in: VsOut, k: u32, tint: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> FineSplat {
+    var out: FineSplat;
+    out.w = 0.0;
+    let h = k * FINE_VOL_WORDS;
+    let f = i32(fine_word(h + 3u));
+    if (f == 0) {
+        return out;
+    }
+    let g = in.lpos * bitcast<f32>(fine_word(h + 8u));
+    let s0 = vec3<i32>(floor(g));
+    let fw = g - floor(g);
+    let bw = 8 * f;
+    // The block of the pixel's nearest sub-voxel. Without a page, and with
+    // every corner in it, no corner is fine paint.
+    let home = vec3<i32>(round(g));
+    let cp = fine_locate(h, home, f);
+    let cb = home - ((home % bw) + bw) % bw;
+    if (cp.x == FINE_NONE) {
+        let q = home - cb;
+        if (all(q > vec3<i32>(0)) && all(q < vec3<i32>(bw - 1))) {
+            return out;
+        }
+    }
+    var slots: array<u32, 8>;
+    var wts: array<f32, 8>;
+    var n_slots = 0;
+    var wp = 0.0;
+    for (var corner = 0u; corner < 8u; corner = corner + 1u) {
+        let o = vec3<i32>(i32(corner & 1u), i32((corner >> 1u) & 1u), i32((corner >> 2u) & 1u));
+        let wv = mix(vec3<f32>(1.0) - fw, fw, vec3<f32>(o));
+        let w = wv.x * wv.y * wv.z;
+        if (w < 1e-4) { continue; }
+        let s = s0 + o;
+        let q = s - cb;
+        var at: vec2<u32>;
+        if (all(q >= vec3<i32>(0)) && all(q < vec3<i32>(bw))) {
+            at = vec2<u32>(cp.x, u32((q.z * bw + q.y) * bw + q.x));
+        } else {
+            at = fine_locate(h, s, f);
+        }
+        if (at.x == FINE_NONE) { continue; }
+        let sl = fine_slot(at);
+        if (sl == 255u) { continue; }
+        wp = wp + w;
+        var found = false;
+        for (var j = 0; j < n_slots; j = j + 1) {
+            if (slots[j] == sl) { wts[j] = wts[j] + w; found = true; }
+        }
+        if (!found) { slots[n_slots] = sl; wts[n_slots] = w; n_slots = n_slots + 1; }
+    }
+    if (wp < 1e-4) {
+        return out;
+    }
+    // The surface maps are weighed by what each part covers; the voxels'
+    // part adds its own at a total weight of one, so scale ours to match.
+    let scale = select(1.0 / (1.0 - wp), 1.0, wp > 0.999);
+    for (var j = 0; j < n_slots; j = j + 1) {
+        wts[j] = wts[j] * scale;
+    }
+    out.w = select(wp, 1.0, wp > 0.999);
+    out.color = splat_weighted(in, slots, wts, n_slots, tint, dpx, dpy);
+    return out;
+}
+
+// The slots round a pixel blended by their weights: untextured (slot 0)
+// toward the flat tint, the rest by their pictures.
+fn splat_weighted(in: VsOut, slots: array<u32, 8>, wts: array<f32, 8>, n_slots: i32, tint: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> vec4<f32> {
+    var albedo = vec3<f32>(0.0);
+    var glow = 0.0;
+    var wsum = 0.0;
+    for (var k = 0; k < n_slots; k = k + 1) {
+        let w = wts[k];
+        wsum = wsum + w;
+        if (slots[k] == 0u) {
+            albedo = albedo + tint * w;
+            terrain_surface_plain(in.lnorm, w);
+        } else {
+            let layer = i32(slots[k]) - 1;
+            albedo = albedo + terrain_triplanar(layer, in.lpos, in.lnorm, dpx, dpy, w) * tint * 1.6 * w;
+            glow = glow + slot_glow(layer) * w;
+        }
+    }
+    if (wsum < 1e-4) {
+        return vec4<f32>(tint, 0.0);
+    }
+    return vec4<f32>(albedo / wsum, glow / wsum);
+}
+
 fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32, dd: vec2<f32>, duvx: vec2<f32>, duvy: vec2<f32>) -> vec4<f32> {
+    let fk = (in.imeta.x >> 24u) & 127u;
+    if (fk != 0u) {
+        let fine = fine_splat(in, fk - 1u, in.vcolor.rgb, dpx, dpy);
+        if (fine.w >= 1.0) {
+            return fine.color;
+        }
+        if (fine.w > 0.0) {
+            return mix(terrain_splat_voxels(in, dpx, dpy, aw, ew, dd, duvx, duvy), fine.color, fine.w);
+        }
+    }
+    return terrain_splat_voxels(in, dpx, dpy, aw, ew, dd, duvx, duvy);
+}
+
+// The voxel paths: the slots the mesh and the shadow atlas carry.
+fn terrain_splat_voxels(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32, dd: vec2<f32>, duvx: vec2<f32>, duvy: vec2<f32>) -> vec4<f32> {
     if (in.imeta.y != 0u) {
         return terrain_junction(in, dpx, dpy, duvx, duvy);
     }
@@ -2226,25 +2390,7 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32, dd
         let gb = slot_glow(i32(pb) - 1);
         return vec4<f32>(mix(ca, cb, t) * tint, mix(ga, gb, t));
     }
-    var albedo = vec3<f32>(0.0);
-    var glow = 0.0;
-    var wsum = 0.0;
-    for (var k = 0; k < n_slots; k = k + 1) {
-        let w = wts[k];
-        wsum = wsum + w;
-        if (slots[k] == 0u) {
-            albedo = albedo + tint * w; // untextured voxels blend toward the flat tint
-            terrain_surface_plain(in.lnorm, w);
-        } else {
-            let layer = i32(slots[k]) - 1;
-            albedo = albedo + terrain_triplanar(layer, in.lpos, in.lnorm, dpx, dpy, w) * tint * 1.6 * w;
-            glow = glow + slot_glow(layer) * w;
-        }
-    }
-    if (wsum < 1e-4) {
-        return vec4<f32>(tint, 0.0);
-    }
-    return vec4<f32>(albedo / wsum, glow / wsum);
+    return splat_weighted(in, slots, wts, n_slots, tint, dpx, dpy);
 }
 
 // The base texture sampled through the material's tiling block (rim.w flags +
