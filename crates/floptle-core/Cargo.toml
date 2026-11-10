@@ -10,6 +10,9 @@ rust-version.workspace = true
 
 [dependencies]
 glam = { workspace = true }
+# The ECS's maps: entity ids and component types, hashed on every
+# component read. Nothing an outsider chooses, so no SipHash.
+rustc-hash = "2"
 
 # The browser's clock — see `time::Instant`. Only the wasm target carries it;
 # everywhere else the re-export is `std`'s own type.

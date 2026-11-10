@@ -1698,6 +1698,7 @@ name = "floptle-core"
 version = "0.118.2"
 dependencies = [
  "glam",
+ "rustc-hash 2.1.2",
  "web-time",
 ]
 

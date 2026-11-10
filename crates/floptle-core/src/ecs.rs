@@ -57,12 +57,12 @@ struct Column<T> {
     /// rather than the new occupant. Matching by index alone let a terrain
     /// destroyed in Play keep reading the Material of whatever node took its
     /// slot next, and paint every terrain with it.
-    at: HashMap<u32, usize>,
+    at: rustc_hash::FxHashMap<u32, usize>,
 }
 
 impl<T> Column<T> {
     fn new() -> Self {
-        Self { rows: Vec::new(), at: HashMap::new(), revision: 0 }
+        Self { rows: Vec::new(), at: Default::default(), revision: 0 }
     }
     fn position(&self, e: Entity) -> Option<usize> {
         self.at.get(&e.index).copied().filter(|&i| self.rows[i].0.generation == e.generation)
@@ -140,7 +140,7 @@ pub struct World {
     generations: Vec<u32>,
     free: Vec<u32>,
     alive: Vec<bool>,
-    columns: HashMap<TypeId, Box<dyn AnyColumn>>,
+    columns: rustc_hash::FxHashMap<TypeId, Box<dyn AnyColumn>>,
     revision: u64,
     id: u64,
     /// Every non-transform write since `log_base`, entity by entity.
@@ -159,7 +159,7 @@ impl Default for World {
             generations: Vec::new(),
             free: Vec::new(),
             alive: Vec::new(),
-            columns: HashMap::new(),
+            columns: Default::default(),
             // Revision 1, never 0: a cache holding a default-initialised `u64`
             // must not read as already up to date with a world nobody has
             // touched. `new` and `default` have to agree about this, so there is
