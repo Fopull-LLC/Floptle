@@ -692,11 +692,20 @@ impl Editor {
         }
         let walk_t = floptle_core::profile::Span::new();
         let mut cull_ms = 0.0f32;
+        let mut tree = floptle_core::TreeCache::new();
         for (ent, matter) in &ents {
-            if floptle_core::is_hidden(&self.world, *ent) {
+            // A group draws nothing and casts nothing, and a built base is a
+            // quarter groups: let it cost nothing. Its children still find
+            // its transform, through `tree`.
+            if matches!(matter, Matter::Empty) {
                 continue;
             }
-            if floptle_core::is_disabled(&self.world, *ent) {
+            // The node's place in the tree, its ancestors worked out once a walk.
+            let node = tree.resolve(&self.world, *ent);
+            if node.hidden {
+                continue;
+            }
+            if node.disabled {
                 continue;
             }
             // Camera cull mask: skip nodes on layers this camera doesn't render.
@@ -711,12 +720,12 @@ impl Editor {
                 && (cull_mask >> lt.index_for(&self.world, *ent)) & 1 == 0
             {
                 if let Some(sun) = &sun_casters {
-                    let t = floptle_core::world_transform(&self.world, *ent);
+                    let t = node.world;
                     crate::shading::push_shadow_caster(&casters, *ent, matter, &t, cam.world_position, &off_frustum, None, sun, &mut shadow_casters);
                 }
                 continue;
             }
-            let mut t = floptle_core::world_transform(&self.world, *ent);
+            let mut t = node.world;
             // …and the same nudge here, or the Game view would sort differently
             // from the Scene view — the drift this file has already had three
             // times over.

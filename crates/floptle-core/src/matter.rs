@@ -2665,12 +2665,238 @@ pub fn world_transform(world: &crate::ecs::World, e: crate::ecs::Entity) -> crat
     t
 }
 
+/// What one node's place in the tree comes to: its world transform, and
+/// whether it or an ancestor is hidden or switched off.
+#[derive(Clone, Copy, Debug)]
+pub struct Resolved {
+    pub world: crate::transform::Transform,
+    pub hidden: bool,
+    pub disabled: bool,
+}
+
+/// [`world_transform`], [`is_hidden`] and [`is_disabled`] for a whole frame's
+/// walk, with every ancestor worked out once.
+///
+/// Asking the free functions node by node climbs each node's whole chain three
+/// times, so a part three levels down a building pays for its piece, its
+/// structure and its body again for every part beside it: a walk over a built
+/// base cost close to three times what the same number of loose nodes did.
+/// Here a parent is resolved the first time a child asks and remembered for
+/// the rest of the walk.
+///
+/// Build one per walk and drop it afterwards. It remembers what it saw, so a
+/// transform written after it answered is not seen.
+#[derive(Default)]
+pub struct TreeCache {
+    parents: rustc_hash::FxHashMap<crate::ecs::Entity, Chain>,
+}
+
+/// A parent, as the map it applies to a child's local transform. A child's
+/// world is the right fold `p_n ∘ … ∘ p_1 ∘ local` that [`world_transform`]
+/// computes; that fold is NOT the same as composing the parents' world
+/// transforms first, because the composition is componentwise TRS and a
+/// non-uniform scale does not commute with a rotation. So the chain is kept
+/// as the affine map it really is: `t ↦ off + lin·t`, rotations and scales
+/// multiplied on the left.
+#[derive(Clone, Copy)]
+struct Chain {
+    /// `Some` when this parent is a root: its own transform, applied with
+    /// [`crate::transform::Transform::mul_transform`] itself so the commonest
+    /// case is exactly what [`world_transform`] gives.
+    root: Option<crate::transform::Transform>,
+    lin: glam::DMat3,
+    off: crate::math::DVec3,
+    rot: crate::math::Quat,
+    scale: crate::math::Vec3,
+    hidden: bool,
+    disabled: bool,
+}
+
+impl Chain {
+    fn apply(&self, local: &crate::transform::Transform) -> crate::transform::Transform {
+        if let Some(r) = &self.root {
+            return r.mul_transform(local);
+        }
+        crate::transform::Transform {
+            translation: self.off + self.lin * local.translation,
+            rotation: self.rot * local.rotation,
+            scale: self.scale * local.scale,
+        }
+    }
+
+    /// This chain with one more node `t` under it, as the chain a child of `t` sees.
+    fn then(&self, t: &crate::transform::Transform, hidden: bool, disabled: bool) -> Chain {
+        let (lin, off, rot, scale) = match &self.root {
+            Some(r) => (local_lin(r), r.translation, r.rotation, r.scale),
+            None => (self.lin, self.off, self.rot, self.scale),
+        };
+        Chain {
+            root: None,
+            lin: lin * local_lin(t),
+            off: off + lin * t.translation,
+            rot: rot * t.rotation,
+            scale: scale * t.scale,
+            hidden: self.hidden || hidden,
+            disabled: self.disabled || disabled,
+        }
+    }
+}
+
+/// The linear part of `t ↦ rotation·(scale ⊙ t)`, built by putting the three
+/// axes through the very quaternion product
+/// [`crate::transform::Transform::mul_transform`] uses. A stored rotation is
+/// unit only to `f32` precision, and `DMat3::from_quat` assumes exactly unit,
+/// so the two would be different maps by a few parts in ten million: 0.6 m on
+/// a chain whose offsets add up to a few thousand kilometres.
+fn local_lin(t: &crate::transform::Transform) -> glam::DMat3 {
+    let q = t.rotation.as_dquat();
+    let s = t.scale.as_dvec3();
+    glam::DMat3::from_cols(
+        q * crate::math::DVec3::new(s.x, 0.0, 0.0),
+        q * crate::math::DVec3::new(0.0, s.y, 0.0),
+        q * crate::math::DVec3::new(0.0, 0.0, s.z),
+    )
+}
+
+impl TreeCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `e`'s world transform and whether it is hidden or switched off — the
+    /// same answers [`world_transform`], [`is_hidden`] and [`is_disabled`] give.
+    pub fn resolve(&mut self, world: &crate::ecs::World, e: crate::ecs::Entity) -> Resolved {
+        use crate::transform::Transform;
+        let local = world.get::<Transform>(e).copied().unwrap_or(Transform::IDENTITY);
+        let hidden = matches!(world.get::<crate::Visible>(e), Some(crate::Visible(false)));
+        let disabled = world.get::<Disabled>(e).is_some();
+        let Some(Parent(p)) = world.get::<Parent>(e).copied() else {
+            return Resolved { world: local, hidden, disabled };
+        };
+        let chain = self.chain(world, p);
+        Resolved {
+            world: chain.apply(&local),
+            hidden: hidden || chain.hidden,
+            disabled: disabled || chain.disabled,
+        }
+    }
+
+    /// The chain a child of `p` sees, working out and remembering any ancestor
+    /// not met yet. The climb stops at 64 levels, as the free functions do.
+    fn chain(&mut self, world: &crate::ecs::World, p: crate::ecs::Entity) -> Chain {
+        use crate::transform::Transform;
+        if let Some(c) = self.parents.get(&p) {
+            return *c;
+        }
+        // Climb to the first ancestor already known (or a root), then come back
+        // down, remembering each level.
+        let mut todo = vec![p];
+        let mut known: Option<Chain> = None;
+        let mut cur = p;
+        for _ in 1..64 {
+            let Some(Parent(up)) = world.get::<Parent>(cur).copied() else { break };
+            if let Some(c) = self.parents.get(&up) {
+                known = Some(*c);
+                break;
+            }
+            todo.push(up);
+            cur = up;
+        }
+        let mut chain = known;
+        for &n in todo.iter().rev() {
+            let t = world.get::<Transform>(n).copied().unwrap_or(Transform::IDENTITY);
+            let hidden = matches!(world.get::<crate::Visible>(n), Some(crate::Visible(false)));
+            let disabled = world.get::<Disabled>(n).is_some();
+            let c = match chain {
+                Some(up) => up.then(&t, hidden, disabled),
+                None => Chain {
+                    root: Some(t),
+                    lin: glam::DMat3::IDENTITY,
+                    off: crate::math::DVec3::ZERO,
+                    rot: crate::math::Quat::IDENTITY,
+                    scale: crate::math::Vec3::ONE,
+                    hidden,
+                    disabled,
+                },
+            };
+            self.parents.insert(n, c);
+            chain = Some(c);
+        }
+        chain.expect("the climb starts at p, so there is at least one level")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ecs::World;
     use crate::math::DVec3;
     use crate::transform::Transform;
+
+    /// The walk's cache must give what the free functions give, node for node,
+    /// through rotated, non-uniformly scaled, mirrored, hidden and switched-off
+    /// parents, in whatever order the walk happens to ask.
+    #[test]
+    fn the_tree_cache_answers_what_the_free_functions_do() {
+        use crate::math::{Quat, Vec3};
+        let mut w = World::default();
+        let mut ents = Vec::new();
+        let mut seed = 0x9e37_79b9u32;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed as f32) / (u32::MAX as f32)
+        };
+        for i in 0..400 {
+            let e = w.spawn();
+            let axis = Vec3::new(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5).normalize_or(Vec3::Y);
+            let sx = if i % 7 == 0 { -1.0 } else { 1.0 };
+            w.insert(e, Transform {
+                translation: DVec3::new(rnd() as f64 * 50.0, rnd() as f64 * 5.0, rnd() as f64 * 50.0 - 1.0e6),
+                rotation: Quat::from_axis_angle(axis, rnd() * 6.0),
+                scale: Vec3::new(sx * (0.5 + rnd()), 0.5 + rnd() * 2.0, 0.5 + rnd()),
+            });
+            // Parents come from earlier nodes, so chains run up to ~8 deep.
+            if i > 0 && rnd() < 0.85 {
+                let p = ents[((rnd() * i as f32) as usize).min(i - 1).max(i.saturating_sub(6))];
+                w.insert(e, Parent(p));
+            }
+            if rnd() < 0.05 {
+                w.insert(e, crate::Visible(false));
+            }
+            if rnd() < 0.05 {
+                w.insert(e, Disabled);
+            }
+            ents.push(e);
+        }
+        // Children before parents, then parents before children: the cache
+        // must not depend on which end of a chain the walk meets first.
+        for order in [ents.iter().rev().copied().collect::<Vec<_>>(), ents.clone()] {
+            let mut cache = TreeCache::new();
+            let mut depth3 = 0;
+            for e in order {
+                let r = cache.resolve(&w, e);
+                let t = world_transform(&w, e);
+                let off = (r.world.translation - t.translation).length();
+                assert!(off < 1e-6, "translation off by {off} m");
+                assert!(r.world.rotation.abs_diff_eq(t.rotation, 1e-5), "{:?} vs {:?}", r.world.rotation, t.rotation);
+                // f32 products taken in another order: a few ulps, relative.
+                let ds = ((r.world.scale - t.scale) / t.scale).abs().max_element();
+                assert!(ds < 1e-6, "{:?} vs {:?}", r.world.scale, t.scale);
+                assert_eq!(r.hidden, is_hidden(&w, e));
+                assert_eq!(r.disabled, is_disabled(&w, e));
+                let mut d = 0;
+                let mut cur = e;
+                while let Some(Parent(p)) = w.get::<Parent>(cur).copied() {
+                    d += 1;
+                    cur = p;
+                }
+                depth3 += (d >= 3) as usize;
+            }
+            assert!(depth3 > 100, "the fixture must have deep chains, has {depth3}");
+        }
+    }
 
     #[test]
     fn parent_carries_child() {

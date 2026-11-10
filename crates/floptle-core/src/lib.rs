@@ -49,7 +49,7 @@ pub use material::{BlendMode, Material, MaterialPatch, ObjectMaterials, Refracti
 pub use matter::{
     CameraDraws,
     TerrainCollision,
-    active_camera, is_disabled, is_drawn, is_hidden, is_persistent, is_spot, world_transform, MIN_SPOT_ANGLE, OMNI_ANGLE, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, Cast2D,
+    active_camera, is_disabled, is_drawn, is_hidden, is_persistent, is_spot, world_transform, Resolved, TreeCache, MIN_SPOT_ANGLE, OMNI_ANGLE, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, Cast2D,
     CastShadow,
     SurfaceFriction,
     CelestialBody, Collidable, Disabled, GravityMode, Layer, Light, LightShape, Lighting2D, Lit2D, Lit2DFacts, Made, Matter,

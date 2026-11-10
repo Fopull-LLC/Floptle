@@ -1936,17 +1936,26 @@ impl Editor {
         let mut shadow_casters = Vec::new();
         let walk_t = floptle_core::profile::Span::new();
         let mut cull_ms = 0.0f32;
+        let mut tree = floptle_core::TreeCache::new();
         for (e, matter) in &ents {
+            // A group draws nothing and casts nothing, and a built base is a
+            // quarter groups: let it cost nothing. Its children still find
+            // its transform, through `tree`.
+            if matches!(matter, Matter::Empty) {
+                continue;
+            }
+            // The node's place in the tree, its ancestors worked out once a walk.
+            let node = tree.resolve(&self.world, *e);
             // Hidden nodes (Visible(false), on the node or an ancestor) don't draw their
             // geometry (a script or the Inspector can toggle this); they still keep
             // transforms and physics.
-            if floptle_core::is_hidden(&self.world, *e) {
+            if node.hidden {
                 continue;
             }
             // Switched off (the Hierarchy/Inspector toggle) — this node or an ancestor.
             // Unlike `Visible`, this also takes the node out of physics and stops its
             // scripts; see `floptle_core::Disabled`.
-            if floptle_core::is_disabled(&self.world, *e) {
+            if node.disabled {
                 continue;
             }
             // The active camera's layer cull mask (fullscreen game view only).
@@ -1962,13 +1971,13 @@ impl Editor {
                 && (game_cull_mask >> lt.index_for(&self.world, *e)) & 1 == 0
             {
                 if let Some(sun) = &sun {
-                    let t = floptle_core::world_transform(&self.world, *e);
+                    let t = node.world;
                     crate::shading::push_shadow_caster(&casters, *e, matter, &t, cam.world_position, &frustum, None, sun, &mut shadow_casters);
                 }
                 continue;
             }
             // World transform (composes any parent chain) — a parent carries children.
-            let mut t = floptle_core::world_transform(&self.world, *e);
+            let mut t = node.world;
             // A sorting layer is a Z nudge on the drawn transform, so ordering a
             // flat scene never moves anything the physics or a script can see.
             // Resolved before the loop (`raster` is borrowed mutably in here).
