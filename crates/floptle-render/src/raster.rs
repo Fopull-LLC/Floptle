@@ -855,6 +855,65 @@ fn group_by_key<K: Eq + std::hash::Hash + Copy, T: Copy>(
     groups
 }
 
+/// [`group_by_key`] written straight into the instance list a pass uploads:
+/// appends every item to `out`, grouped by key in first-appearance order with
+/// members in input order, and returns each group's `(key, start, count)` in
+/// `out`.
+///
+/// Each record is copied once, into its final place. Grouping into a `Vec`
+/// per key and then concatenating copied every 208-byte record twice, plus the
+/// regrowth of each group's vector, and the passes do this for every instance
+/// in the frame: three or four times over, a frame of a built base. Items may
+/// be borrowed, so a caller filtering the frame's own list copies nothing
+/// until the record lands. Consecutive items with the same key skip the hash
+/// lookup, since a model's parts arrive together.
+fn bucket_into<K, T, B>(items: impl Iterator<Item = (K, B)>, out: &mut Vec<T>) -> Vec<(K, u32, u32)>
+where
+    K: Eq + std::hash::Hash + Copy,
+    T: Copy,
+    B: std::borrow::Borrow<T>,
+{
+    let mut index: rustc_hash::FxHashMap<K, u32> = rustc_hash::FxHashMap::default();
+    let mut keys: Vec<K> = Vec::new();
+    let mut counts: Vec<u32> = Vec::new();
+    let mut tagged: Vec<(u32, B)> = Vec::with_capacity(items.size_hint().0);
+    let mut last: Option<(K, u32)> = None;
+    for (k, v) in items {
+        let g = match last {
+            Some((lk, lg)) if lk == k => lg,
+            _ => {
+                let g = *index.entry(k).or_insert_with(|| {
+                    keys.push(k);
+                    counts.push(0);
+                    (keys.len() - 1) as u32
+                });
+                last = Some((k, g));
+                g
+            }
+        };
+        counts[g as usize] += 1;
+        tagged.push((g, v));
+    }
+    // Counting sort: each group's first slot, then every item's place.
+    let base = out.len() as u32;
+    let mut next: Vec<u32> = Vec::with_capacity(counts.len());
+    let mut at = 0u32;
+    for &c in &counts {
+        next.push(at);
+        at += c;
+    }
+    let groups: Vec<(K, u32, u32)> =
+        keys.iter().zip(next.iter().zip(&counts)).map(|(&k, (&s, &c))| (k, base + s, c)).collect();
+    let mut order = vec![0u32; tagged.len()];
+    for (i, (g, _)) in tagged.iter().enumerate() {
+        let slot = &mut next[*g as usize];
+        order[*slot as usize] = i as u32;
+        *slot += 1;
+    }
+    out.extend(order.iter().map(|&i| *tagged[i as usize].1.borrow()));
+    groups
+}
+
 /// The capacity a dynamic slot gets for a mesh of `n` elements: 1.5× headroom, floored
 /// at 1024 and rounded to a power of two. The rounding matters as much as the headroom:
 /// the free-lists are keyed by exact capacity, so collapsing thousands of chunk sizes
@@ -4320,19 +4379,16 @@ impl Raster {
         };
         let bucketize =
             |want_opaque: bool, raws: &mut Vec<InstanceRaw>| -> Vec<(usize, Option<u32>, u32, u32)> {
-                let groups = group_by_key(
+                bucket_into(
                     instances
                         .iter()
                         .filter(|(_, _, raw)| solid(raw) && is_opaque(raw) == want_opaque)
-                        .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), *raw)),
-                );
-                let mut buckets = Vec::with_capacity(groups.len());
-                for ((mesh_idx, tex_key), members) in groups {
-                    let start = raws.len() as u32;
-                    raws.extend_from_slice(&members);
-                    buckets.push((mesh_idx, tex_key, start, members.len() as u32));
-                }
-                buckets
+                        .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), raw)),
+                    raws,
+                )
+                .into_iter()
+                .map(|((mesh_idx, tex_key), start, count)| (mesh_idx, tex_key, start, count))
+                .collect()
             };
         let opaque_buckets = bucketize(true, &mut raws);
         let transparent_buckets = bucketize(false, &mut raws);
@@ -4951,6 +5007,7 @@ impl Raster {
         &mut self,
         gpu: &Gpu,
         instances: &[(MeshId, Option<TexId>, InstanceRaw)],
+        keep: &dyn Fn(&(MeshId, Option<TexId>, InstanceRaw)) -> bool,
         flsl: &[FlslDraw],
         skins: &[SkinDraw],
     ) -> (Vec<(usize, Option<u32>, u32, u32)>, Vec<(usize, Option<u32>, u32, u32)>, Vec<FlslBucket>) {
@@ -4986,26 +5043,27 @@ impl Raster {
         let solid = |raw: &InstanceRaw| {
             !glassy.get(ext_index_of(raw) as usize).copied().unwrap_or(false)
         };
-        let groups = group_by_key(
+        let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
+        let buckets: Vec<(usize, Option<u32>, u32, u32)> = bucket_into(
             instances
                 .iter()
-                .filter(|(_, _, raw)| {
-                    solid(raw) && (is_terrain(raw) || dithered(raw) || (raw.color[3] >= OPAQUE_CUTOFF && !blended(raw)))
+                .filter(|d| {
+                    let raw = &d.2;
+                    keep(d)
+                        && solid(raw)
+                        && (is_terrain(raw) || dithered(raw) || (raw.color[3] >= OPAQUE_CUTOFF && !blended(raw)))
                 })
-                .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), *raw))
+                .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), raw))
                 .chain(
                     flsl.iter()
                         .filter(|(_, _, bind, _)| flsl_opaque(bind))
-                        .map(|(id, tex, _, raw)| ((id.0 as usize, tex.map(|t| t.0)), *raw)),
+                        .map(|(id, tex, _, raw)| ((id.0 as usize, tex.map(|t| t.0)), raw)),
                 ),
-        );
-        let mut raws: Vec<InstanceRaw> = Vec::new();
-        let mut buckets: Vec<(usize, Option<u32>, u32, u32)> = Vec::new();
-        for ((mesh_idx, tex_key), members) in groups {
-            let start = raws.len() as u32;
-            raws.extend_from_slice(&members);
-            buckets.push((mesh_idx, tex_key, start, members.len() as u32));
-        }
+            &mut raws,
+        )
+        .into_iter()
+        .map(|((mesh_idx, tex_key), start, count)| (mesh_idx, tex_key, start, count))
+        .collect();
         // Skinned parts prime depth from the same posed vertices the color pass
         // shades — `vs_skin` is `@invariant` through the shared tail, so the two
         // agree bit for bit. Priming from the bind pose instead would depth-reject
@@ -5049,7 +5107,7 @@ impl Raster {
         }
     }
 
-    /// The instances that can put anything in the sun's shadow map: those whose
+    /// Whether an instance can put anything in the sun's shadow map: whether its
     /// bounds touch the sun's box (`globals.sun_vp`). The camera's list reaches
     /// as far as it sees, terrain kilometres out and flora to its reach, and
     /// the box reaches to the shadow distance; everything outside it the GPU
@@ -5061,30 +5119,23 @@ impl Raster {
     /// largest scale, grown by the most a material's sway can bend it in this
     /// frame's wind (`vs`'s `0.1·sway·h²·|wind|·1.25`, with the height at its
     /// most, the sphere's diameter).
-    fn sun_casters<'a>(
-        &self,
-        g: &Globals,
-        instances: &'a [(MeshId, Option<TexId>, InstanceRaw)],
-    ) -> std::borrow::Cow<'a, [(MeshId, Option<TexId>, InstanceRaw)]> {
+    fn sun_reach(&self, g: &Globals) -> impl Fn(&(MeshId, Option<TexId>, InstanceRaw)) -> bool + use<> {
         let box_ = crate::cull::Frustum::from_view_proj(Mat4::from_cols_array_2d(&g.sun_vp));
         let wind = glam::Vec3::new(g.time[1], g.time[2], g.time[3]).length();
         let sway: Vec<f32> = self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| c[2][2].max(0.0)).collect();
-        let reaches = |(id, _, raw): &(MeshId, Option<TexId>, InstanceRaw)| {
-            let Some(m) = self.meshes.get(id.0 as usize) else { return true };
+        let reach: Vec<f32> = self.meshes.iter().map(|m| m.reach).collect();
+        move |(id, _, raw): &(MeshId, Option<TexId>, InstanceRaw)| {
+            let Some(&mesh_reach) = reach.get(id.0 as usize) else { return true };
             let model = Mat4::from_cols_array_2d(&raw.model);
             let scale = model.x_axis.truncate().length().max(model.y_axis.truncate().length()).max(model.z_axis.truncate().length());
-            let r = m.reach * scale;
+            let r = mesh_reach * scale;
             if !r.is_finite() {
                 return true;
             }
             let s = sway.get(ext_index_of(raw) as usize).copied().unwrap_or(0.0);
             let bend = 0.125 * s * (2.0 * r) * (2.0 * r) * wind;
             box_.contains_sphere(model.w_axis.truncate(), r * 1.01 + bend + 0.05)
-        };
-        if instances.iter().all(reaches) {
-            return std::borrow::Cow::Borrowed(instances);
         }
-        std::borrow::Cow::Owned(instances.iter().filter(|d| reaches(d)).copied().collect())
     }
 
     /// Triangles mesh `id` draws (0 for an unknown or empty one).
@@ -5092,19 +5143,12 @@ impl Raster {
         self.meshes.get(id.0 as usize).map_or(0, |m| m.gpu_mesh.index_count / 3)
     }
 
-    /// The instances that cast a sun shadow at all: every one but those whose
+    /// Whether an instance casts a sun shadow at all: every one does but those whose
     /// surface extras say not ([`shadowless_extras`](Self::shadowless_extras)).
-    fn casters_of<'a>(
-        &self,
-        instances: &'a [(MeshId, Option<TexId>, InstanceRaw)],
-    ) -> std::borrow::Cow<'a, [(MeshId, Option<TexId>, InstanceRaw)]> {
+    fn casts(&self) -> impl Fn(&InstanceRaw) -> bool + use<> {
         let quiet: Vec<bool> =
             self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| (c[1][0] as u32) & EXT_NO_CAST != 0).collect();
-        if !quiet.iter().any(|&q| q) {
-            return std::borrow::Cow::Borrowed(instances);
-        }
-        let casts = |raw: &InstanceRaw| !quiet.get(ext_index_of(raw) as usize).copied().unwrap_or(false);
-        std::borrow::Cow::Owned(instances.iter().filter(|(_, _, raw)| casts(raw)).copied().collect())
+        move |raw: &InstanceRaw| !quiet.get(ext_index_of(raw) as usize).copied().unwrap_or(false)
     }
 
     /// The last sun shadow map's opaque instances: how many it drew, of how
@@ -5134,10 +5178,18 @@ impl Raster {
         // camera does not thin its shadow.
         g.sun_extra[1] = 1.0;
         self.begin_pass(gpu, g);
-        let casters = self.casters_of(instances);
-        let casters = if self.sun_map_cull { std::borrow::Cow::Owned(self.sun_casters(&g, &casters).into_owned()) } else { casters };
-        self.sun_map_casts = (casters.len(), instances.len());
-        let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, &casters, flsl, skins);
+        // Filtered as the records are bucketed, not into copies of the list
+        // first: those were two copies of every instance in the frame.
+        let casts = self.casts();
+        let reach = self.sun_map_cull.then(|| self.sun_reach(&g));
+        let cast = std::cell::Cell::new(0usize);
+        let keep = |d: &(MeshId, Option<TexId>, InstanceRaw)| {
+            let ok = casts(&d.2) && reach.as_ref().is_none_or(|r| r(d));
+            cast.set(cast.get() + ok as usize);
+            ok
+        };
+        let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, instances, &keep, flsl, skins);
+        self.sun_map_casts = (cast.get(), instances.len());
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-sun-map") });
@@ -5200,7 +5252,7 @@ impl Raster {
         self.claim_prepass(gpu, size);
         self.begin_pass(gpu, globals);
 
-        let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, instances, flsl, skins);
+        let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, instances, &|_| true, flsl, skins);
         let slot = &self.prepass[self.prepass_active.expect("claim_prepass ran")];
         let (prepass_tex, prepass_view) = (&slot.tex, &slot.view);
 
@@ -5663,6 +5715,35 @@ mod tests {
         let g = group_by_key(many.iter().copied());
         assert_eq!(g.len(), 20_000);
         assert_eq!(g[19_999], (19_999, vec![19_999]));
+    }
+
+    /// The passes' grouping writes straight into the upload list and must
+    /// land exactly what [`group_by_key`] and a concatenation did: same
+    /// buckets in the same order, members in input order, after whatever the
+    /// list already held, and borrowed or owned items alike.
+    #[test]
+    fn bucket_into_lands_what_grouping_and_concatenating_did() {
+        let mut seed = 7u32;
+        let items: Vec<(u32, u32)> = (0..5_000)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                // Runs of one key, as a model's parts arrive, then a jump.
+                ((seed >> 28) + (i / 7 % 3), i)
+            })
+            .collect();
+        let mut want = vec![99u32, 98];
+        let mut want_b = Vec::new();
+        for (k, members) in group_by_key(items.iter().copied()) {
+            want_b.push((k, want.len() as u32, members.len() as u32));
+            want.extend_from_slice(&members);
+        }
+        let mut got = vec![99u32, 98];
+        let got_b = super::bucket_into(items.iter().map(|(k, v)| (*k, v)), &mut got);
+        assert_eq!(got_b, want_b);
+        assert_eq!(got, want);
+        let mut owned = Vec::new();
+        assert_eq!(super::bucket_into(items.iter().copied(), &mut owned).len(), want_b.len());
+        assert_eq!(owned[..], want[2..]);
     }
 }
 
