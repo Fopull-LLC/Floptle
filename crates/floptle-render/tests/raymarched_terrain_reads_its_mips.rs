@@ -120,7 +120,8 @@ fn distant_raymarched_ground_reads_its_mips_and_holds_still() {
     assert!(peak < 250.0, "the fixture: white ground clips at {peak:.1}, so the means cannot be compared");
     // The full-size level alone reads single texels, which is still what a
     // slot that does not ask for mips draws.
-    assert!(s1 > m1 * 0.3, "the fixture: one level should read single texels, spread {s1:.1} about {m1:.1}");
+    let adapter = gpu.adapter.get_info();
+    assert!(s1 > m1 * 0.3, "the fixture: one level should read single texels, spread {s1:.1} about {m1:.1} (on {} {:?})", adapter.name, adapter.backend);
     assert!(c1 > m1 * 0.2, "the fixture: one level should crawl, {c1:.1} about {m1:.1}");
     assert!(s2 < s1 * 0.1, "mipped ground still reads single texels: spread {s2:.1} against {s1:.1} without mips");
     assert!(c2 < c1 * 0.1, "mipped ground crawled {c2:.2} a pixel against {c1:.2} without mips");

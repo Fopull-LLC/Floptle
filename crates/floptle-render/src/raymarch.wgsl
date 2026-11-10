@@ -498,9 +498,21 @@ fn triplanar(slot: i32, rel: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, dpy_in:
     }
     let gx = dpx * scale;
     let gy = dpy * scale;
-    let lx = textureSampleGrad(terrain_tex, terrain_samp, rel.zy * scale, slot, gx.zy, gy.zy).rgb;
-    let ly = textureSampleGrad(terrain_tex, terrain_samp, rel.xz * scale, slot, gx.xz, gy.xz).rgb;
-    let lz = textureSampleGrad(terrain_tex, terrain_samp, rel.xy * scale, slot, gx.xy, gy.xy).rgb;
+    // The full-size level is asked for by level, not by a zero gradient: a
+    // zero gradient is level 0 by the spec, but not on every software
+    // rasteriser, and a slot without mips read blurred there.
+    var lx: vec3<f32>;
+    var ly: vec3<f32>;
+    var lz: vec3<f32>;
+    if (mips) {
+        lx = textureSampleGrad(terrain_tex, terrain_samp, rel.zy * scale, slot, gx.zy, gy.zy).rgb;
+        ly = textureSampleGrad(terrain_tex, terrain_samp, rel.xz * scale, slot, gx.xz, gy.xz).rgb;
+        lz = textureSampleGrad(terrain_tex, terrain_samp, rel.xy * scale, slot, gx.xy, gy.xy).rgb;
+    } else {
+        lx = textureSampleLevel(terrain_tex, terrain_samp, rel.zy * scale, slot, 0.0).rgb;
+        ly = textureSampleLevel(terrain_tex, terrain_samp, rel.xz * scale, slot, 0.0).rgb;
+        lz = textureSampleLevel(terrain_tex, terrain_samp, rel.xy * scale, slot, 0.0).rgb;
+    }
     let nx = textureSampleLevel(terrain_tex_nearest, terrain_samp_nearest, rel.zy * scale, slot, 0.0).rgb;
     let ny = textureSampleLevel(terrain_tex_nearest, terrain_samp_nearest, rel.xz * scale, slot, 0.0).rgb;
     let nz = textureSampleLevel(terrain_tex_nearest, terrain_samp_nearest, rel.xy * scale, slot, 0.0).rgb;
