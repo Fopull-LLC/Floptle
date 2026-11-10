@@ -925,3 +925,60 @@ fn a_held_key_light_lights_the_floor_from_where_it_is_held() {
     let luma = |c: [f32; 3]| (c[0] + c[1] + c[2]) / 3.0;
     assert!(luma(held) > luma(graze) + 0.15, "held overhead the floor reads {held:?}, at a 5° graze {graze:?}");
 }
+
+/// **A low sun does not stripe the floor it lights, and the shadow still
+/// starts at the foot of what casts it.** Under a sun 8° and 20° above the
+/// horizon, an open floor read through the shadow map is one even tone: each
+/// tap of the map's soft filter compares against the floor's own plane where
+/// it looks, so the far side of the filter no longer finds the floor in front
+/// of itself. One depth for every tap drew fine stripes fanning to the
+/// horizon, and they crawled as the view moved. A post's shadow is checked
+/// beside its foot, so a bias that lifted shadows off their casters would
+/// show.
+#[test]
+fn a_low_sun_lights_a_floor_evenly_and_shadows_start_at_the_foot() {
+    use floptle_core::math::Vec3;
+    // Grey rows of the open floor, and the luma beside the post's foot on
+    // its shadow side and on its sunny side.
+    let shoot = |deg: f64| -> Option<(Vec<f32>, f32, f32)> {
+        let mut ed = crate::offscreen::test_editor_with_gpu()?;
+        let w = &mut ed.world;
+        let floor = w.spawn();
+        w.insert(floor, Transform { translation: DVec3::new(0.0, -1.0, 0.0), scale: Vec3::new(200.0, 1.0, 200.0), ..Transform::IDENTITY });
+        w.insert(floor, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.6, 0.6, 0.6] });
+        let post = w.spawn();
+        w.insert(post, Transform { translation: DVec3::new(0.0, 0.5, -3.0), scale: Vec3::new(0.3, 1.5, 0.3), ..Transform::IDENTITY });
+        w.insert(post, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.8, 0.3, 0.2] });
+        let lighting = w.spawn();
+        // The sun along +x, so the post's shadow falls along −x.
+        let (s, c) = deg.to_radians().sin_cos();
+        w.insert(lighting, floptle_core::Light { direction: [c as f32, s as f32, 0.0], shadows: true, shadow_map: true, ..Default::default() });
+        let cam = RenderCamera::new(DVec3::new(0.0, 4.0, 4.0), Quat::from_rotation_x(-0.6), Projection::Perspective { fov_y: 1.0, near: 0.05, far: 300_000.0 });
+        let (wd, ht) = (480u32, 270u32);
+        let tex = crate::capture::render_frame_texture(&mut ed, &cam, None, wd, ht, u32::MAX, false, false).expect("a GPU editor renders");
+        let px = crate::offscreen::read_back_frame(ed.gpu.as_ref().unwrap(), &tex).expect("the frame reads back");
+        let luma = |x: u32, y: u32| {
+            let i = ((y * wd + x) * 4) as usize;
+            (px[i] as f32 + px[i + 1] as f32 + px[i + 2] as f32) / (3.0 * 255.0)
+        };
+        // Open floor: the lower right, away from the post and its shadow.
+        let open: Vec<f32> = (180..260).flat_map(|y| (300..470).map(move |x| (x, y))).map(|(x, y)| luma(x, y)).collect();
+        // The post stands at x ≈ 240 with its foot at y ≈ 125 in this view.
+        // Its shadow runs left along the floor from the foot; the same rows
+        // well to its right are floor in the sun.
+        let band = |x0: u32, x1: u32| {
+            let v: Vec<f32> = (117..125).flat_map(|y| (x0..x1).map(move |x| (x, y))).map(|(x, y)| luma(x, y)).collect();
+            v.iter().sum::<f32>() / v.len() as f32
+        };
+        let shade = band(170, 220);
+        let sun = band(340, 400);
+        Some((open, shade, sun))
+    };
+    for deg in [8.0, 20.0] {
+        let Some((open, shade, sun)) = shoot(deg) else { return };
+        let mean = open.iter().sum::<f32>() / open.len() as f32;
+        let dev = (open.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / open.len() as f32).sqrt();
+        assert!(dev < 0.002, "under a {deg}° sun the open floor varies by {dev:.4} around {mean:.3}: striped");
+        assert!(shade < sun - 0.01, "under a {deg}° sun the post's shadow does not reach its foot: {shade:.3} beside it, {sun:.3} on its sunny side");
+    }
+}

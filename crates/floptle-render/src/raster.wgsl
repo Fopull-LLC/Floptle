@@ -55,7 +55,34 @@ fn sun_map_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
     if (edge <= 0.0 || clip.z >= 1.0) {
         return 1.0;
     }
-    let depth = clip.z - g.sun_extra.x;
+    // Each tap compares against the surface's OWN plane where that tap
+    // looks, not the depth at the centre (receiver-plane bias). The disc
+    // reaches `sun_map.y` texels out, and a surface the sun meets at a graze
+    // climbs through the map's depth across that reach: with one depth for
+    // every tap, the far side of the disc found the surface itself in front,
+    // and a low sun drew stripes over every floor that crawled as the view
+    // moved. A bias big enough for the disc's edge instead lifts shadows off
+    // their casters. The plane's slope in the map comes from the sun's
+    // (orthographic, affine) matrix: the rows that make u and v, and the
+    // surface's normal, fix how far along the surface a step in uv is, and
+    // the depth row says what depth that step adds.
+    let gx = vec3<f32>(g.sun_vp[0].x, g.sun_vp[1].x, g.sun_vp[2].x);
+    let gy = vec3<f32>(g.sun_vp[0].y, g.sun_vp[1].y, g.sun_vp[2].y);
+    let gz = vec3<f32>(g.sun_vp[0].z, g.sun_vp[1].z, g.sun_vp[2].z);
+    let det = dot(gx, cross(gy, n));
+    var grad = vec2<f32>(0.0);
+    if (abs(det) > 1e-12) {
+        grad = vec2<f32>(2.0 * dot(gz, cross(gy, n)), -2.0 * dot(gz, cross(n, gx))) / det;
+        // Nearly edge-on to the sun the slope runs away; its shading is dark
+        // there anyway. Capped at a 1:8 climb per texel's worth of uv.
+        let cap = 8.0 * g.sun_extra.x / max(g.sun_map.w, 1e-6);
+        let len = length(grad);
+        if (len > cap) {
+            grad = grad * (cap / len);
+        }
+    }
+    // The constant part, and the half texel each hardware 2×2 compare spans.
+    let depth = clip.z - g.sun_extra.x - length(grad) * g.sun_map.w * 0.5;
     // A rotated 12-tap disc, each tap itself a 2×2 hardware compare: soft
     // enough at the default radius that the texel grid never shows.
     let r = g.sun_map.y * g.sun_map.w;
@@ -67,7 +94,8 @@ fn sun_map_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
     );
     var lit = 0.0;
     for (var i = 0; i < 12; i++) {
-        lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, uv + taps[i] * r, depth);
+        let o = taps[i] * r;
+        lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, uv + o, depth + dot(grad, o));
     }
     let vis = lit / 12.0;
     // The last few percent of the map fade to sun, so its edge is never a line.
