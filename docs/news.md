@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.118.0 — "Full Speed"**. Forests, fog, shadows and upscaling cost a
+fraction of what they did: cut-out leaves are shaded once per pixel, fog can
+be built in a grid, and FSR 1 brings a lower render scale back up sharp.
+Terrain slots carry their own Materials and maps, with borders that can be
+soft, sharp, pixel-stepped or decided by height. Glass, wheels that grip,
+and scroll views too.
+
 **v0.117.0 — "Whole Worlds"**. Whole planets with rivers, mountain ranges and
 weather that stream in without stalling, craft with hinges and wheels, water
 to float on, volumetric fog with light shafts, and meshes, pictures and
