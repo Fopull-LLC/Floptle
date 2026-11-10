@@ -433,6 +433,9 @@ pub(crate) fn run(args: Args) -> i32 {
     // frames pay once for pipeline builds, bakes and uploads, so they are drawn
     // untimed, and the report is each pass's median over several after them.
     let mut timed: Vec<(f32, Vec<(String, f32)>)> = Vec::new();
+    // …and the CPU's side of the same frames: what building and submitting
+    // them cost, from the profile the game's `perf` reads.
+    let mut cpu_timed: Vec<(f32, Vec<(String, f32)>)> = Vec::new();
     if ed.gpu_timing_headless {
         ed.gpu_timing_headless = false;
         for _ in 0..TIMING_WARMUP {
@@ -442,12 +445,16 @@ pub(crate) fn run(args: Args) -> i32 {
             }
         }
         ed.gpu_timing_headless = true;
+        ed.script_host.profile().borrow_mut().enable(true);
         for _ in 1..TIMING_FRAMES {
+            ed.script_host.profile().borrow_mut().begin_frame();
             if render_frame_pixels(&mut ed, &cam, Some(e), w, h, cull_mask, !no_ui).is_none() {
                 return 1;
             }
+            cpu_timed.push(cpu_frame(&ed));
             timed.extend(landed_timing(&mut ed));
         }
+        ed.script_host.profile().borrow_mut().enable(false);
     }
     // A sequence is frames a player would see one after another, so it
     // carries motion blur from its second frame on, as the game does.
@@ -538,6 +545,7 @@ pub(crate) fn run(args: Args) -> i32 {
     // `gpu_ms: 0` would read as "free", which is the wrong answer in exactly
     // the shape the `perf` API exists to refuse.
     let gpu_timing: Option<(f32, Vec<(String, f32)>)> = if timing { median_timing(&timed) } else { None };
+    let cpu_timing: Option<(f32, Vec<(String, f32)>)> = if timing { median_timing(&cpu_timed) } else { None };
     let measured = format!(
         "median of {} frames, after {TIMING_WARMUP} untimed warm-up frames",
         timed.len()
@@ -565,6 +573,13 @@ pub(crate) fn run(args: Args) -> i32 {
                         .iter()
                         .map(|(l, ms)| serde_json::json!({ "label": l, "ms": ms }))
                         .collect::<Vec<_>>(),
+                    "cpu": cpu_timing.as_ref().map(|(total, parts)| serde_json::json!({
+                        "cpu_ms": total,
+                        "parts": parts
+                            .iter()
+                            .map(|(l, ms)| serde_json::json!({ "label": l, "ms": ms }))
+                            .collect::<Vec<_>>(),
+                    })),
                 })),
                 "rebuilt": rebuilt.map(|(c, o)| serde_json::json!({
                     "frames": frames - 1,
@@ -578,6 +593,12 @@ pub(crate) fn run(args: Args) -> i32 {
         if let Some((total, passes)) = &gpu_timing {
             floptle_say::say!("gpu {total:.2} ms across {} passes at {w}x{h} ({measured}):", passes.len());
             for (label, ms) in passes {
+                floptle_say::say!("  {label:<20} {ms:7.3} ms");
+            }
+        }
+        if let Some((total, parts)) = &cpu_timing {
+            floptle_say::say!("cpu {total:.2} ms building and submitting the frame:");
+            for (label, ms) in parts {
                 floptle_say::say!("  {label:<20} {ms:7.3} ms");
             }
         }
@@ -596,6 +617,20 @@ pub(crate) fn run(args: Args) -> i32 {
 const TIMING_WARMUP: usize = 3;
 /// Frames measured; the report is the median of each.
 const TIMING_FRAMES: usize = 5;
+
+/// What the CPU spent on the frame just drawn, from the profile: the frame's
+/// drawing (`render`, which holds the parts below it) and its scatter, and
+/// the parts each names. `total` is the two buckets.
+fn cpu_frame(ed: &crate::Editor) -> (f32, Vec<(String, f32)>) {
+    use floptle_core::profile::Bucket;
+    let mut p = ed.script_host.profile().borrow_mut();
+    p.end_frame();
+    let Some(f) = p.recent_frames(1).next() else { return (0.0, Vec::new()) };
+    let (render, scatter) = (f.bucket(Bucket::Render), f.bucket(Bucket::Scatter));
+    let mut out = vec![("render".to_string(), render), ("scatter".to_string(), scatter)];
+    out.extend(f.parts.iter().map(|(n, ms)| (n.to_string(), *ms)));
+    (render + scatter, out)
+}
 
 /// The frame the GPU timer just finished, if its readback has landed (the
 /// picture's readback waits on the device, so it has).

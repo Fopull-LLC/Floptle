@@ -722,8 +722,11 @@ pub(crate) const VERBS: &[Verb] = &[
                 value: Value::Flag,
                 required: false,
                 help: "also report what each render pass cost on the GPU, in milliseconds — \
-                       the per-pass split the editor's ⏱ panel shows, without a window. Needs \
-                       a device with timestamp queries, and says so when there is none",
+                       the per-pass split the editor's ⏱ panel shows, without a window — and \
+                       what the CPU spent building and submitting the same frames (`render`, \
+                       `scatter`, and named parts such as `renderCull`, `renderInstancing` and \
+                       `renderPasses`). Needs a device with timestamp queries, and says so \
+                       when there is none",
             },
             Arg {
                 name: "--no-ui",
@@ -741,7 +744,8 @@ pub(crate) const VERBS: &[Verb] = &[
         exits: &[(1, "the scene has no camera, or the file could not be written")],
         output: "a PNG at --out; the path on stdout, then one line per GPU pass under \
                  --timing; with --json an object with `ok`, `path`, `width`, `height`, \
-                 `camera` and, under --timing, `timing` (`gpu_ms` and `passes`)",
+                 `camera` and, under --timing, `timing` (`gpu_ms`, `passes`, and `cpu` with \
+                 `cpu_ms` and `parts`)",
         legacy: &[],
     },
     Verb {
