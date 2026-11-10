@@ -256,7 +256,7 @@ impl Harness {
         self.raster.draw_scene(&self.gpu, color, depth, self.globals, &self.scene, clear, None);
         self.particles.draw(&self.gpu, color, depth, self.pglobals, &packed, &batches, &self.raster, None);
         if retro_mode {
-            self.retro.blit_to(&self.gpu, &self.color_view);
+            self.retro.blit_to(&self.gpu, &self.color_view, [W, H]);
         }
         read_pixels(&self.gpu, &self.color_tex)
     }

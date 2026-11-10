@@ -546,7 +546,7 @@ fn capture(s: &Scene) -> Shot {
         view_formats: &[],
     });
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-    s.retro.blit_to(&s.gpu, &view);
+    s.retro.blit_to(&s.gpu, &view, [w, h]);
     let bpp = 4u32;
     let padded = (w * bpp).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let buf = s.gpu.device.create_buffer(&wgpu::BufferDescriptor {

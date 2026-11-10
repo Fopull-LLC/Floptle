@@ -114,7 +114,7 @@ fn main() {
     if let Some(q) = settings.palette() {
         raster.quantize_palette(&gpu, retro.color_view(), (rw, rh), q);
     }
-    retro.blit_to(&gpu, post_full.input_view());
+    retro.blit_to(&gpu, post_full.input_view(), [W, H]);
     post_full.run(&gpu, &settings, Some(&ssao_frame), &color_view);
     save_png(&gpu, &color_tex, &out_old);
 
@@ -128,7 +128,7 @@ fn main() {
         raster.quantize_palette(&gpu, post_retro.input_view(), (rw, rh), q);
     }
     post_retro.run(&gpu, &settings, Some(&ssao_frame), retro.color_view());
-    retro.blit_to(&gpu, &color_view);
+    retro.blit_to(&gpu, &color_view, [W, H]);
     save_png(&gpu, &color_tex, &out_new);
 
     println!("wrote {out_old} (post after upscale) and {out_new} (post before upscale)");

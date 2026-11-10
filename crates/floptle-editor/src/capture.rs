@@ -259,7 +259,7 @@ pub(crate) fn render_frame_texture(
     if ed.gpu_timing_headless
         && let Some(t) = ed.gpu_timer.as_mut()
     {
-        t.mark(gpu, "retro upscale");
+        t.mark(gpu, "upscale");
     }
     // …and the chunky upscale, the way the game presents it.
     if let Some(r) = &retro {
@@ -267,7 +267,7 @@ pub(crate) fn render_frame_texture(
         if retro_on && ed.project.retro_integer_scale {
             r.blit_integer(gpu, &color_view, dest);
         } else {
-            r.blit_to(gpu, &color_view);
+            r.blit_to(gpu, &color_view, [w, h]);
         }
     }
 

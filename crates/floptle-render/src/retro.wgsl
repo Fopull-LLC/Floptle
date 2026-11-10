@@ -4,8 +4,9 @@
 
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
-// x = smooth (a render scale) rather than hard pixels (1), or FSR 1 (2);
-// y = sharpness 0..1, zw = one source texel in uv.
+// x = smooth (a render scale) rather than hard pixels (1); y = sharpness
+// 0..1, zw = one source texel in uv. FSR 1 is its own two entry points,
+// `fs_easu` and `fs_rcas`.
 @group(0) @binding(2) var<uniform> params: vec4<f32>;
 
 struct VsOut {
@@ -134,21 +135,31 @@ fn rcas(e: vec3<f32>, b: vec3<f32>, d: vec3<f32>, f: vec3<f32>, h: vec3<f32>, sh
     return (lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0);
 }
 
+// FSR 1's first pass: EASU, once for each output pixel, into a picture the
+// output's size (or straight to the output when nothing sharpens).
+@fragment
+fn fs_easu(in: VsOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(easu(in.uv), textureSample(tex, samp, in.uv).a);
+}
+
+// FSR 1's second pass: RCAS over the upscaled picture (`tex` here), each
+// pixel against its four neighbours. Sharpness 1 is RCAS at full strength.
+@fragment
+fn fs_rcas(in: VsOut) -> @location(0) vec4<f32> {
+    let p = vec2<i32>(in.pos.xy);
+    let hi = vec2<i32>(textureDimensions(tex)) - vec2<i32>(1);
+    let e = textureLoad(tex, clamp(p, vec2<i32>(0), hi), 0);
+    let b = textureLoad(tex, clamp(p - vec2<i32>(0, 1), vec2<i32>(0), hi), 0).rgb;
+    let d = textureLoad(tex, clamp(p - vec2<i32>(1, 0), vec2<i32>(0), hi), 0).rgb;
+    let f = textureLoad(tex, clamp(p + vec2<i32>(1, 0), vec2<i32>(0), hi), 0).rgb;
+    let h = textureLoad(tex, clamp(p + vec2<i32>(0, 1), vec2<i32>(0), hi), 0).rgb;
+    let sharp = exp2(-(1.0 - clamp(params.y, 0.0, 1.0)) * 2.0);
+    return vec4<f32>(clamp(rcas(e.rgb, b, d, f, h, sharp), vec3<f32>(0.0), vec3<f32>(1.0)), e.a);
+}
+
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let e = textureSample(tex, samp, in.uv);
-    // One output pixel in uv, for RCAS: taken here, in uniform control flow.
-    let px = vec2<f32>(dpdx(in.uv.x), dpdy(in.uv.y));
-    if (params.x > 1.5) {
-        let c = easu(in.uv);
-        if (params.y <= 0.0) {
-            return vec4<f32>(c, e.a);
-        }
-        // Sharpness 1 is RCAS at full strength, 0 none.
-        let sharp = exp2(-(1.0 - clamp(params.y, 0.0, 1.0)) * 2.0);
-        let s = rcas(c, easu(in.uv - vec2<f32>(0.0, px.y)), easu(in.uv - vec2<f32>(px.x, 0.0)), easu(in.uv + vec2<f32>(px.x, 0.0)), easu(in.uv + vec2<f32>(0.0, px.y)), sharp);
-        return vec4<f32>(clamp(s, vec3<f32>(0.0), vec3<f32>(1.0)), e.a);
-    }
     if (params.x < 0.5 || params.y <= 0.0) {
         return e;
     }

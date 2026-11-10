@@ -808,7 +808,7 @@ impl Editor {
             if retro_on && self.project.retro_integer_scale {
                 retro.blit_integer(gpu, &cv, dest);
             } else {
-                retro.blit_to(gpu, &cv);
+                retro.blit_to(gpu, &cv, [w.max(1), h.max(1)]);
             }
         }
         if defer_lines {

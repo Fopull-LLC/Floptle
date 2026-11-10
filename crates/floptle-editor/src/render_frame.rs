@@ -1145,6 +1145,9 @@ impl Editor {
                     post.run_timed(gpu, &ps, Some(&ssao_frame), out, post_shaders, any_after.then_some(&after as &dyn Fn(&wgpu::TextureView)), timer);
                 }
                 if lowres {
+                    // Its own region: FSR 1 here runs at the window's full
+                    // size, and would otherwise read as the post's finish.
+                    gpu_mark!("upscale");
                     if self.project.retro && self.project.retro_integer_scale {
                         let dest =
                             [gpu.config.width as f32, gpu.config.height.max(1) as f32];

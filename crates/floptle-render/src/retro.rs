@@ -20,6 +20,12 @@ pub struct Retro {
     width: u32,
     height: u32,
     pipeline: wgpu::RenderPipeline,
+    /// FSR 1's two passes: EASU (upscale) and RCAS (sharpen).
+    easu_pipeline: wgpu::RenderPipeline,
+    rcas_pipeline: wgpu::RenderPipeline,
+    /// The picture EASU upscales into and RCAS reads, at the size of the
+    /// last output it was used for, made again when that changes.
+    fsr_mid: std::cell::RefCell<Option<FsrMid>>,
     bind_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// Bilinear, for a render scale: a fraction of the window upscaled
@@ -88,31 +94,36 @@ impl Retro {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("retro"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let make = |entry: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("retro"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: gpu.surface_format(),
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline = make("fs");
+        let easu_pipeline = make("fs_easu");
+        let rcas_pipeline = make("fs_rcas");
 
         // Nearest + clamp keeps the upscaled pixels hard-edged.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -145,6 +156,9 @@ impl Retro {
             width,
             height,
             pipeline,
+            easu_pipeline,
+            rcas_pipeline,
+            fsr_mid: std::cell::RefCell::new(None),
             bind_layout,
             sampler,
             smooth_sampler,
@@ -160,11 +174,7 @@ impl Retro {
 
     fn write_params(&self, gpu: &Gpu) {
         let p = [
-            match (self.smooth, self.fsr) {
-                (false, _) => 0.0f32,
-                (true, false) => 1.0,
-                (true, true) => 2.0,
-            },
+            if self.smooth { 1.0f32 } else { 0.0 },
             self.sharpness,
             1.0 / self.width.max(1) as f32,
             1.0 / self.height.max(1) as f32,
@@ -274,12 +284,44 @@ impl Retro {
 
     /// Upscale the low-res target into the window frame with nearest-neighbor.
     pub fn blit(&self, gpu: &Gpu, frame: &Frame) {
-        self.blit_to(gpu, &frame.view);
+        let t = frame.surface.texture.size();
+        self.blit_to(gpu, &frame.view, [t.width, t.height]);
     }
 
-    /// Upscale into `target`, stretched to fill whatever rectangle it is.
-    pub fn blit_to(&self, gpu: &Gpu, target: &wgpu::TextureView) {
-        self.blit_into(gpu, target, None);
+    /// Upscale into `target`, `size` pixels, stretched to fill it. The size
+    /// is the target's own (a view does not carry one): FSR 1 upscales into a
+    /// picture that size before it sharpens.
+    pub fn blit_to(&self, gpu: &Gpu, target: &wgpu::TextureView, size: [u32; 2]) {
+        if self.smooth && self.fsr {
+            self.blit_fsr(gpu, target, size);
+        } else {
+            self.blit_into(gpu, target, None);
+        }
+    }
+
+    /// FSR 1 in two passes: EASU once for each output pixel into a picture
+    /// the output's size, then RCAS over it, each pixel against its four
+    /// neighbours. In one pass every output pixel ran EASU five times, its own
+    /// and its four neighbours' for the sharpen, sixty texel reads where
+    /// this takes seventeen. Without sharpening EASU goes straight to the
+    /// output.
+    fn blit_fsr(&self, gpu: &Gpu, target: &wgpu::TextureView, size: [u32; 2]) {
+        let size = [size[0].max(1), size[1].max(1)];
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("retro-fsr") });
+        if self.sharpness <= 0.0 {
+            draw_pass(&mut encoder, target, &self.easu_pipeline, &self.bind, None);
+        } else {
+            let mut mid = self.fsr_mid.borrow_mut();
+            if mid.as_ref().is_none_or(|m| m.size != size) {
+                *mid = Some(FsrMid::new(gpu, &self.bind_layout, &self.sampler, &self.params, size));
+            }
+            let m = mid.as_ref().expect("made above");
+            draw_pass(&mut encoder, &m.view, &self.easu_pipeline, &self.bind, None);
+            draw_pass(&mut encoder, target, &self.rcas_pipeline, &m.bind, None);
+        }
+        gpu.queue.submit([encoder.finish()]);
     }
 
     /// Upscale into `target` at a whole-number scale, centred, with the
@@ -297,36 +339,67 @@ impl Retro {
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("retro-blit") });
-        {
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("retro-blit"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            // The pass clears the whole target and the viewport confines the
-            // triangle to part of it, so the bars need no geometry of their own.
-            if let Some([x, y, w, h]) = viewport
-                && w >= 1.0
-                && h >= 1.0
-            {
-                rp.set_viewport(x, y, w, h, 0.0, 1.0);
-            }
-            rp.set_pipeline(&self.pipeline);
-            rp.set_bind_group(0, &self.bind, &[]);
-            rp.draw(0..3, 0..1);
-        }
+        draw_pass(&mut encoder, target, &self.pipeline, &self.bind, viewport);
         gpu.queue.submit([encoder.finish()]);
+    }
+}
+
+/// One fullscreen triangle through `pipeline` into `target`, cleared first.
+/// `viewport` confines it to part of the target: the pass clears the whole
+/// target, so the bars need no geometry of their own.
+fn draw_pass(
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::TextureView,
+    pipeline: &wgpu::RenderPipeline,
+    bind: &wgpu::BindGroup,
+    viewport: Option<[f32; 4]>,
+) {
+    let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("retro-blit"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    if let Some([x, y, w, h]) = viewport
+        && w >= 1.0
+        && h >= 1.0
+    {
+        rp.set_viewport(x, y, w, h, 0.0, 1.0);
+    }
+    rp.set_pipeline(pipeline);
+    rp.set_bind_group(0, bind, &[]);
+    rp.draw(0..3, 0..1);
+}
+
+/// The output-sized picture FSR 1's EASU writes and its RCAS reads.
+struct FsrMid {
+    size: [u32; 2],
+    view: wgpu::TextureView,
+    bind: wgpu::BindGroup,
+}
+
+impl FsrMid {
+    fn new(gpu: &Gpu, layout: &wgpu::BindGroupLayout, sampler: &wgpu::Sampler, params: &wgpu::Buffer, size: [u32; 2]) -> Self {
+        let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("retro-fsr-mid"),
+            size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: gpu.surface_format(),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = make_bind(&gpu.device, layout, &view, sampler, params);
+        Self { size, view, bind }
     }
 }
 
