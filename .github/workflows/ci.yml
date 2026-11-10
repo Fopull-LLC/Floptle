@@ -50,8 +50,10 @@ jobs:
     name: test + clippy
     runs-on: ubuntu-latest
     # A runaway guard, not a budget: a tag run builds cold (the cache is keyed
-    # to the branch) and a slow runner has hit 45 minutes.
-    timeout-minutes: 90
+    # to the branch). The render probes alone take 45 minutes on an ordinary
+    # runner and over an hour on a slow one, which cancelled a whole job at
+    # 90 minutes with nothing wrong.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
