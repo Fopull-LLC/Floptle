@@ -745,3 +745,92 @@ fn a_primed_depth_buffer_is_kept_and_hidden_layers_cost_nothing() {
     assert_eq!(differ, 0, "keeping the primed depth changed {differ} channel values of the picture");
     assert!(t_kept < t_cleared * 0.8, "keeping the primed depth took {:.2} ms against {:.2} clearing it", t_kept * 1e3, t_cleared * 1e3);
 }
+
+/// **The sun's shadow map draws only what lies in its box.** The camera's
+/// list reaches as far as it sees, and the map's box only to the shadow
+/// distance: the far blocks in view are given to the map and left out, and
+/// the poles round the camera and three long beams whose middles lie far
+/// outside the box but whose shadows cross the view are all drawn. The
+/// picture is the same, byte for byte, as a map drawn from every opaque
+/// instance the frame gave it, and `perf.counts()` reports both numbers.
+#[cfg(feature = "editor-ui")]
+#[test]
+fn sun_map_draws_stop_at_the_shadow_distance() {
+    let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+    ed.project.retro = false;
+    // Counts publish with collection on, as a game's `perf.counts()` reads them.
+    ed.script_host.profile().borrow_mut().enable(true);
+    let wd = &mut ed.world;
+    let sun = wd.spawn();
+    wd.insert(sun, Transform { rotation: Quat::from_rotation_x(-0.5) * Quat::from_rotation_y(0.7), ..Transform::IDENTITY });
+    wd.insert(
+        sun,
+        floptle_core::Light { intensity: 1.0, shadows: true, shadow_map: true, shadow_distance: 40.0, ..Default::default() },
+    );
+    let floor = wd.spawn();
+    wd.insert(floor, Transform { translation: DVec3::new(0.0, -0.5, 0.0), scale: floptle_core::math::Vec3::new(400.0, 1.0, 400.0), ..Transform::IDENTITY });
+    wd.insert(floor, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.7, 0.7, 0.65] });
+    // Poles from beside the camera out past the box's reach, across the
+    // view and to either side of it.
+    let near = 48;
+    for k in 0..near {
+        let (a, d) = ((k % 8) as f64 * 0.35 - 1.2, 6.0 + (k / 8) as f64 * 11.0);
+        let p = wd.spawn();
+        wd.insert(
+            p,
+            Transform {
+                translation: DVec3::new(a.sin() * d, 6.0, -a.cos() * d),
+                scale: floptle_core::math::Vec3::new(0.6, 12.0, 0.6),
+                ..Transform::IDENTITY
+            },
+        );
+        wd.insert(p, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.5, 0.4, 0.3] });
+    }
+    // Long beams whose middles lie far outside the box while they reach
+    // across the view: only their length puts them in the map, and their
+    // shadows cross the ground in front of the camera.
+    for k in 0..3 {
+        let beam = wd.spawn();
+        wd.insert(
+            beam,
+            Transform {
+                translation: DVec3::new(70.0, 3.0, -8.0 - k as f64 * 6.0),
+                scale: floptle_core::math::Vec3::new(150.0, 0.5, 0.5),
+                ..Transform::IDENTITY
+            },
+        );
+        wd.insert(beam, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.4, 0.4, 0.45] });
+    }
+    for k in 0..30 {
+        let a = k as f64 * 0.21 - 3.0;
+        let b = wd.spawn();
+        wd.insert(b, Transform { translation: DVec3::new(a.sin() * 700.0, 4.0, -a.cos() * 700.0), scale: floptle_core::math::Vec3::splat(8.0), ..Transform::IDENTITY });
+        wd.insert(b, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.3, 0.3, 0.35] });
+    }
+    let cam = RenderCamera::new(
+        DVec3::new(0.0, 3.0, 0.0),
+        Quat::from_rotation_x(-0.25),
+        Projection::Perspective { fov_y: 1.1, near: 0.05, far: 2000.0 },
+    );
+    let shoot = |ed: &mut crate::Editor, cull: bool| {
+        ed.raster.as_mut().unwrap().set_sun_map_cull(cull);
+        let _ = crate::shot::render_frame_pixels(ed, &cam, None, 1280, 720, !0, false).expect("a frame");
+        let px = crate::shot::render_frame_pixels(ed, &cam, None, 1280, 720, !0, false).expect("a frame");
+        (px, ed.raster.as_ref().unwrap().sun_map_draws())
+    };
+    let (all, (drawn_all, given)) = shoot(&mut ed, false);
+    let (culled, (drawn, given2)) = shoot(&mut ed, true);
+    assert_eq!(given, given2);
+    assert_eq!(drawn_all, given, "the map without the cull left something out");
+    // Eight of the far blocks are in view, so the camera's list holds them
+    // (measured: 57 given, 47 drawn).
+    assert!(given - drawn >= 8, "the sun map drew {drawn} of {given} instances: the far blocks in view were drawn into it");
+    assert!(drawn >= near / 2, "the sun map drew only {drawn} of {given}: the poles round the camera went missing");
+    // What a game reads in `perf.counts()`: the same two numbers, and the
+    // colour pass's triangles, twelve a cube.
+    let c = ed.script_host.profile().borrow().counts();
+    assert_eq!((c.sun_map_draws, c.sun_map_culled), (drawn, given - drawn), "perf.counts says otherwise");
+    assert!(c.triangles >= 12 * near as u64 / 2 && c.triangles % 12 == 0, "perf.counts triangles {} for a frame of cubes", c.triangles);
+    let differ = all.iter().zip(&culled).filter(|(a, b)| a != b).count();
+    assert_eq!(differ, 0, "leaving out what lies outside the sun's box changed {differ} channel values of the picture");
+}

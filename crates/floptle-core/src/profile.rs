@@ -454,6 +454,14 @@ pub struct Counts {
     pub shadow_proxies_dropped: usize,
     /// Baked volumes the shadow march reads: terrain and mesh occluder bakes.
     pub shadow_volumes: usize,
+    /// Opaque instances the sun's shadow map drew last frame…
+    pub sun_map_draws: usize,
+    /// …and those it was given but left out, lying outside the sun's box
+    /// (terrain past the shadow distance, flora beyond it).
+    pub sun_map_culled: usize,
+    /// Triangles the frame's colour pass was given: every instance's mesh,
+    /// whole, before the GPU culls a back face or clips one off screen.
+    pub triangles: u64,
     /// Bytes every picture on the GPU holds, mip chains included, each
     /// counted once: what a texture-quality setting saves.
     pub texture_bytes: u64,

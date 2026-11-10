@@ -1110,6 +1110,27 @@ pub(crate) fn note_shadow_casters(
     prof.set_counts(c);
 }
 
+/// What the raster passes were given this frame, into the counts a game reads
+/// (`perf.counts()`): the sun map's casters drawn and left out, and the
+/// triangles the colour pass was handed. After `sun_shadow_pass`.
+pub(crate) fn note_raster_counts(
+    prof: &mut floptle_core::profile::FrameProfile,
+    raster: &floptle_render::Raster,
+    instances: &[ShadowDraw],
+    flsl: &[floptle_render::FlslDraw],
+    skins: &[floptle_render::SkinDraw],
+) {
+    let mut c = prof.counts();
+    let (drawn, given) = raster.sun_map_draws();
+    c.sun_map_draws = drawn;
+    c.sun_map_culled = given.saturating_sub(drawn);
+    let tris = |id| raster.mesh_triangles(id) as u64;
+    c.triangles = instances.iter().map(|d| tris(d.0)).sum::<u64>()
+        + flsl.iter().map(|d| tris(d.0)).sum::<u64>()
+        + skins.iter().map(|d| tris(d.mesh)).sum::<u64>();
+    prof.set_counts(c);
+}
+
 /// Cache key for a mesh shadow-occluder bake: the asset path + the node's world
 /// rotation and scale quantized to 1e-3. Translation is absent —
 /// the volume anchors on the node's f64 translation per frame, so moving a map

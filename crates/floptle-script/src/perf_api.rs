@@ -542,6 +542,11 @@ fn counts_table(lua: &Lua, c: &Counts) -> mlua::Result<Table> {
     out.set("shadowProxies", c.shadow_proxies)?;
     out.set("shadowProxiesDropped", c.shadow_proxies_dropped)?;
     out.set("shadowVolumes", c.shadow_volumes)?;
+    // What the sun's shadow map drew of what it was given; the rest lay
+    // outside its box. And the triangles the colour pass was handed.
+    out.set("sunMapDraws", c.sun_map_draws)?;
+    out.set("sunMapCulled", c.sun_map_culled)?;
+    out.set("triangles", c.triangles)?;
     // What the pictures on the GPU hold: the number a texture-quality
     // setting moves (`app.setTextureQuality`).
     out.set("textureBytes", c.texture_bytes)?;

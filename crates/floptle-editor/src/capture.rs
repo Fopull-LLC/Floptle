@@ -251,7 +251,8 @@ pub(crate) fn render_frame_texture(
         }
     };
     let any_after = stacked.is_some_and(|(size, n)| ed.camera_stacks.any_after(size, n));
-    post.run_with_overlay(gpu, &look, Some(&ssao), &composite, ed.post_shaders.as_ref(), any_after.then_some(&after as &dyn Fn(&wgpu::TextureView)));
+    let timer = if ed.gpu_timing_headless { ed.gpu_timer.as_mut() } else { None };
+    post.run_timed(gpu, &look, Some(&ssao), &composite, ed.post_shaders.as_ref(), any_after.then_some(&after as &dyn Fn(&wgpu::TextureView)), timer);
     if let Some(m) = ed.shot_motion.as_mut() {
         m.post = Some(((cw, ch, retro_on), post));
     }

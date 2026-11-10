@@ -783,6 +783,17 @@ struct RegisteredMesh {
     /// Set only for [`register_dynamic`](Raster::register_dynamic) slots — meshes whose
     /// geometry is rewritten in place. `None` = an ordinary upload-once mesh.
     dynamic: Option<DynSlot>,
+    /// How far from its own origin the mesh reaches ([`mesh_reach`]): the
+    /// radius of a sphere about the origin holding every vertex. Infinite for
+    /// a mesh whose vertices are rewritten from the CPU (a skinned pose), so
+    /// no test ever leaves it out.
+    reach: f32,
+}
+
+/// The radius of a sphere about a mesh's own origin that holds every one of
+/// its vertices. Zero for a mesh with none.
+fn mesh_reach(vertices: &[Vertex]) -> f32 {
+    vertices.iter().map(|v| glam::Vec3::from(v.pos).length_squared()).fold(0.0, f32::max).sqrt()
 }
 
 /// A dynamic mesh slot's capacity + its paired block in the terrain color store.
@@ -1027,6 +1038,11 @@ pub struct Raster {
     instance_buf: wgpu::Buffer,
     instance_cap: u32,
     meshes: Vec<RegisteredMesh>,
+    /// The last sun shadow map's opaque instances: how many it drew, and how
+    /// many it was given ([`sun_map_draws`](Raster::sun_map_draws)).
+    sun_map_casts: (usize, usize),
+    /// Leave out of the sun map what lies outside its box (the default).
+    sun_map_cull: bool,
     /// Every model picture on the GPU, by its pixels, so a picture is put
     /// there once however many meshes wear it. Models often embed one picture
     /// per file and one material per part: a ragdoll of eleven parts, each
@@ -2009,6 +2025,8 @@ impl Raster {
             instance_buf,
             instance_cap,
             meshes: Vec::new(),
+            sun_map_casts: (0, 0),
+            sun_map_cull: true,
             mesh_textures: HashMap::new(),
             texture_drop: 0,
             scene_readers_deferred: false,
@@ -3692,6 +3710,7 @@ impl Raster {
             _texture: None,
             paint_base: 0,
             dynamic: Some(slot),
+            reach: 0.0,
         };
         match self.dyn_free.pop() {
             Some(i) => {
@@ -3753,6 +3772,7 @@ impl Raster {
         if !m.gpu_mesh.write(gpu, data) {
             return false;
         }
+        m.reach = mesh_reach(&data.vertices);
         let slot = m.dynamic.as_ref().expect("dynamic slot");
         if slot.tpaint_base != 0
             && let Some(colors) = data.colors.as_ref()
@@ -3880,6 +3900,7 @@ impl Raster {
             _texture: owned,
             paint_base,
             dynamic: None,
+            reach: mesh_reach(&data.vertices),
         });
         id
     }
@@ -4009,6 +4030,8 @@ impl Raster {
             _texture: None, // the source slot keeps the texture alive
             paint_base: m.paint_base,
             dynamic: None,
+            // Its vertices are a pose the CPU writes every frame.
+            reach: f32::INFINITY,
         };
         let id = MeshId(self.meshes.len() as u32);
         self.meshes.push(clone);
@@ -4926,6 +4949,55 @@ impl Raster {
         }
     }
 
+    /// The instances that can put anything in the sun's shadow map: those whose
+    /// bounds touch the sun's box (`globals.sun_vp`). The camera's list reaches
+    /// as far as it sees, terrain kilometres out and flora to its reach, and
+    /// the box reaches to the shadow distance; everything outside it the GPU
+    /// would transform and then clip away whole. The pass clips depth (no
+    /// depth clamp), so a caster nearer the sun than the box's near plane is
+    /// clipped too, and the six planes leave out nothing that drew.
+    ///
+    /// The bounds are the mesh's reach about its origin at the instance's
+    /// largest scale, grown by the most a material's sway can bend it in this
+    /// frame's wind (`vs`'s `0.1·sway·h²·|wind|·1.25`, with the height at its
+    /// most, the sphere's diameter).
+    fn sun_casters<'a>(
+        &self,
+        g: &Globals,
+        instances: &'a [(MeshId, Option<TexId>, InstanceRaw)],
+    ) -> std::borrow::Cow<'a, [(MeshId, Option<TexId>, InstanceRaw)]> {
+        let box_ = crate::cull::Frustum::from_view_proj(Mat4::from_cols_array_2d(&g.sun_vp));
+        let wind = glam::Vec3::new(g.time[1], g.time[2], g.time[3]).length();
+        let sway: Vec<f32> = self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| c[2][2].max(0.0)).collect();
+        let reaches = |(id, _, raw): &(MeshId, Option<TexId>, InstanceRaw)| {
+            let Some(m) = self.meshes.get(id.0 as usize) else { return true };
+            let model = Mat4::from_cols_array_2d(&raw.model);
+            let scale = model.x_axis.truncate().length().max(model.y_axis.truncate().length()).max(model.z_axis.truncate().length());
+            let r = m.reach * scale;
+            if !r.is_finite() {
+                return true;
+            }
+            let s = sway.get(ext_index_of(raw) as usize).copied().unwrap_or(0.0);
+            let bend = 0.125 * s * (2.0 * r) * (2.0 * r) * wind;
+            box_.contains_sphere(model.w_axis.truncate(), r * 1.01 + bend + 0.05)
+        };
+        if instances.iter().all(reaches) {
+            return std::borrow::Cow::Borrowed(instances);
+        }
+        std::borrow::Cow::Owned(instances.iter().filter(|d| reaches(d)).copied().collect())
+    }
+
+    /// Triangles mesh `id` draws (0 for an unknown or empty one).
+    pub fn mesh_triangles(&self, id: MeshId) -> u32 {
+        self.meshes.get(id.0 as usize).map_or(0, |m| m.gpu_mesh.index_count / 3)
+    }
+
+    /// The last sun shadow map's opaque instances: how many it drew, of how
+    /// many the frame gave it. The rest lay outside the sun's box.
+    pub fn sun_map_draws(&self) -> (usize, usize) {
+        self.sun_map_casts
+    }
+
     /// Draw the sun shadow map for this view: every opaque draw, depth only,
     /// from the sun ([`Globals::sun_vp`]). A no-op unless `globals.sun_map.x`
     /// is set. Before the main pass, which samples it.
@@ -4946,7 +5018,9 @@ impl Raster {
         // camera does not thin its shadow.
         g.sun_extra[1] = 1.0;
         self.begin_pass(gpu, g);
-        let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, instances, flsl, skins);
+        let casters = if self.sun_map_cull { self.sun_casters(&g, instances) } else { std::borrow::Cow::Borrowed(instances) };
+        self.sun_map_casts = (casters.len(), instances.len());
+        let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, &casters, flsl, skins);
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-sun-map") });
@@ -5092,6 +5166,12 @@ impl Raster {
     /// that makes no coverage cuts of its own (the default), or as before.
     pub fn set_use_primed_pipeline(&mut self, on: bool) {
         self.use_primed_pipeline = on;
+    }
+
+    /// Leave out of the sun's shadow map the instances outside its box (the
+    /// default), or draw every opaque one the frame gives it, as before.
+    pub fn set_sun_map_cull(&mut self, on: bool) {
+        self.sun_map_cull = on;
     }
 }
 

@@ -768,6 +768,7 @@ impl Editor {
                     raymarch.set_sun_map(gpu, Some(raster.sun_map_view()));
                 }
                 raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
+                crate::shading::note_raster_counts(&mut profile.borrow_mut(), raster, &instances, &flsl_draws, &skin_draws);
                 let depth_wanted = raster.flsl_draws_want_depth(&flsl_draws);
                 let raster_clear = if rm_draw
                     || wants_prepass(
@@ -1140,7 +1141,8 @@ impl Editor {
                         }
                     };
                     let any_after = surface_stack.is_some_and(|(size, n)| stacks.any_after(size, n));
-                    post.run_with_overlay(gpu, &ps, Some(&ssao_frame), out, post_shaders, any_after.then_some(&after as &dyn Fn(&wgpu::TextureView)));
+                    let timer = if timing { gpu_timer.as_deref_mut() } else { None };
+                    post.run_timed(gpu, &ps, Some(&ssao_frame), out, post_shaders, any_after.then_some(&after as &dyn Fn(&wgpu::TextureView)), timer);
                 }
                 if lowres {
                     if self.project.retro && self.project.retro_integer_scale {

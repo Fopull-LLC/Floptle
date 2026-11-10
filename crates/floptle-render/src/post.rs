@@ -1298,6 +1298,30 @@ impl PostStack {
         custom: Option<&'a PostShaders>,
         overlay: Option<&dyn Fn(&wgpu::TextureView)>,
     ) {
+        self.run_timed(gpu, s, ssao, out, custom, overlay, None);
+    }
+
+    /// [`run_with_overlay`](Self::run_with_overlay), marking each stage that
+    /// runs on `timer` ("post: AO", "post: FXAA", "post: bloom", "post: depth
+    /// of field", "post: motion blur", "post: overlay + denoise", "post:
+    /// screen shaders", "post: grade + finish"), so a profile says which part of the chain the time went to.
+    /// The caller marks the region before the first of them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_timed<'a>(
+        &'a self,
+        gpu: &Gpu,
+        s: &PostSettings,
+        ssao: Option<&SsaoFrame>,
+        out: &wgpu::TextureView,
+        custom: Option<&'a PostShaders>,
+        overlay: Option<&dyn Fn(&wgpu::TextureView)>,
+        mut timer: Option<&mut crate::GpuTimer>,
+    ) {
+        let mut mark = |label: &str| {
+            if let Some(t) = timer.as_deref_mut() {
+                t.mark(gpu, label);
+            }
+        };
         let custom = custom.filter(|c| c.has_passes());
         let ssao_on = s.ssao && ssao.is_some();
         let filter_on = s.color_filter_on();
@@ -1342,6 +1366,7 @@ impl PostStack {
         let mut cur: &Target = &self.scene;
 
         if let (true, Some(f)) = (ssao_on, ssao) {
+            mark("post: AO");
             // AO factor: depth → ao_a (half res, or full res in pixel-perfect
             // mode), then a separable blur (A→B→A) to wash out the sampling
             // noise, then multiply it over the scene. Pixel-perfect tightens the
@@ -1385,6 +1410,7 @@ impl PostStack {
         // Anti-aliasing before anything spreads light about: bloom, depth of
         // field and the lens would otherwise carry the stair-steps with them.
         if s.fxaa {
+            mark("post: FXAA");
             let dst: &Target = if std::ptr::eq(cur, &self.ping) { &self.pong } else { &self.ping };
             let texel = [1.0 / self.width.max(1) as f32, 1.0 / self.height.max(1) as f32];
             self.write_params(gpu, PostParams { a: [texel[0], texel[1], 0.0, 0.0], ..Default::default() });
@@ -1393,6 +1419,7 @@ impl PostStack {
         }
 
         if s.bloom {
+            mark("post: bloom");
             // Bright-pass: cur → half-res bloom_a.
             self.write_params(gpu, PostParams { a: [0.0, 0.0, s.bloom_threshold, 0.0], b: [0.0; 4], ..Default::default() });
             self.pass(gpu, &self.bright_pipeline, &cur.bind, &self.bloom_a.view, wgpu::LoadOp::Clear(BLACK));
@@ -1445,6 +1472,7 @@ impl PostStack {
         // then working on an image whose focus is already decided, which is the
         // order a camera imposes and the order they read in.
         if let (true, Some(f)) = (s.dof_on(), ssao) {
+            mark("post: depth of field");
             gpu.queue.write_buffer(
                 &self.dof_cam_buf,
                 0,
@@ -1523,6 +1551,7 @@ impl PostStack {
             self.hist_valid.set(false);
         }
         if let (true, Some(f)) = (s.motion_on(), ssao) {
+            mark("post: motion blur");
             let read = self.hist_cur.get();
             // The depth test reads a perspective camera's depth from its clip
             // w; an orthographic camera's w is 1, so it keeps the plain
@@ -1594,6 +1623,7 @@ impl PostStack {
             cur = dst;
         }
 
+        mark("post: overlay + denoise");
         if let Some(draw) = overlay {
             draw(&cur.view);
         }
@@ -1611,6 +1641,7 @@ impl PostStack {
         }
         // ---- the scene's own screen shaders ---------------------------------
         if let Some(c) = custom {
+            mark("post: screen shaders");
             // one depth bind for all of them. Without a frame (a 2D project, or
             // a viewport that renders no depth) they get a 1×1 texture cleared
             // to far, so `sceneDepth` reads sky everywhere and `sceneNormal`
@@ -1666,6 +1697,7 @@ impl PostStack {
             }
         }
 
+        mark("post: grade + finish");
         if grade_on {
             cur = look(
                 &self.grade_pipeline,

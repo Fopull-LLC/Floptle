@@ -1447,6 +1447,7 @@ impl Editor {
                 raymarch.set_sun_map(gpu, Some(raster.sun_map_view()));
             }
             raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
+            crate::shading::note_raster_counts(&mut self.script_host.profile().borrow_mut(), raster, &instances, &flsl_draws, &skin_draws);
             let wants_depth = wants_prepass(
                 raster.flsl_draws_want_depth(&flsl_draws),
                 ssr[0] > 0.5,

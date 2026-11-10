@@ -798,7 +798,8 @@ impl Editor {
             ));
             let after = |v: &wgpu::TextureView| self.camera_stacks.composite_after(gpu, (cw.max(1), ch.max(1)), stacked, v);
             let after = self.camera_stacks.any_after((cw.max(1), ch.max(1)), stacked).then_some(&after as &dyn Fn(&wgpu::TextureView));
-            post.run_with_overlay(gpu, &ps, Some(&ssao_frame), &out, post_shaders, after);
+            let timer = if self.gpu_timing_headless { self.gpu_timer.as_mut() } else { None };
+            post.run_timed(gpu, &ps, Some(&ssao_frame), &out, post_shaders, after, timer);
         }
         // Upscale into game_vp: chunky nearest-neighbour for retro, smooth for
         // a render scale.
