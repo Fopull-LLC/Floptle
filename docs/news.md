@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.118.0 — "Full Speed"**. Forests, fog, shadows and upscaling cost a
+**v0.118.1 — "Full Speed"**. Forests, fog, shadows and upscaling cost a
 fraction of what they did: cut-out leaves are shaded once per pixel, fog can
 be built in a grid, and FSR 1 brings a lower render scale back up sharp.
 Terrain slots carry their own Materials and maps, with borders that can be
