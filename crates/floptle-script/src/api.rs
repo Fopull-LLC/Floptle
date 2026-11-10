@@ -602,6 +602,8 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
             | (
                 "Light",
                 "stars"
+                    | "keyOverride"
+                    | "keyOverrideColor"
                     | "shadows"
                     | "shadowDither"
                     | "contactShadows"
@@ -867,6 +869,8 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("directionY".to_string(), l.direction[1] as f64),
                 ("directionZ".to_string(), l.direction[2] as f64),
                 ("stars".to_string(), f64::from(l.stars)),
+                ("keyOverride".to_string(), f64::from(l.key_override)),
+                ("keyOverrideColor".to_string(), f64::from(l.key_override_color)),
                 ("colorR".to_string(), l.color[0] as f64),
                 ("colorG".to_string(), l.color[1] as f64),
                 ("colorB".to_string(), l.color[2] as f64),
@@ -2183,6 +2187,8 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "directionY" => l.direction[1] = v,
                     "directionZ" => l.direction[2] = v,
                     "stars" => l.stars = val != 0.0,
+                    "keyOverride" => l.key_override = val != 0.0,
+                    "keyOverrideColor" => l.key_override_color = val != 0.0,
                     "colorR" => l.color[0] = v.max(0.0),
                     "colorG" => l.color[1] = v.max(0.0),
                     "colorB" => l.color[2] = v.max(0.0),

@@ -892,3 +892,36 @@ fn cutout_cards_shade_once_under_raymarched_matter() {
     let differ = new.iter().zip(&old).filter(|(x, y)| x.abs_diff(**y) > 1).count();
     assert_eq!(differ, 0, "under raymarched matter the depth-Equal pipeline drew a different picture from the old one");
 }
+
+/// **Holding the sun moves the light, in a picture.** A floor under a star 5°
+/// above the horizon is lit at a graze; with the Lighting node's key light
+/// held straight overhead the same floor is lit square on, and is brighter by
+/// the cosine the shader applies. Releasing the hold gives back the graze.
+#[test]
+fn a_held_key_light_lights_the_floor_from_where_it_is_held() {
+    use floptle_core::math::Vec3;
+    let shoot = |held: bool| -> Option<[f32; 3]> {
+        let mut ed = crate::offscreen::test_editor_with_gpu()?;
+        let w = &mut ed.world;
+        let floor = w.spawn();
+        w.insert(floor, Transform { translation: DVec3::new(0.0, -1.0, 0.0), scale: Vec3::new(200.0, 1.0, 200.0), ..Transform::IDENTITY });
+        w.insert(floor, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.6, 0.6, 0.6] });
+        let (s, c) = 5f64.to_radians().sin_cos();
+        let star = w.spawn();
+        w.insert(star, Transform { translation: DVec3::new(c, s, 0.0) * 5.0e6, ..Transform::IDENTITY });
+        w.insert(star, CelestialBody { body_radius: 1000.0, luminosity: 2.0e7, star_color: [1.0, 1.0, 1.0], ..Default::default() });
+        let lighting = w.spawn();
+        w.insert(
+            lighting,
+            floptle_core::Light { stars: true, key_override: held, direction: [0.0, 1.0, 0.0], ambient: [0.0; 3], ..Default::default() },
+        );
+        // Looking down at the floor.
+        let rot = Quat::from_rotation_x(-1.2);
+        let px = pixel_from(&mut ed, DVec3::new(0.0, 4.0, 2.0), rot, 0);
+        Some(px)
+    };
+    let Some(graze) = shoot(false) else { return };
+    let Some(held) = shoot(true) else { return };
+    let luma = |c: [f32; 3]| (c[0] + c[1] + c[2]) / 3.0;
+    assert!(luma(held) > luma(graze) + 0.15, "held overhead the floor reads {held:?}, at a 5° graze {graze:?}");
+}

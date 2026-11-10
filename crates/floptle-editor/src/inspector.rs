@@ -4741,7 +4741,22 @@ impl EditorTabViewer<'_> {
                 .changed();
             if l.stars {
                 ui.small("light comes from Celestial Bodies with luminosity > 0");
-            } else {
+                cmd.inspector_changed |= crate::responsive::check(ui, &mut l.key_override, "hold the sun")
+                    .on_hover_text(
+                        "the brightest star lights the scene from the direction below \
+                         instead of from where it is: a held sunrise, a scripted night, \
+                         a dusk that lasts a level. Its distance, colour and strength stay \
+                         its own, and the other stars are untouched. Turn it off to hand \
+                         the light back to the star.",
+                    )
+                    .changed();
+                if l.key_override {
+                    cmd.inspector_changed |= crate::responsive::check(ui, &mut l.key_override_color, "with this light's colour")
+                        .on_hover_text("the held star shines with the light colour × intensity below, not its own")
+                        .changed();
+                }
+            }
+            if !l.stars || l.key_override {
                 ui.label("direction");
                 ui.horizontal_wrapped(|ui| {
                     cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[0]).speed(0.02).prefix("x ")).changed();

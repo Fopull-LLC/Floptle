@@ -225,6 +225,8 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field directionY number Key light direction Y.
 ---@field directionZ number Key light direction Z.
 ---@field stars number Stars mode (1/0; assign true/false): luminous celestial bodies ARE the key lights.
+---@field keyOverride number Stars mode (1/0; assign true/false): hold the sun. The brightest star lights from directionX/Y/Z instead of from where it is (shadows, sky and particles follow), at its own distance, colour and strength; the other stars are untouched. Turn it off to hand the light back.
+---@field keyOverrideColor number With keyOverride (1/0; assign true/false): the held star shines with colorR/G/B × intensity instead of its own colour (strength caps at 4, as a star's does).
 ---@field ambientR number 3D ambient fill red 0..1 — the fill under the key light, deliberately a different value from ambient2dR.
 ---@field ambientG number 3D ambient fill green 0..1.
 ---@field ambientB number 3D ambient fill blue 0..1.

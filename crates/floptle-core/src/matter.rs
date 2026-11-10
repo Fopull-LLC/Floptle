@@ -1148,6 +1148,13 @@ pub struct Light {
     pub direction: [f32; 3],
     /// Stars mode: luminous celestial bodies are the key lights.
     pub stars: bool,
+    /// Stars mode: the brightest star lights the scene from `direction`
+    /// instead of from where it is, until this is turned off. A held sunrise,
+    /// a scripted night, a dusk that lasts a level. The star's distance,
+    /// colour and strength stay its own, and the other stars are untouched.
+    pub key_override: bool,
+    /// With `key_override`: the star's light is `color × intensity` too.
+    pub key_override_color: bool,
     pub color: [f32; 3],
     pub ambient: [f32; 3],
     /// **The base light every 2D surface gets**, before any 2D light is added.
@@ -1364,6 +1371,8 @@ impl Default for Light {
         Self {
             direction: [0.4, 0.9, 0.45],
             stars: false,
+            key_override: false,
+            key_override_color: false,
             color: [1.0, 0.98, 0.92],
             ambient: [0.12, 0.12, 0.16],
             ambient_2d: [1.0, 1.0, 1.0],

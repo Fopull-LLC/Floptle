@@ -2671,6 +2671,12 @@ pub struct LightDoc {
     /// genuinely dark far sides, multiple stars). Pre-star scenes → off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stars: bool,
+    /// Stars mode: the brightest star lights from `direction` (see
+    /// `floptle_core::Light::key_override`). Older scenes → off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub key_override: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub key_override_color: bool,
     #[serde(default = "white3")]
     pub color: [f32; 3],
     #[serde(default = "default_light_ambient")]
@@ -2897,6 +2903,8 @@ impl From<&Light> for LightDoc {
         Self {
             direction: l.direction,
             stars: l.stars,
+            key_override: l.key_override,
+            key_override_color: l.key_override_color,
             color: l.color,
             ambient: l.ambient,
             ambient_2d: l.ambient_2d,
@@ -2949,6 +2957,8 @@ impl LightDoc {
         Light {
             direction: self.direction,
             stars: self.stars,
+            key_override: self.key_override,
+            key_override_color: self.key_override_color,
             color: self.color,
             ambient: self.ambient,
             ambient_2d: self.ambient_2d,

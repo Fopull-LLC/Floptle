@@ -578,6 +578,23 @@ pub(crate) fn star_uniforms(
         col[i] = it.2;
         meta[0] = (i + 1) as f32;
     }
+    // A held key light: the brightest star stands where `direction` points,
+    // at its own distance, so its falloff and the radial direction each
+    // pixel reads stay a star's. Everything downstream reads this one place
+    // (the key light, `light_dir`, particles, the shadow map's aim).
+    if light.key_override && meta[0] > 0.0 {
+        let d = Vec3::from(light.direction).normalize_or_zero();
+        if d != Vec3::ZERO {
+            let dist = Vec3::new(pos[0][0], pos[0][1], pos[0][2]).length();
+            pos[0] = [d.x * dist, d.y * dist, d.z * dist, 0.0];
+            if light.key_override_color {
+                // `star_col_at` is `rgb × k / d²`: k is picked so that comes
+                // to the Lighting node's own colour times its intensity.
+                let k = light.intensity.max(0.0) * dist * dist;
+                col[0] = [light.color[0], light.color[1], light.color[2], k];
+            }
+        }
+    }
     (meta, pos, col)
 }
 
@@ -1502,6 +1519,39 @@ mod star_tests {
         star(&mut world, DVec3::new(0.0, 0.0, 31_623.0), 1.0);
         let (meta, ..) = star_uniforms(&world, &light, DVec3::ZERO);
         assert_eq!(meta[0], 2.0, "a star at a tenth of the light must still be drawn");
+    }
+
+    /// Holding the key light moves the brightest star's light to the Lighting
+    /// node's direction, at the star's own distance, and every single-light
+    /// reader follows: `light_dir`, particles, the shadow map's aim. A second
+    /// star stays where it is, and releasing the hold puts the first back.
+    #[test]
+    fn a_held_key_light_moves_the_brightest_star_and_nothing_else() {
+        let mut world = World::default();
+        star(&mut world, DVec3::new(10_000.0, 0.0, 0.0), 1.0);
+        star(&mut world, DVec3::new(0.0, 0.0, -31_623.0), 1.0);
+        let free = Light { stars: true, direction: [0.0, 1.0, 0.0], ..Default::default() };
+        let held = Light { key_override: true, ..free };
+        let (_, p0, c0) = star_uniforms(&world, &free, DVec3::ZERO);
+        let (meta, p1, c1) = star_uniforms(&world, &held, DVec3::ZERO);
+        assert_eq!(meta[0], 2.0);
+        let d = Vec3::new(p1[0][0], p1[0][1], p1[0][2]);
+        assert!((d.length() - 10_000.0).abs() < 0.5, "the held star keeps its distance: {d:?}");
+        assert!(d.normalize().dot(Vec3::Y) > 0.9999, "and stands where the direction points: {d:?}");
+        assert_eq!(p1[1], p0[1], "the second star moved");
+        assert_eq!(c1[0], c0[0], "the held star's colour and strength are still its own");
+        let sun = sun_vec(&world, &held, DVec3::ZERO);
+        assert!(Vec3::new(sun[0], sun[1], sun[2]).normalize().dot(Vec3::Y) > 0.9999, "light_dir still follows the star: {sun:?}");
+        let pl = particle_light(&world, &held, DVec3::ZERO);
+        assert!(pl.dir[1] > 0.0 && pl.dir[0].abs() < 1.0, "particles still follow the star: {:?}", pl.dir);
+
+        // With the light's own colour: rgb × k / d² comes to colour × intensity.
+        let tinted = Light { key_override_color: true, color: [1.0, 0.5, 0.25], intensity: 2.0, ..held };
+        let (_, _, c) = star_uniforms(&world, &tinted, DVec3::ZERO);
+        let strength = c[0][3] / (10_000.0f32 * 10_000.0);
+        assert_eq!(&c[0][..3], &[1.0, 0.5, 0.25]);
+        assert!((strength - 2.0).abs() < 1e-3, "the held star shines at {strength}, not the light's 2.0");
+        assert_eq!(c[1], c0[1], "the second star's colour changed");
     }
 }
 
