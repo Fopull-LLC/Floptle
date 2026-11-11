@@ -3700,6 +3700,35 @@ impl ScriptHost {
         self.lua.used_memory()
     }
 
+    /// Give the collector up to `budget_ms` of work now, between frames, in
+    /// small incremental steps, and name what it took `scriptsGc`. The
+    /// collector does its work when scripts allocate, so its debt otherwise
+    /// lands inside whichever hook allocates when it falls due: a frame of a
+    /// second and a half sat in one hook that way, spread over many
+    /// allocating lines. Paying some of it here every frame keeps that debt
+    /// small. Answers whether a whole cycle finished.
+    pub fn step_gc(&self, budget_ms: f32) -> bool {
+        if budget_ms <= 0.0 {
+            return false;
+        }
+        let t = floptle_core::profile::Span::new();
+        let mut finished = false;
+        // A few dozen KB of collector work a step: small enough to stop near
+        // the budget, large enough that the loop costs nothing itself.
+        while t.ms() < budget_ms {
+            match self.lua.gc_step_kbytes(32) {
+                Ok(true) => {
+                    finished = true;
+                    break;
+                }
+                Ok(false) => {}
+                Err(_) => break,
+            }
+        }
+        self.profile.borrow_mut().record_part("scriptsGc", t.ms());
+        finished
+    }
+
     /// Collect everything reachable, now. Two passes, because one leaves
     /// finalised objects behind.
     pub fn gc_collect(&self) {

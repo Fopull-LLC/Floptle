@@ -1660,6 +1660,9 @@ impl Editor {
         // Spring bones swing on the post-physics root too, and before the
         // attachments read the bones, so a clip on a braid rides the braid.
         self.publish_query_meshing();
+        // Some of the script collector's work, between frames, rather than
+        // all of it inside whichever hook allocates when it falls due.
+        self.timed_into(floptle_core::profile::Bucket::Scripts, |ed| ed.script_host.step_gc(GC_BUDGET_MS));
         anim::advance_springs(&mut self.anim, &self.world, &self.mesh_registry, sdt, &self.frame_carry);
         anim::resolve_attachments(&self.anim, &mut self.world, &self.mesh_registry);
         // 2D cameras follow after all of that, for the same reason bone
@@ -2179,6 +2182,11 @@ pub(crate) fn record_step_timing(
         p.record_body(&name, ms);
     }
 }
+
+/// What the script collector may spend between frames, ms (see
+/// `ScriptHost::step_gc`): a little each frame, so its debt never builds into
+/// one long pause inside a hook.
+const GC_BUDGET_MS: f32 = 0.5;
 
 #[cfg(test)]
 mod frame_phase_tests {

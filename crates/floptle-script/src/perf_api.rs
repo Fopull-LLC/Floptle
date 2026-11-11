@@ -401,6 +401,9 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
             out.set("queryMeshed", qm)?;
             out.set("queryMeshMs", qms)?;
             out.set("queryDeferred", qd)?;
+            // The scripts' heap now, KB: a level, not what a frame allocates
+            // (perf.allocations says that).
+            out.set("luaHeapKb", (lua.used_memory() / 1024) as u64)?;
             // Terrain edits refused because the queue was full, since the
             // start: zero for a game that paces with `terrain.capacity()`.
             out.set("terrainDropped", crate::terrain_api::dropped_count(lua))?;

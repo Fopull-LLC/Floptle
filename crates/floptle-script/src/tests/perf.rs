@@ -155,3 +155,44 @@ fn a_file_written_on_the_frame_is_named() {
     let r = prof.recent_frames(1).next().expect("a frame").clone();
     assert!(r.parts.iter().any(|(p, _)| *p == "fileWriteOnFrame"), "the on-frame write is not named: {:?}", r.parts);
 }
+
+/// **The collector's work between frames is named, and it collects.** A
+/// script leaves a few MB of garbage; stepping the collector between frames
+/// (`step_gc`, what the engine does each frame) records `scriptsGc`, and
+/// stepped through two whole cycles, the heap is smaller than it was.
+#[test]
+fn the_collector_steps_between_frames_and_is_named() {
+    let dir = std::env::temp_dir().join(format!("floptle-perf-gc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "litter",
+        "function update(node, dt)\n  \
+           local junk = {}\n  \
+           for i = 1, 60000 do junk[i] = { i, tostring(i) } end\n\
+         end\n",
+    );
+    let (mut world, _) = world_with_script("litter");
+    let mut host = ScriptHost::new();
+    host.profile().borrow_mut().enable(true);
+    host.profile().borrow_mut().begin_frame();
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let before = host.lua_used_memory();
+    host.step_gc(0.5);
+    host.profile().borrow_mut().end_frame();
+    let parts = host.profile().borrow().recent_frames(1).next().expect("a frame").parts.clone();
+    assert!(parts.iter().any(|(n, ms)| *n == "scriptsGc" && *ms > 0.0), "the collector's step is not named: {parts:?}");
+    // Two whole cycles: the first to finish may be one that began before
+    // the junk was garbage, and frees none of it.
+    let (mut cycles, mut steps) = (0, 0);
+    while cycles < 2 && steps < 5000 {
+        if host.step_gc(5.0) {
+            cycles += 1;
+        }
+        steps += 1;
+    }
+    let after = host.lua_used_memory();
+    assert!(after < before, "stepping the collector to the end of a cycle freed nothing: {before} -> {after} bytes");
+    let _ = std::fs::remove_dir_all(&dir);
+}
