@@ -5915,9 +5915,17 @@ fn install_find_globals(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
             // node of that name and it may be the one being filtered out —
             // returning nil while a perfectly good second one exists would
             // be worse than the bug this fixes.
-            let found = match s.by_name.get(&name).copied() {
+            //
+            // The index holds every node, switched off or not, so no entry
+            // means no node of that name at all, and a miss is answered from
+            // it too. Walking the scene for one cost a game that polls for an
+            // optional node (a muzzle that exists only while the tool is out)
+            // the whole scene every frame: 3 ms at 2,000 building pieces.
+            let first = s.by_name.get(&name).copied();
+            let found = match first {
+                None => None,
                 Some(e) if s.in_scope(e, scope) => Some(e),
-                _ => s
+                Some(_) => s
                     .order
                     .iter()
                     .copied()
@@ -5928,9 +5936,9 @@ fn install_find_globals(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
             // symptom of the enabled-only default is a `nil` in somebody
             // else's code.
             if found.is_none()
+                && first.is_some()
                 && scope == crate::FindScope::Enabled
                 && !find_quiet(&opts)
-                && s.order.iter().any(|e| s.names.get(e).is_some_and(|n| n == &name))
                 && warned.borrow_mut().insert(name.clone())
             {
                 logs.borrow_mut().push(crate::ScriptLog {

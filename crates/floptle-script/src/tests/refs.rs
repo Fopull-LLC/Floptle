@@ -1300,3 +1300,56 @@ fn another_scripts_function_reads_this_frames_time() {
     assert!(env.get::<Option<f64>>("seen").unwrap().is_some(), "the clock was never reached");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **find() of a name no node has costs the same in a big scene as in a small
+/// one, and a switched-off node is still reported.** A miss used to walk the
+/// whole scene, twice: once to look and once for the switched-off warning. A
+/// game polling for an optional node every frame paid for every node in the
+/// scene. Timed as a ratio between 200 and 20,000 nodes, never as a duration.
+/// The warning for a name that IS there, switched off, still says so once.
+#[test]
+fn find_misses_cost_the_same_in_a_big_scene_and_still_name_a_switched_off_node() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_find_miss_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "poll",
+        "function update(node, dt)\n  \
+           local t = os.clock()\n  \
+           for i = 1, 3000 do if find(\"Nope\") then error(\"found a node that is not there\") end end\n  \
+           node.x = (os.clock() - t) * 1000\n  \
+           if find(\"Off\") ~= nil then error(\"found a switched-off node\") end\n\
+         end\n",
+    );
+    let run = |n: usize| -> (f64, Vec<String>) {
+        let mut world = World::default();
+        for i in 0..n {
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(e, floptle_core::Name(format!("Part{i}")));
+        }
+        let off = world.spawn();
+        world.insert(off, Transform::IDENTITY);
+        world.insert(off, floptle_core::Name("Off".into()));
+        world.insert(off, floptle_core::Disabled);
+        let p = world.spawn();
+        world.insert(p, Transform::IDENTITY);
+        world.insert(p, Scripts(vec![floptle_core::ScriptInst::new("poll")]));
+        let mut host = ScriptHost::new();
+        let mut best = f64::MAX;
+        for i in 1..=5 {
+            host.run(&mut world, &dir, 0.1, 0.1 * i as f32);
+            assert!(host.errors().is_empty(), "{:?}", host.errors());
+            best = best.min(world.get::<Transform>(p).unwrap().translation.x);
+        }
+        let warned = host.drain_logs().into_iter().map(|l| l.msg).filter(|m| m.contains("switched OFF")).collect();
+        (best, warned)
+    };
+    let (small, warned) = run(200);
+    let (big, _) = run(20_000);
+    assert_eq!(warned.len(), 1, "the switched-off node must be named once: {warned:?}");
+    // Walking the scene measured 140x here; a wide margin keeps a busy
+    // machine running tests in parallel from reading as a regression.
+    assert!(big < small.max(0.05) * 10.0, "3,000 misses took {big:.2} ms among 20,000 nodes against {small:.2} ms among 200");
+}
