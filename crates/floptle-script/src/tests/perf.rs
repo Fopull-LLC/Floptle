@@ -121,7 +121,10 @@ fn script_time_outside_the_hooks_is_named() {
         assert!(part(name).is_some(), "{name} is not named: {:?}", r.parts);
     }
     let hooks: f32 = r.scripts.iter().map(|(_, ms)| *ms).sum();
-    assert!(hooks < 5.0, "the timer's spin was charged to a hook ({hooks:.2} ms)");
+    // Against the timer's own time rather than a fixed few milliseconds: a
+    // loaded machine stretches both, and one at load 16 once stretched the
+    // hooks past 5 ms. A spin charged to a hook reads the whole 20 ms there.
+    assert!(hooks < 0.5 * timers, "the timer's spin was charged to a hook ({hooks:.2} ms against the timer's {timers:.2})");
 }
 
 /// **A file written on the frame is named as such.** `assets.writeText`

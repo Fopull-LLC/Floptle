@@ -3509,6 +3509,24 @@ impl Editor {
         if touched.is_empty() {
             return;
         }
+        // Into the feed a game catches up on (`terrain.editsSince`): every
+        // edit that changed the ground, whoever made it, in the node's frame.
+        let kind = match op.mode {
+            M::Lower => "dig",
+            M::Raise => "raise",
+            M::Smooth => "smooth",
+            M::Flatten => "flatten",
+            M::Paint(_) | M::PaintTexture(_) => "paint",
+        };
+        let body = self.world.get::<floptle_core::Name>(e).map(|n| n.0.clone()).unwrap_or_default();
+        self.script_host.push_terrain_edit(floptle_script::TerrainEdit {
+            serial: 0,
+            entity: e.index(),
+            body,
+            local: (local * ts).as_dvec3().to_array(),
+            radius: f64::from(op.radius),
+            kind,
+        });
         let geom = !matches!(op.mode, M::Paint(_) | M::PaintTexture(_));
         // Geometry edits reach the sim's collider copy when the batch lands, so
         // collision agrees with the drawn surface this tick (color never
@@ -6690,6 +6708,46 @@ mod residency_tests {
             .collect();
         mesh.sort_by(f64::total_cmp);
         assert!(mid < 5.0 * mesh[2], "a bite costs the main thread {mid:.2} ms (median), a chunk's mesh {:.2} ms", mesh[2]);
+    }
+
+    /// **Every edit that changes the ground lands in the feed a game reads
+    /// (`terrain.editsSince`)**, named by its terrain and kind, centred where
+    /// it was made in the terrain's own frame, and one that changes nothing
+    /// lands nothing.
+    #[test]
+    fn a_landed_edit_reaches_the_edit_feed() {
+        let fill = floptle_field::procgen::PlanetFill { seed: 3, radius: 60.0, voxel: 1.0, ..Default::default() };
+        let mut ed = crate::Editor::default();
+        let field = floptle_field::procgen::generate_planet(&fill);
+        let ground = field.raycast(Vec3::new(0.0, 100.0, 0.0), Vec3::NEG_Y, 100.0).unwrap();
+        let e = ed.world.spawn();
+        // Placed off the origin, so a centre in the world frame would not pass.
+        ed.world.insert(e, floptle_core::Transform::from_translation(DVec3::new(500.0, 0.0, 0.0)));
+        ed.world.insert(e, floptle_core::Name("Moon".into()));
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        ed.toggle_play();
+        let at = |p: Vec3| [p.x as f64 + 500.0, p.y as f64, p.z as f64];
+        let op = |pos: [f64; 3], mode: floptle_script::TerrainOpMode| floptle_script::TerrainOp {
+            pos,
+            radius: 2.0,
+            strength: 0.9,
+            mode,
+            id: 0,
+            normal: None,
+            brush: None,
+        };
+        let mut batch: HashMap<Entity, TerrainBatch> = HashMap::new();
+        ed.apply_terrain_op(&op(at(ground), floptle_script::TerrainOpMode::Lower), &mut batch);
+        ed.apply_terrain_op(&op(at(ground + Vec3::X * 6.0), floptle_script::TerrainOpMode::PaintTexture(2)), &mut batch);
+        // High in the sky: nothing there to change.
+        ed.apply_terrain_op(&op(at(ground + Vec3::Y * 30.0), floptle_script::TerrainOpMode::Lower), &mut batch);
+        let got = ed.script_host.terrain_edits_since(0).unwrap();
+        assert_eq!(got.len(), 2, "two edits changed the ground: {got:?}");
+        assert_eq!((got[0].body.as_str(), got[0].kind, got[0].entity), ("Moon", "dig", e.index()));
+        assert_eq!(got[1].kind, "paint");
+        let c = DVec3::from_array(got[0].local);
+        assert!((c - ground.as_dvec3()).length() < 1e-3, "the dig's centre in the terrain's frame: {c} for {ground}");
+        assert!((got[0].radius - 2.0).abs() < 1e-6);
     }
 
     /// Sync terrain `e`'s meshes from `cam` until every chunk the field holds

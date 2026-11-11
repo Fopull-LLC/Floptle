@@ -73,6 +73,68 @@ pub(crate) struct TerrainReceipts {
     /// what `terrain.capacity()` exists to keep at zero, and what
     /// `perf.counts().terrainDropped` reports.
     pub dropped: Rc<std::cell::Cell<u64>>,
+    /// Edits that landed, for `terrain.editSerial` / `terrain.editsSince`.
+    pub edits: Rc<RefCell<EditFeed>>,
+}
+
+/// One terrain edit that landed, as `terrain.editsSince` reports it.
+///
+/// The centre is in the terrain node's own frame, in metres (its rotation, not
+/// its scale), so a planet that moves on its rails or turns does not leave the
+/// record pointing at where the ground used to be.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerrainEdit {
+    /// Bumps once per landed edit, from 1.
+    pub serial: u64,
+    /// The terrain node's entity index.
+    pub entity: u32,
+    /// Its name, as `body =` filters on.
+    pub body: String,
+    /// The edit's centre in the node's frame, metres.
+    pub local: [f64; 3],
+    /// How far from the centre it can have reached, metres.
+    pub radius: f64,
+    /// `dig`, `raise`, `smooth`, `flatten` or `paint`.
+    pub kind: &'static str,
+}
+
+/// The landed edits a game can catch up on: the last [`EditFeed::KEEP`],
+/// each with its serial.
+#[derive(Debug, Default)]
+pub struct EditFeed {
+    serial: u64,
+    ring: std::collections::VecDeque<TerrainEdit>,
+}
+
+impl EditFeed {
+    /// Landed edits kept for a game that asks late.
+    pub const KEEP: usize = 1024;
+
+    /// The serial of the last edit that landed, 0 before the first.
+    pub fn serial(&self) -> u64 {
+        self.serial
+    }
+
+    /// Record one landed edit, giving it the next serial.
+    pub fn push(&mut self, mut e: TerrainEdit) {
+        self.serial += 1;
+        e.serial = self.serial;
+        if self.ring.len() == Self::KEEP {
+            self.ring.pop_front();
+        }
+        self.ring.push_back(e);
+    }
+
+    /// The edits after `since`, oldest first, or `None` when some of them have
+    /// already left the ring: the caller fell behind and has to look again at
+    /// everything it cares about.
+    pub fn since(&self, since: u64) -> Option<impl Iterator<Item = &TerrainEdit>> {
+        let oldest = self.ring.front().map_or(self.serial + 1, |e| e.serial);
+        if since + 1 < oldest {
+            return None;
+        }
+        Some(self.ring.iter().filter(move |e| e.serial > since))
+    }
 }
 
 /// Ground the world has not made yet: a terrain body that is generating,
@@ -486,7 +548,7 @@ pub(crate) fn install_terrain_api(
     receipts: TerrainReceipts,
 ) {
     let TerrainStreamShared { save_dir, lod_anchor, edit_budget, warm, flush, busy, save_dir_in_use, unmade, prepare, paths, copies } = stream;
-    let TerrainReceipts { yields, next_op_id, planet, queued, generator, impostors, dropped } = receipts;
+    let TerrainReceipts { yields, next_op_id, planet, queued, generator, impostors, dropped, edits } = receipts;
     lua.set_app_data(TerrainDrops(dropped.clone()));
     let Ok(t) = lua.create_table() else { return };
 
@@ -727,6 +789,107 @@ pub(crate) fn install_terrain_api(
         let (ops, queued) = (ops.clone(), queued.clone());
         if let Ok(f) = lua.create_function(move |_, ()| Ok(ops.borrow().len() + queued.get())) {
             let _ = t.set("pending", f);
+        }
+    }
+
+    // terrain.editSerial() — a counter that bumps once each time an edit
+    // lands in the ground, whoever made it: this game's scripts, a mod, a
+    // multiplayer peer. Remember it, and `editsSince` says what landed after.
+    {
+        let feed = edits.clone();
+        if let Ok(f) = lua.create_function(move |_, ()| Ok(feed.borrow().serial())) {
+            let _ = t.set("editSerial", f);
+        }
+    }
+
+    // terrain.editsSince(serial [, { body =, near =, radius = }]) — the edits
+    // that landed after `serial`, oldest first: { serial, body, x, y, z, r,
+    // kind, wx, wy, wz }. x, y, z is the centre in the terrain node's own
+    // frame (metres), which stays true as a planet moves; wx, wy, wz is where
+    // that is in the world now. r is how far it can have reached, kind is
+    // "dig", "raise", "smooth", "flatten" or "paint" (a shape listener skips
+    // paint). body = name keeps one terrain's; near = vec3 with radius keeps
+    // those that can have reached that sphere, measured on the body as it
+    // stands now. The last 1,024 are kept: a caller further behind gets
+    // nil, "too old", and looks again at everything it cares about.
+    {
+        let feed = edits.clone();
+        let cols = colliders.clone();
+        if let Ok(f) = lua.create_function(move |lua, (since, opts): (f64, Option<mlua::Table>)| {
+            const KNOWN: &[&str] = &["body", "near", "radius"];
+            let (body, near, radius) = match &opts {
+                Some(o) => {
+                    for pair in o.clone().pairs::<Value, Value>() {
+                        let (k, _) = pair?;
+                        let k = match &k {
+                            Value::String(s) => s.to_str()?.to_string(),
+                            _ => return Err(mlua::Error::runtime("terrain.editsSince: option keys are names")),
+                        };
+                        if !KNOWN.contains(&k.as_str()) {
+                            return Err(mlua::Error::runtime(format!(
+                                "terrain.editsSince: no option `{k}` (it takes body, near and radius)"
+                            )));
+                        }
+                    }
+                    let near: Option<Value> = o.get("near")?;
+                    let near = match near {
+                        None | Some(Value::Nil) => None,
+                        Some(v) => Some(crate::math_api::vec3_of(&v).ok_or_else(|| {
+                            mlua::Error::runtime("terrain.editsSince: near takes a vec3")
+                        })?),
+                    };
+                    let radius: Option<f64> = o.get("radius")?;
+                    if near.is_some() != radius.is_some() {
+                        return Err(mlua::Error::runtime("terrain.editsSince: near and radius go together"));
+                    }
+                    (o.get::<Option<String>>("body")?, near, radius.map(|r| r.max(0.0)))
+                }
+                None => (None, None, None),
+            };
+            let feed = feed.borrow();
+            let Some(edits) = feed.since(since.max(0.0) as u64) else {
+                return Ok((Value::Nil, Some("too old")));
+            };
+            let cols = cols.borrow();
+            // Each body's frame as it stands now: rotation and world anchor.
+            let frame = |entity: u32| {
+                cols.iter()
+                    .find(|c| c.eid == Some(entity))
+                    .and_then(|c| c.shape.chunk_terrain().map(|t| (t.rot.as_dquat(), c.anchor)))
+            };
+            let out = lua.create_table()?;
+            for e in edits {
+                if body.as_deref().is_some_and(|b| b != e.body) {
+                    continue;
+                }
+                let at = frame(e.entity);
+                let local = floptle_core::math::DVec3::from_array(e.local);
+                if let (Some(p), Some(r)) = (near, radius) {
+                    let Some((rot, anchor)) = at else { continue };
+                    let p_local = rot.inverse() * (p - anchor);
+                    if (p_local - local).length() > r + e.radius {
+                        continue;
+                    }
+                }
+                let row = lua.create_table()?;
+                row.set("serial", e.serial)?;
+                row.set("body", e.body.as_str())?;
+                row.set("x", e.local[0])?;
+                row.set("y", e.local[1])?;
+                row.set("z", e.local[2])?;
+                row.set("r", e.radius)?;
+                row.set("kind", e.kind)?;
+                if let Some((rot, anchor)) = at {
+                    let w = anchor + rot * local;
+                    row.set("wx", w.x)?;
+                    row.set("wy", w.y)?;
+                    row.set("wz", w.z)?;
+                }
+                out.push(row)?;
+            }
+            Ok((Value::Table(out), None))
+        }) {
+            let _ = t.set("editsSince", f);
         }
     }
 

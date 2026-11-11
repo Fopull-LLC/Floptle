@@ -1403,3 +1403,97 @@ end
     assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 1.0, "the script did not finish");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **`terrain.editsSince` hands a game the edits that landed, wherever they
+/// came from, and finds them on the body as it stands now.** Edits pushed
+/// the way the engine pushes each one that changed the ground: the feed
+/// numbers them, filters by body and by a sphere measured through the
+/// body's current rotation, says where each is in the world now, and
+/// answers "too old" to a caller further behind than the ring keeps.
+#[test]
+fn terrain_edits_since_reports_landed_edits_on_the_body_as_it_stands() {
+    use floptle_core::math::{DVec3, Quat};
+    let dir = std::env::temp_dir().join(format!("floptle-edits-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "listen",
+        concat!(
+            "local function row(e) return string.format('%d %s %s %.1f,%.1f,%.1f r%.1f w%s', e.serial, e.body, e.kind, e.x, e.y, e.z, e.r,\n",
+            "  e.wx and string.format('%.1f,%.1f,%.1f', e.wx, e.wy, e.wz) or '-') end\n",
+            "function update(node, dt)\n",
+            "  frame = (frame or 0) + 1\n",
+            "  if frame == 1 then\n",
+            "    log('serial=' .. terrain.editSerial())\n",
+            "    for _, e in ipairs(terrain.editsSince(0)) do log('all ' .. row(e)) end\n",
+            "    log('rock=' .. #terrain.editsSince(0, { body = 'Rock' }))\n",
+            "    for _, e in ipairs(terrain.editsSince(0, { near = vec3(1000, 0, -10), radius = 1 })) do log('near ' .. row(e)) end\n",
+            "    log('after2=' .. #terrain.editsSince(2))\n",
+            "    log('bad=' .. tostring(pcall(terrain.editsSince, 0, { nera = vec3(0, 0, 0) })))\n",
+            "  else\n",
+            "    local got, why = terrain.editsSince(1)\n",
+            "    log('behind=' .. tostring(got) .. ' ' .. tostring(why))\n",
+            "    log('caught=' .. #terrain.editsSince(terrain.editSerial() - 5) .. ' serial=' .. terrain.editSerial())\n",
+            "  end\n",
+            "end\n",
+        ),
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(
+        e,
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "listen".into(),
+            enabled: true,
+            params: vec![],
+            refs: vec![],
+            strs: Vec::new(),
+            pinned_bools: None,
+        }]),
+    );
+    let host = ScriptHost::new();
+    // A terrain body turned a quarter about Y, standing at x = 1000.
+    let field = floptle_field::ChunkField::new(1.0);
+    let rock = floptle_physics::ChunkTerrain::posed(field, Quat::from_rotation_y(core::f32::consts::FRAC_PI_2), 1.0);
+    let mut col = floptle_physics::AnchoredCollider::world(Box::new(rock));
+    col.anchor = DVec3::new(1000.0, 0.0, 0.0);
+    col.eid = Some(7);
+    host.set_colliders(vec![col], DVec3::ZERO);
+    let edit = |entity: u32, body: &str, local: [f64; 3], radius: f64, kind: &'static str| crate::TerrainEdit {
+        serial: 0,
+        entity,
+        body: body.into(),
+        local,
+        radius,
+        kind,
+    };
+    host.push_terrain_edit(edit(7, "Rock", [10.0, 0.0, 0.0], 2.0, "dig"));
+    host.push_terrain_edit(edit(7, "Rock", [-50.0, 0.0, 0.0], 3.0, "paint"));
+    host.push_terrain_edit(edit(9, "Other", [0.0, 5.0, 0.0], 1.0, "raise"));
+    let mut host = host;
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    let has = |want: &str| logs.iter().any(|l| l == want);
+    assert!(has("serial=3"), "{logs:?}");
+    assert!(has("all 1 Rock dig 10.0,0.0,0.0 r2.0 w1000.0,0.0,-10.0"), "the dig, in the body's frame and where that is now: {logs:?}");
+    assert!(has("all 2 Rock paint -50.0,0.0,0.0 r3.0 w1000.0,0.0,50.0"), "{logs:?}");
+    assert!(has("all 3 Other raise 0.0,5.0,0.0 r1.0 w-"), "a body with no collider has no world place: {logs:?}");
+    assert!(has("rock=2"), "{logs:?}");
+    let near: Vec<&String> = logs.iter().filter(|l| l.starts_with("near ")).collect();
+    assert_eq!(near.len(), 1, "only the dig reaches a sphere at its world place, through the body's turn: {logs:?}");
+    assert!(near[0].starts_with("near 1 Rock dig"), "{logs:?}");
+    assert!(has("after2=1"), "{logs:?}");
+    assert!(has("bad=false"), "an unknown option is an error: {logs:?}");
+
+    for i in 0..crate::terrain_api::EditFeed::KEEP + 10 {
+        host.push_terrain_edit(edit(7, "Rock", [i as f64, 0.0, 0.0], 1.0, "dig"));
+    }
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(logs.iter().any(|l| l == "behind=nil too old"), "{logs:?}");
+    assert!(logs.iter().any(|l| l == &format!("caught=5 serial={}", 3 + crate::terrain_api::EditFeed::KEEP + 10)), "{logs:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

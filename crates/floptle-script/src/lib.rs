@@ -410,7 +410,7 @@ pub use net_api::{
 };
 pub use assembly_api::{AssemblyCmd, AssemblyImpact, AssemblyInfo};
 pub use space_api::{belt_orbits, SpaceBodyInfo, SpaceInfo};
-pub use terrain_api::{ImpostorRule, LodAnchor, MAX_PENDING_OPS, PrepareAsk, TERRAIN_EDIT_BUDGET_MS, TerrainCopy, TerrainOp, TerrainOpMode, TerrainYield, UnmadeRegion, copy_terrain_files};
+pub use terrain_api::{ImpostorRule, LodAnchor, MAX_PENDING_OPS, PrepareAsk, TERRAIN_EDIT_BUDGET_MS, TerrainCopy, TerrainEdit, TerrainOp, TerrainOpMode, TerrainYield, UnmadeRegion, copy_terrain_files};
 pub use rollback_api::{ScriptState, MAX_STATE_DEPTH};
 pub use view_api::ViewInfo;
 
@@ -811,6 +811,8 @@ pub struct ScriptHost {
     terrain_slots: Rc<RefCell<terrain_slot_api::SlotMaterials>>,
     /// Terrain edits refused for a full queue since the host was made.
     terrain_dropped: Rc<std::cell::Cell<u64>>,
+    /// Terrain edits that landed, for `terrain.editsSince`.
+    terrain_edit_feed: Rc<RefCell<crate::terrain_api::EditFeed>>,
     /// `terrain.prepare` asks waiting for the engine.
     terrain_prepare: terrain_api::PrepareCalls,
     /// `terrain.flush()` — write every dirty resident field to the save slot

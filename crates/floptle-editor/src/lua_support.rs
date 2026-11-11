@@ -2144,6 +2144,31 @@ function terrain.pending() end
 ---is counted in `perf.counts().terrainDropped`.
 ---@return integer
 function terrain.capacity() end
+---A counter that goes up by one each time a terrain edit lands in the ground,
+---whoever made it (this game, a mod, a multiplayer peer). Remember it, and
+---`terrain.editsSince` says what landed after. 0 before the first edit.
+---@return integer
+function terrain.editSerial() end
+---@class TerrainEditRecord
+---@field serial integer
+---@field body string The terrain node's name.
+---@field x number Centre in the terrain node's own frame, metres (stays true as a planet moves).
+---@field y number
+---@field z number
+---@field r number How far from the centre it can have reached, metres.
+---@field kind \"dig\"|\"raise\"|\"smooth\"|\"flatten\"|\"paint\"
+---@field wx number? Where the centre is in the world now.
+---@field wy number?
+---@field wz number?
+---The terrain edits that landed after `serial`, oldest first. `body` keeps one
+---terrain's; `near` with `radius` keeps those that can have reached that sphere,
+---measured on the body as it stands now. The last 1,024 are kept: further
+---behind, it answers nil, \"too old\", and you look again at everything.
+---@param serial integer
+---@param opts? { body?: string, near?: vec3, radius?: number }
+---@return TerrainEditRecord[]|nil edits
+---@return string? why
+function terrain.editsSince(serial, opts) end
 ---Is the ground within `r` of the point made, exactly and for good? False where
 ---a terrain body that reaches it is generating, streaming in or put away (a
 ---query reads open air there), and where the ground is a stand-in (a streamed

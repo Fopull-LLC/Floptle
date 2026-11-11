@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 79
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 34
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 36
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 11
 - [weather — wind](#weather--wind) — 6
@@ -3001,6 +3001,14 @@ end
 ### `terrain.editBudget`
 
 terrain.editBudget([ms]) → the milliseconds of each frame the engine spends landing the game's terrain edits (4 by default); the rest wait, in order, for the frames after. Raise it while a loading screen covers the view, so a big batch (a base site graded in a thousand flattens) lands sooner, and set it back, or pass nil for the default, when the view is shown. Clamped to 0.5..1000. Returns the budget it replaced; with no argument it only reads it. A scene swap resets it. Refuses: anything that is not a number or nil.
+
+### `terrain.editSerial`
+
+terrain.editSerial() → a counter that goes up by one each time a terrain edit lands in the ground, whoever made it: this game's scripts, a mod, a scenario, a multiplayer peer. Remember it, and terrain.editsSince says what landed after. 0 before the first edit.
+
+### `terrain.editsSince`
+
+terrain.editsSince(serial [, { body = name, near = vec3, radius = metres }]) → the terrain edits that landed after serial, oldest first, each { serial, body, x, y, z, r, kind, wx, wy, wz }: for things that rest on, hang from or are laid along the ground and must follow it when it is dug (a rope over an edge, tracks, cover points, props a script placed). x, y, z is the edit's centre in the terrain node's own frame, in metres, which stays true as a planet moves on its rails or turns; wx, wy, wz is where that is in the world now. r is how far from the centre it can have reached. kind is "dig", "raise", "smooth", "flatten" or "paint", so a listener for the shape of the ground skips paint. body keeps one terrain's edits; near with radius keeps those that can have reached that sphere, measured on the body as it stands now. Only edits that changed the ground are listed, never one still waiting (terrain.pending). The last 1,024 are kept: a caller further behind than that gets nil, "too old", and should look again at everything it cares about, then carry on from terrain.editSerial(). An option it does not know is an error.
 
 ### `terrain.flush`
 

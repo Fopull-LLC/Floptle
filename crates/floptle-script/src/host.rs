@@ -3300,6 +3300,7 @@ impl ScriptHost {
         let terrain_impostors: crate::terrain_api::ImpostorCalls = Rc::default();
         let terrain_unmade: Rc<RefCell<Vec<crate::terrain_api::UnmadeRegion>>> = Rc::default();
         let terrain_dropped: Rc<std::cell::Cell<u64>> = Rc::default();
+        let terrain_edit_feed: Rc<RefCell<crate::terrain_api::EditFeed>> = Rc::default();
         let terrain_prepare: crate::terrain_api::PrepareCalls = Rc::default();
         let terrain_copies: crate::terrain_api::TerrainCopies = Rc::default();
         crate::terrain_api::install_terrain_api(
@@ -3329,6 +3330,7 @@ impl ScriptHost {
                 generator: terrain_generator.clone(),
                 impostors: terrain_impostors.clone(),
                 dropped: terrain_dropped.clone(),
+                edits: terrain_edit_feed.clone(),
             },
         );
         let terrain_slots: Rc<RefCell<crate::terrain_slot_api::SlotMaterials>> = Rc::default();
@@ -3551,6 +3553,7 @@ impl ScriptHost {
             terrain_unmade,
             terrain_slots,
             terrain_dropped,
+            terrain_edit_feed,
             terrain_prepare,
             create_requests,
             rich_sets: shared.rich_sets.clone(),
@@ -4897,6 +4900,19 @@ impl ScriptHost {
     /// `perf.counts().terrainDropped` reports.
     pub fn terrain_edits_dropped(&self) -> u64 {
         self.terrain_dropped.get()
+    }
+
+    /// Record a terrain edit that landed in the ground, for
+    /// `terrain.editSerial` / `terrain.editsSince`. Called by the engine
+    /// for every edit that changed voxels, whoever made it.
+    pub fn push_terrain_edit(&self, edit: crate::terrain_api::TerrainEdit) {
+        self.terrain_edit_feed.borrow_mut().push(edit);
+    }
+
+    /// The landed terrain edits after `since`, as `terrain.editsSince` sees
+    /// them, or `None` when some have already left the feed.
+    pub fn terrain_edits_since(&self, since: u64) -> Option<Vec<crate::terrain_api::TerrainEdit>> {
+        self.terrain_edit_feed.borrow().since(since).map(|it| it.cloned().collect())
     }
 
     /// Mirror the editor's physics-paused state into `physics.isPaused()`.
