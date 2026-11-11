@@ -5731,7 +5731,9 @@ fn upload_texture_mips(gpu: &Gpu, t: &TextureData, gen_mips: bool, drop: u32) ->
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        // COPY_SRC: a picture a merged model's override brings is copied into
+        // a texture array on the GPU at first use (`Raster::pool_registered`).
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
         // So the same pixels can also be read raw, for the surface maps that are
         // data rather than colour. See `TexBind::linear_view`.
         view_formats: &[wgpu::TextureFormat::Rgba8Unorm],

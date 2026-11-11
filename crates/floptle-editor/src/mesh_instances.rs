@@ -535,11 +535,13 @@ pub(crate) fn push_mesh_instances(
             let alike = opaque && looks.iter().all(|(t, _, _)| *t == tex0);
             // **Different pictures, one instance, through texture arrays**
             // (card 0690): each slot's pictures are layers of the arrays its
-            // set binds. A part whose look names no picture draws its own
-            // (`own_tex`). Glass stays parts (its pass has no array build of
-            // its own to composite with), and a picture an override brought
-            // that is not in the pools refuses the set: the parts draw.
-            if opaque && !alike && m.arrays && merge_arrays_on() && !exts.iter().any(|&e| raster.is_transmissive(e)) {
+            // set binds, whether the file embeds them or a material file or
+            // an override brings them (pooled at first use). A part whose
+            // look names no picture draws its own (`own_tex`). Glass stays
+            // parts (its pass has no array build of its own to composite
+            // with), and pictures of a kind that differ in size or sampling
+            // refuse the set: the parts draw.
+            if opaque && !alike && merge_arrays_on() && !exts.iter().any(|&e| raster.is_transmissive(e)) {
                 let slot_tex: Vec<Option<TexId>> =
                     looks.iter().enumerate().map(|(i, l)| l.0.or_else(|| m.own_tex.get(i).copied().flatten())).collect();
                 if let Some((set, layers)) = raster.array_set_for(gpu, &slot_tex) {

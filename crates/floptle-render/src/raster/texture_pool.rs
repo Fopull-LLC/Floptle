@@ -172,6 +172,47 @@ impl Raster {
         }
     }
 
+    /// [`Self::pool_texture`] for a picture the renderer holds only on the
+    /// GPU: one a material file or an override brought, registered without
+    /// its pixels kept. Its texture is copied into a layer, every mip level,
+    /// on the GPU, the first time a merged model's slot wears it. `None` for
+    /// an id that is not a plain picture (a material set, an array set) or
+    /// a texture that cannot be copied.
+    pub fn pool_registered(&mut self, gpu: &Gpu, id: TexId) -> Option<PoolLayer> {
+        if let Some(&at) = self.pools.of_tex.get(&id.0) {
+            return Some(at);
+        }
+        if self.pools.set_keys.contains_key(&id.0) || self.pools.array_ids.contains(&id.0) {
+            return None;
+        }
+        let t = self.textures.get(id.0 as usize)?;
+        let src = t._texture.clone();
+        let sampling = t.sampling;
+        if src.format() != wgpu::TextureFormat::Rgba8UnormSrgb
+            || !src.usage().contains(wgpu::TextureUsages::COPY_SRC)
+            || src.depth_or_array_layers() != 1
+        {
+            return None;
+        }
+        let key = PoolKey { width: src.width(), height: src.height(), mip_count: src.mip_level_count(), sampling, drop: self.texture_drop };
+        let pool = self.pool_for(gpu, key)?;
+        let layer = self.pool_reserve(gpu, pool)?;
+        let dst = &self.pools.pools[pool as usize].texture;
+        let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-pool-copy") });
+        for level in 0..key.mip_count {
+            let (w, h) = ((key.width >> level).max(1), (key.height >> level).max(1));
+            enc.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo { texture: &src, mip_level: level, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyTextureInfo { texture: dst, mip_level: level, origin: wgpu::Origin3d { x: 0, y: 0, z: layer }, aspect: wgpu::TextureAspect::All },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+        }
+        gpu.queue.submit([enc.finish()]);
+        let at = PoolLayer { pool, layer };
+        self.pools.of_tex.insert(id.0, at);
+        Some(at)
+    }
+
     /// Where the picture registered as `id` is in the pools, if it is.
     pub fn pooled_layer(&self, id: TexId) -> Option<PoolLayer> {
         self.pools.of_tex.get(&id.0).copied()
@@ -211,6 +252,12 @@ impl Raster {
     /// size or sampling): those slots draw as instances of their own.
     pub fn array_set_for(&mut self, gpu: &Gpu, slots: &[Option<TexId>]) -> Option<(TexId, Vec<[u8; SURFACE_SLOTS]>)> {
         let pictures: Vec<[u32; SURFACE_SLOTS]> = slots.iter().map(|&t| self.pools.pictures_of(t)).collect();
+        // A picture not in the pools yet (an override's) is copied in now.
+        for p in &pictures {
+            for &t in p.iter().filter(|&&t| t != u32::MAX) {
+                self.pool_registered(gpu, TexId(t))?;
+            }
+        }
         let mut pool_of_kind = [u32::MAX; SURFACE_SLOTS];
         for k in 0..SURFACE_SLOTS {
             for p in &pictures {
@@ -517,8 +564,14 @@ mod tests {
         let to = r.register_texture(&gpu, &odd, s);
         r.pool_texture(&gpu, to, &odd, s).unwrap();
         assert!(r.array_set_for(&gpu, &[Some(tw), Some(to)]).is_none(), "a 16² base shared a set with a 32² one");
+        // A picture registered but never pooled (an override's) is copied in
+        // on the GPU the first time a set asks for it.
         let loose = r.register_texture(&gpu, &picture(32, 32, 5), s);
-        assert!(r.array_set_for(&gpu, &[Some(tw), Some(loose)]).is_none(), "a picture never pooled was bound");
+        assert!(r.pooled_layer(loose).is_none());
+        let (_, l) = r.array_set_for(&gpu, &[Some(tw), Some(loose)]).expect("an override's picture was refused");
+        let at = r.pooled_layer(loose).expect("the override's picture was not pooled");
+        assert_eq!(l[1][0] as u32, at.layer);
+        assert!(crate::probe::readback_layer(&gpu, &r.pools.pools[at.pool as usize].texture, at.layer, 0) == picture(32, 32, 5).pixels, "the copied layer is not the picture");
     }
 
     /// **New pixels under a pooled picture reach its layer when they are the

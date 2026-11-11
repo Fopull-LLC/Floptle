@@ -4212,10 +4212,11 @@ struct MeshAsset {
 pub(crate) struct MergedMesh {
     pub(crate) mesh: MeshId,
     pub(crate) starts: Vec<u32>,
-    /// The parts' pictures differ, but every kind fits one texture array
-    /// (card 0690): the merge binds an array set (`Raster::array_set_for`)
-    /// instead of one shared set, and each picture was written into the
-    /// pools at import.
+    /// The pictures the file embeds differ between parts, but every kind
+    /// fits one texture array (card 0690): they were written into the pools
+    /// at import. A model whose parts differ only by the pictures overrides
+    /// bring merges through the arrays too, its pictures pooled at first use.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) arrays: bool,
     /// Each part's own base picture as a texture id, for a part that draws
     /// "the mesh's texture" (its look names none): what its slot binds.

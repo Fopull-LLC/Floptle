@@ -330,3 +330,49 @@ fn a_wall_whose_pictures_differ_in_size_draws_as_its_parts() {
     assert_eq!(instances_of(&mut ed, wall), 3);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A model whose file embeds no pictures, each part textured by its own
+/// override, is one instance and looks as its parts do** (card 0690): a
+/// building kit textures one shared mesh from its prefab's material file,
+/// so the pictures arrive through overrides, not the glb. They are copied
+/// into the arrays the first time the model draws.
+#[test]
+fn a_wall_textured_by_its_overrides_is_one_instance_and_draws_as_its_parts() {
+    let Some((mut ed, wall, root)) = editor_with_wall("overrides") else { return };
+    std::fs::create_dir_all(root.join("textures")).unwrap();
+    let img = |name: &str, f: &dyn Fn(u32, u32) -> [u8; 4]| {
+        let mut im = image::RgbaImage::new(32, 32);
+        for (x, y, p) in im.enumerate_pixels_mut() {
+            *p = image::Rgba(f(x, y));
+        }
+        im.save(root.join("textures").join(name)).unwrap();
+    };
+    img("cladding.png", &|x, y| if (x / 4 + y / 8) % 2 == 0 { [210, 120, 70, 255] } else { [120, 60, 40, 255] });
+    img("steel.png", &|x, _| [100 + (x * 4) as u8, 110, 130, 255]);
+    img("concrete.png", &|x, y| [150 + ((x * 7 + y * 3) % 40) as u8, 150, 145, 255]);
+    img("ridges.png", &|x, _| if (x / 2) % 2 == 0 { [40, 128, 220, 255] } else { [215, 128, 220, 255] });
+    let mut om = floptle_core::ObjectMaterials::default();
+    let look = |tex: &str, normal: Option<&str>| floptle_core::Material {
+        shading: floptle_core::Shading::Physical,
+        texture: Some(format!("textures/{tex}")),
+        normal_map: normal.map(|n| format!("textures/{n}")),
+        roughness: 0.5,
+        ..Default::default()
+    };
+    om.0.insert("Outside".into(), look("cladding.png", Some("ridges.png")));
+    om.0.insert("Inside".into(), look("steel.png", None));
+    om.0.insert("Trim".into(), look("concrete.png", None));
+    ed.world.insert(wall, om);
+    // The first frame loads the overrides' pictures.
+    let _ = picture(&mut ed);
+    assert_eq!(instances_of(&mut ed, wall), 1, "the wall textured by its overrides draws as more than one instance");
+    crate::mesh_instances::merge_parts_off_here(true);
+    let parts = picture(&mut ed);
+    crate::mesh_instances::merge_parts_off_here(false);
+    let merged = picture(&mut ed);
+    let lit = parts.chunks(4).filter(|p| p[0] > 10 || p[1] > 10 || p[2] > 10).count();
+    assert!(lit > 160 * 90 / 10, "the wall is not in the picture: {lit} lit pixels");
+    let differ = parts.chunks(4).zip(merged.chunks(4)).filter(|(a, b)| a != b).count();
+    assert_eq!(differ, 0, "the override-textured wall, merged, differs from its parts in {differ} pixels");
+    let _ = std::fs::remove_dir_all(&root);
+}

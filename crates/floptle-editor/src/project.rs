@@ -791,7 +791,6 @@ impl Editor {
                                 let sampling = embedded_sampling(chosen, &model.texture_filters, first.texture);
                                 raster.register_sampled(gpu, &mesh, first.texture.map(|i| &model.textures[i]), sampling)
                             };
-                            let mut own_tex = Vec::new();
                             if arrays {
                                 // Every picture the parts wear, as the shared ids
                                 // their looks bind, written into the pools.
@@ -804,8 +803,22 @@ impl Editor {
                                     let t = *images.entry(i).or_insert_with(|| raster.register_texture_shared(gpu, data, sampling));
                                     raster.pool_texture(gpu, t, data, sampling);
                                 }
-                                own_tex = model.parts.iter().map(|p| p.texture.and_then(|i| images.get(&i).copied())).collect();
                             }
+                            // Each part's own picture as the shared id its look
+                            // would bind: what its slot wears in an array set,
+                            // whether the arrays are filled here (pictures the
+                            // file embeds) or at first use (pictures a material
+                            // file or an override brings).
+                            let own_tex = model
+                                .parts
+                                .iter()
+                                .map(|p| {
+                                    p.texture.and_then(|i| {
+                                        let data = model.textures.get(i)?;
+                                        Some(*images.entry(i).or_insert_with(|| raster.register_texture_shared(gpu, data, sampling_of(i))))
+                                    })
+                                })
+                                .collect();
                             crate::MergedMesh { mesh: id, starts, arrays, own_tex }
                         })
                 };
