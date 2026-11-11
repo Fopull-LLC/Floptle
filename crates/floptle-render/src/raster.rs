@@ -1184,6 +1184,11 @@ pub struct Raster {
     /// The scene's spliced Field Shape code `(field functions, support)` —
     /// every module built here includes it so meshes receive shape shadows/AO.
     custom_field: Option<(String, String)>,
+    /// The pipelines a merged model whose slots wear pooled pictures draws
+    /// with ([`Self::array_passes`]): made the first time one is drawn, so a
+    /// project that never merges such a model never compiles them, and made
+    /// again after the field shader changes.
+    array_passes: std::cell::OnceCell<ArrayPasses>,
     /// Bumped whenever `custom_field` changes, so a shader built on another
     /// thread against the old field is not installed.
     field_rev: u64,
@@ -1207,6 +1212,23 @@ pub(crate) fn splice_block(src: &str, begin: &str, end: &str, replacement: &str)
     };
     let e_end = src[e..].find('\n').map(|i| e + i + 1).unwrap_or(src.len());
     format!("{}{}\n{}", &src[..b], replacement, &src[e_end..])
+}
+
+/// The raster module built over texture ARRAYS (`raster_arrays.wgsl` spliced
+/// over raster.wgsl's 2D group(1) block), with the same Field Shape code as
+/// [`raster_custom_source`]: what a merged model whose slots wear pooled
+/// pictures draws with.
+pub fn array_source(code: Option<(&str, &str)>) -> String {
+    splice_block(&raster_custom_source(code), "//[group1-begin]", "//[group1-end]", include_str!("raster_arrays.wgsl").trim_end())
+}
+
+/// The four pipelines of the array build: opaque, primed opaque, blended and
+/// depth (prepass and sun map). No skinned ones: a rigged model never merges.
+struct ArrayPasses {
+    pipeline: wgpu::RenderPipeline,
+    primed: wgpu::RenderPipeline,
+    transparent: wgpu::RenderPipeline,
+    prepass: wgpu::RenderPipeline,
 }
 
 /// The raster module's source with Field Shape distance code spliced into its
@@ -2163,6 +2185,7 @@ impl Raster {
             globals_layout,
             field_layout,
             custom_field: None,
+            array_passes: std::cell::OnceCell::new(),
             field_rev: 0,
             flsl_built: Default::default(),
         }
@@ -2179,7 +2202,6 @@ impl Raster {
         tex_layout: &wgpu::BindGroupLayout,
         field_layout: &wgpu::BindGroupLayout,
     ) -> CorePipelines {
-        let device = &gpu.device;
         // Built twice, once per vertex entry point: `vs` for ordinary geometry and
         // `vs_skin` for GPU-skinned parts, which deform the vertex by their bone
         // palette before the identical shading tail. The four passes each need
@@ -2187,6 +2209,62 @@ impl Raster {
         // shade, blend and silhouette from the same posed vertices — a prepass
         // that used the bind pose would depth-reject the pose that shades.
         let build = |vs_entry: &'static str, tag: &str| {
+            Self::build_pass_pipelines(gpu, module, globals_layout, tex_layout, field_layout, vs_entry, tag)
+        };
+        let (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline, primed_pipeline) = build("vs", "");
+        let (skin_pipeline, skin_transparent_pipeline, skin_mask_pipeline, skin_prepass_pipeline, skin_primed_pipeline) =
+            build("vs_skin", "-skin");
+        CorePipelines {
+            pipeline,
+            transparent_pipeline,
+            mask_pipeline,
+            prepass_pipeline,
+            skin_pipeline,
+            skin_transparent_pipeline,
+            skin_mask_pipeline,
+            skin_prepass_pipeline,
+            primed_pipeline,
+            skin_primed_pipeline,
+        }
+    }
+
+    /// The array build's pipelines ([`ArrayPasses`]), made on first use.
+    fn array_passes(&self, gpu: &Gpu) -> &ArrayPasses {
+        self.array_passes.get_or_init(|| {
+            let code = self.custom_field.as_ref().map(|(f, s)| (f.as_str(), s.as_str()));
+            let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("raster-arrays"),
+                source: wgpu::ShaderSource::Wgsl(array_source(code).into()),
+            });
+            let (pipeline, transparent, _mask, prepass, primed) = Self::build_pass_pipelines(
+                gpu,
+                &module,
+                &self.globals_layout,
+                &self.pools.layout,
+                &self.field_layout,
+                "vs",
+                "-array",
+            );
+            ArrayPasses { pipeline, primed, transparent, prepass }
+        })
+    }
+
+    /// The five pipelines of one vertex entry point (`vs` or `vs_skin`):
+    /// opaque, blended, silhouette mask, depth prepass and primed opaque, over
+    /// group(1) `tex_layout`. The 2D maps' layout builds the core set; the
+    /// array layout builds the set a merged model with pooled pictures draws
+    /// with ([`Self::array_passes`]).
+    #[allow(clippy::type_complexity)]
+    fn build_pass_pipelines(
+        gpu: &Gpu,
+        module: &wgpu::ShaderModule,
+        globals_layout: &wgpu::BindGroupLayout,
+        tex_layout: &wgpu::BindGroupLayout,
+        field_layout: &wgpu::BindGroupLayout,
+        vs_entry: &'static str,
+        tag: &str,
+    ) -> (wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline) {
+        let device = &gpu.device;
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("raster"),
             bind_group_layouts: &[Some(globals_layout), Some(tex_layout), Some(field_layout)],
@@ -2372,22 +2450,6 @@ impl Raster {
             cache: gpu.pipeline_cache.as_ref(),
         });
             (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline, primed_pipeline)
-        };
-        let (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline, primed_pipeline) = build("vs", "");
-        let (skin_pipeline, skin_transparent_pipeline, skin_mask_pipeline, skin_prepass_pipeline, skin_primed_pipeline) =
-            build("vs_skin", "-skin");
-        CorePipelines {
-            pipeline,
-            transparent_pipeline,
-            mask_pipeline,
-            prepass_pipeline,
-            skin_pipeline,
-            skin_transparent_pipeline,
-            skin_mask_pipeline,
-            skin_prepass_pipeline,
-            primed_pipeline,
-            skin_primed_pipeline,
-        }
     }
 
     /// How many texture slots a material shader can use on this device.
@@ -2516,6 +2578,8 @@ impl Raster {
         self.skin_prepass_pipeline = core.skin_prepass_pipeline;
         self.primed_pipeline = core.primed_pipeline;
         self.skin_primed_pipeline = core.skin_primed_pipeline;
+        // Built from the same source, so made again on first use.
+        self.array_passes = std::cell::OnceCell::new();
         // Rebuild every custom-shader pipeline against the new field module.
         for i in 0..self.flsl_shaders.len() {
             let (chunk, tex_slots, blend) = {
@@ -4532,6 +4596,13 @@ impl Raster {
             };
         let opaque_buckets = bucketize(true, &mut raws);
         let transparent_buckets = bucketize(false, &mut raws);
+        // Buckets bound to a texture-array set draw through the array build
+        // (`array_passes`): opaque ones after the rest, blended ones in their
+        // place in the back-to-front order.
+        let arrays = self.pools.array_ids.clone();
+        let in_array = |b: &(usize, Option<u32>, u32, u32)| b.1.is_some_and(|t| arrays.contains(&t));
+        let (array_opaque, opaque_buckets): (Vec<_>, Vec<_>) = opaque_buckets.into_iter().partition(in_array);
+        let want_arrays = !array_opaque.is_empty() || transparent_buckets.iter().any(in_array);
 
         // flsl buckets: (mesh, texture, binding) — phase comes from the SHADER
         // (its blend declaration), not the instance alpha.
@@ -4554,7 +4625,7 @@ impl Raster {
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster") });
-        let equal_buckets;
+        let mut equal_buckets;
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("raster"),
@@ -4590,6 +4661,7 @@ impl Raster {
                     rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
                 }
             };
+            let array_passes = want_arrays.then(|| self.array_passes(gpu));
             let draw_flsl =
                 |rp: &mut wgpu::RenderPass<'_>, buckets: &[FlslBucket]| {
                     for &(mesh_idx, tex_key, bind_id, skinned, start, count) in buckets {
@@ -4643,10 +4715,27 @@ impl Raster {
                 rp.set_pipeline(if equal { &self.skin_primed_pipeline } else { &self.skin_pipeline });
                 draw(&mut rp, &skin_opaque);
             }
+            if let Some(ap) = array_passes.filter(|_| !array_opaque.is_empty()) {
+                rp.set_pipeline(if equal { &ap.primed } else { &ap.pipeline });
+                draw(&mut rp, &array_opaque);
+                if equal {
+                    equal_buckets += array_opaque.len();
+                }
+            }
             draw_flsl(&mut rp, &flsl_opaque);
             if !transparent_buckets.is_empty() {
-                rp.set_pipeline(&self.transparent_pipeline);
-                draw(&mut rp, &transparent_buckets);
+                let mut bound: Option<bool> = None;
+                for b in &transparent_buckets {
+                    let a = in_array(b);
+                    if bound != Some(a) {
+                        match (a, array_passes) {
+                            (true, Some(ap)) => rp.set_pipeline(&ap.transparent),
+                            _ => rp.set_pipeline(&self.transparent_pipeline),
+                        }
+                        bound = Some(a);
+                    }
+                    draw(&mut rp, std::slice::from_ref(b));
+                }
             }
             if !skin_blended.is_empty() {
                 rp.set_pipeline(&self.skin_transparent_pipeline);
@@ -4819,12 +4908,19 @@ impl Raster {
             // washed out — and would drop the depth write that lets one piece of
             // glass sit in front of another.
             rp.set_pipeline(&self.pipeline);
+            let mut arrayed = false;
             for &(mesh_idx, tex_key, start, count) in &buckets {
                 let mesh = &self.meshes[mesh_idx];
                 let bind = match tex_key {
                     Some(t) => &self.textures[t as usize].bind,
                     None => &mesh.tex_bind,
                 };
+                // A texture-array set binds only the array build's pipeline.
+                let a = tex_key.is_some_and(|t| self.pools.array_ids.contains(&t));
+                if a != arrayed {
+                    rp.set_pipeline(if a { &self.array_passes(gpu).pipeline } else { &self.pipeline });
+                    arrayed = a;
+                }
                 rp.set_bind_group(1, bind, &[]);
                 rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
                 rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
@@ -5329,6 +5425,9 @@ impl Raster {
             ok
         };
         let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, instances, &keep, flsl, skins);
+        // Buckets bound to a texture-array set draw through the array build.
+        let (array_buckets, buckets): (Vec<_>, Vec<_>) =
+            buckets.into_iter().partition(|b| b.1.is_some_and(|t| self.pools.array_ids.contains(&t)));
         self.sun_map_casts = (cast.get(), instances.len());
         let mut encoder = gpu
             .device
@@ -5363,6 +5462,11 @@ impl Raster {
                 }
             };
             draw(&mut rp, &buckets);
+            if !array_buckets.is_empty() {
+                rp.set_pipeline(&self.array_passes(gpu).prepass);
+                draw(&mut rp, &array_buckets);
+                rp.set_pipeline(&self.prepass_pipeline);
+            }
             if !skin_buckets.is_empty() {
                 rp.set_pipeline(&self.skin_prepass_pipeline);
                 draw(&mut rp, &skin_buckets);
@@ -5393,6 +5497,9 @@ impl Raster {
         self.begin_pass(gpu, globals);
 
         let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, instances, &|_| true, flsl, skins);
+        // Buckets bound to a texture-array set draw through the array build.
+        let (array_buckets, buckets): (Vec<_>, Vec<_>) =
+            buckets.into_iter().partition(|b| b.1.is_some_and(|t| self.pools.array_ids.contains(&t)));
         let slot = &self.prepass[self.prepass_active.expect("claim_prepass ran")];
         let (prepass_tex, prepass_view) = (&slot.tex, &slot.view);
 
@@ -5432,6 +5539,11 @@ impl Raster {
                 }
             };
             draw(&mut rp, &buckets);
+            if !array_buckets.is_empty() {
+                rp.set_pipeline(&self.array_passes(gpu).prepass);
+                draw(&mut rp, &array_buckets);
+                rp.set_pipeline(&self.prepass_pipeline);
+            }
             if !skin_buckets.is_empty() {
                 rp.set_pipeline(&self.skin_prepass_pipeline);
                 draw(&mut rp, &skin_buckets);

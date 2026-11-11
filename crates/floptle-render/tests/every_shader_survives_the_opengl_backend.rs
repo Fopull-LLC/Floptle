@@ -34,6 +34,9 @@ fn modules() -> Vec<(&'static str, String)> {
     };
     vec![
         ("raster.wgsl + field.wgsl + hex_tile.wgsl", floptle_render::raster::pass_prelude().to_string()),
+        // The array build: the same module with its six maps as texture
+        // arrays, what a merged model whose slots wear pooled pictures draws with.
+        ("raster_arrays.wgsl over raster.wgsl + field.wgsl + hex_tile.wgsl", floptle_render::raster::array_source(None)),
         ("raymarch.wgsl + field.wgsl + hex_tile.wgsl", floptle_render::raymarch::prelude().to_string()),
         ("camera_stack.wgsl", one("camera_stack.wgsl")),
         ("froxel_scan.wgsl", one("froxel_scan.wgsl")),
