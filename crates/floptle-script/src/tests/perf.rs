@@ -123,3 +123,32 @@ fn script_time_outside_the_hooks_is_named() {
     let hooks: f32 = r.scripts.iter().map(|(_, ms)| *ms).sum();
     assert!(hooks < 5.0, "the timer's spin was charged to a hook ({hooks:.2} ms)");
 }
+
+/// **A file written on the frame is named as such.** `assets.writeText`
+/// without `async` holds the frame while the disk writes. On a busy disk
+/// that was seconds, and it read as script time. Its time is charged to the
+/// `fileWriteOnFrame` part now.
+#[test]
+fn a_file_written_on_the_frame_is_named() {
+    let dir = std::env::temp_dir().join(format!("floptle-perf-filewrite-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "writer",
+        "function update(node, dt)\n  \
+           local ok, why = assets.writeText(\"user://perf_note.txt\", string.rep(\"x\", 4096))\n  \
+           if not ok then error(why) end\n\
+         end\n",
+    );
+    let (mut world, _) = world_with_script("writer");
+    let mut host = ScriptHost::new();
+    host.set_project_root(dir.clone());
+    host.profile().borrow_mut().enable(true);
+    host.profile().borrow_mut().begin_frame();
+    host.run(&mut world, &dir, 0.016, 0.016);
+    host.profile().borrow_mut().end_frame();
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let prof = host.profile().borrow();
+    let r = prof.recent_frames(1).next().expect("a frame").clone();
+    assert!(r.parts.iter().any(|(p, _)| *p == "fileWriteOnFrame"), "the on-frame write is not named: {:?}", r.parts);
+}

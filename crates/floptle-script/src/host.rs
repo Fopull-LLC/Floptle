@@ -1088,6 +1088,7 @@ fn install_assets(
     logs: &Rc<RefCell<Vec<ScriptLog>>>,
     preloads: Rc<RefCell<crate::preload_api::Preloads>>,
     writes: Rc<RefCell<crate::write_api::Writes>>,
+    profile: &crate::SharedProfile,
 ) -> crate::paths::Paths {
     // `assets.getFile(path)` / `assets.getContents(dir)`: resolve files in the project's
     // `Assets/` folder by a path the dev writes relative to it (e.g. "models/armor.glb").
@@ -1228,12 +1229,13 @@ fn install_assets(
         let pp = paths.clone();
         let sink = logs.clone();
         let ww = writes.clone();
+        let prof = profile.clone();
         let _ = t.set(
             "writeText",
             lua.create_function(move |lua, (path, text, a3, a4): (String, mlua::String, Option<Value>, Option<mlua::Function>)| {
                 let (opts, cb) = write_opts_and_callback(a3, a4, "assets.writeText")?;
                 let off_frame = write_off_frame(opts.as_ref(), &cb, "assets.writeText", &[])?;
-                match write_or_hand_over(&pp, &ww, &path, text.as_bytes().to_vec(), off_frame, cb, "assets.writeText", &sink) {
+                match write_or_hand_over(&pp, &ww, &path, text.as_bytes().to_vec(), off_frame, cb, "assets.writeText", &sink, &prof) {
                     Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
                     Err(why) => {
                         refuse_read(&sink, &why);
@@ -1246,6 +1248,7 @@ fn install_assets(
         let pp = paths.clone();
         let sink = logs.clone();
         let ww = writes.clone();
+        let prof = profile.clone();
         let _ = t.set(
             "writeJson",
             lua.create_function(move |lua, (path, value, a3, a4): (String, Value, Option<Value>, Option<mlua::Function>)| {
@@ -1263,7 +1266,7 @@ fn install_assets(
                 let j = crate::http_api::lua_to_json(&value)?;
                 let text = if pretty { serde_json::to_string_pretty(&j) } else { serde_json::to_string(&j) }
                     .map_err(|e| mlua::Error::RuntimeError(format!("assets.writeJson: {e}")))?;
-                match write_or_hand_over(&pp, &ww, &path, text.into_bytes(), off_frame, cb, "assets.writeJson", &sink) {
+                match write_or_hand_over(&pp, &ww, &path, text.into_bytes(), off_frame, cb, "assets.writeJson", &sink, &prof) {
                     Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
                     Err(why) => {
                         refuse_read(&sink, &why);
@@ -1296,12 +1299,13 @@ fn install_assets(
         let pp = paths.clone();
         let sink = logs.clone();
         let ww = writes.clone();
+        let prof = profile.clone();
         let _ = t.set(
             "writeBytes",
             lua.create_function(move |lua, (path, bytes, a3, a4): (String, mlua::String, Option<Value>, Option<mlua::Function>)| {
                 let (opts, cb) = write_opts_and_callback(a3, a4, "assets.writeBytes")?;
                 let off_frame = write_off_frame(opts.as_ref(), &cb, "assets.writeBytes", &[])?;
-                match write_or_hand_over(&pp, &ww, &path, bytes.as_bytes().to_vec(), off_frame, cb, "assets.writeBytes", &sink) {
+                match write_or_hand_over(&pp, &ww, &path, bytes.as_bytes().to_vec(), off_frame, cb, "assets.writeBytes", &sink, &prof) {
                     Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
                     Err(why) => {
                         refuse_read(&sink, &why);
@@ -3031,7 +3035,7 @@ impl ScriptHost {
         let gizmos = install_gizmos(&lua);
         let preloads: Rc<RefCell<crate::preload_api::Preloads>> = Rc::default();
         let writes: Rc<RefCell<crate::write_api::Writes>> = Rc::default();
-        let paths = install_assets(&lua, &logs, preloads.clone(), writes.clone());
+        let paths = install_assets(&lua, &logs, preloads.clone(), writes.clone(), &profile);
         let project_root = paths.project.clone();
         let SceneCells {
             scene_request,
@@ -9846,16 +9850,46 @@ fn write_or_hand_over(
     cb: Option<mlua::Function>,
     call: &str,
     sink: &Rc<RefCell<Vec<ScriptLog>>>,
+    profile: &crate::SharedProfile,
 ) -> Result<(), String> {
     if !off_frame {
         // A write made now goes after any still on their way to the same
         // file, or the older one would land on top of it.
+        //
+        // It holds the frame for as long as the disk takes, and a busy disk
+        // took seconds: a screenshot written this way from a capture
+        // callback froze one game for 0.9 to 7.5 s a shot, and showed up
+        // only as script time. So the frame's time in it is named
+        // (`fileWriteOnFrame`), and a write that held the frame past
+        // ON_FRAME_WRITE_WARN_MS says which file and how to move it off.
+        let t = floptle_core::profile::Span::new();
         settle_write(writes, paths, path);
-        return write_project_bytes(paths, path, &bytes, call, sink);
+        let r = write_project_bytes(paths, path, &bytes, call, sink);
+        let ms = t.ms();
+        profile.borrow_mut().record_part("fileWriteOnFrame", ms);
+        if ms > ON_FRAME_WRITE_WARN_MS && SLOW_WRITE_WARNED.with(|w| w.borrow_mut().insert(path.to_string())) {
+            sink.borrow_mut().push(ScriptLog {
+                level: crate::LogLevel::Warn,
+                msg: format!(
+                    "{call}(\"{path}\") held the frame {ms:.0} ms writing to the disk. Pass {{ async = true }} \
+                     (or a callback) to write it off the frame; the call then returns at once"
+                ),
+                source: None,
+            });
+        }
+        return r;
     }
     let (full, user) = prepare_project_write(paths, path, call, sink)?;
     writes.borrow_mut().submit(full, bytes, user, format!("{call}(\"{path}\")"), cb);
     Ok(())
+}
+
+/// How long one write may hold the frame before the console says so.
+const ON_FRAME_WRITE_WARN_MS: f32 = 50.0;
+
+thread_local! {
+    /// Files already warned about for a slow on-frame write: once each.
+    static SLOW_WRITE_WARNED: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
 }
 
 /// Wait for any write to `path` still on its way.
