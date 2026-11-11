@@ -1112,6 +1112,10 @@ pub struct Raster {
     mat_ext_cpu: Vec<[f32; 4]>,
     mat_ext_cap: u32,
     mat_ext_index: HashMap<[u32; EXT_LANES * 4], u32>,
+    /// Slot tables ([`Raster::push_slot_table`]) by the bits of all their
+    /// lanes: a table is several entries in a row, so it is shared whole or
+    /// not at all, apart from the one-entry index above.
+    slot_tables: HashMap<Vec<u32>, u32>,
     mat_ext_dirty: bool,
     /// The project's retro artefacts, folded into every pushed material.
     /// See [`Raster::set_retro_defaults`].
@@ -2119,6 +2123,7 @@ impl Raster {
             mat_ext_cpu,
             mat_ext_cap,
             mat_ext_index: HashMap::new(),
+            slot_tables: HashMap::new(),
             mat_ext_dirty: false,
             retro_defaults: floptle_core::Retro::default(),
             refraction_default: floptle_core::Refraction::Solid,
@@ -2834,6 +2839,7 @@ impl Raster {
         self.mat_ext_cpu.clear();
         self.mat_ext_cpu.extend_from_slice(&self.neutral_extras().lanes());
         self.mat_ext_index.clear();
+        self.slot_tables.clear();
         self.mat_ext_dirty = true;
     }
 
@@ -2896,6 +2902,57 @@ impl Raster {
         self.mat_ext_index.insert(key, i);
         self.mat_ext_dirty = true;
         i
+    }
+
+    /// Store a merged model's slot table in the extras store and return its
+    /// base, which a slotted instance ([`instance_of_slots`]) carries as its
+    /// extras index. `starts` is the first vertex of each slot after the
+    /// first (so `slots.len() - 1` of them, ascending); `slots` are the slots'
+    /// materials, each already holding its own extras index
+    /// (`MaterialParams::ext_index`).
+    ///
+    /// The layout, in extras entries of four lanes:
+    /// - the base: a copy of slot 0's extras entry, so every CPU check that
+    ///   reads an instance's extras (blend, glass, dither, casts a shadow,
+    ///   sway) reads something true for the whole model. The merge rule only
+    ///   merges slots that agree on all of those;
+    /// - a header: the slot count, then the slots' first vertices as exact
+    ///   integers in f32;
+    /// - two entries per slot: the six material lanes an instance would carry,
+    ///   then the slot's own extras index and its unlit flag.
+    ///
+    /// `None` past [`MAX_SLOTS`] slots, a start that does not climb, or a
+    /// vertex count an f32 cannot hold exactly.
+    pub fn push_slot_table(&mut self, starts: &[u32], slots: &[MaterialParams]) -> Option<u32> {
+        if slots.is_empty() || slots.len() > MAX_SLOTS || starts.len() + 1 != slots.len() {
+            return None;
+        }
+        if starts.windows(2).any(|w| w[0] >= w[1]) || starts.iter().any(|&s| s == 0 || s >= 1 << 24) {
+            return None;
+        }
+        let mut lanes: Vec<[f32; 4]> = Vec::with_capacity((2 + 2 * slots.len()) * EXT_LANES);
+        let base = slots[0].ext_index as usize * EXT_LANES;
+        match self.mat_ext_cpu.get(base..base + EXT_LANES) {
+            Some(group) => lanes.extend_from_slice(group),
+            None => lanes.extend_from_slice(&self.neutral_extras().lanes()),
+        }
+        let at = |i: usize| starts.get(i).map_or(0.0, |&s| s as f32);
+        lanes.push([slots.len() as f32, 0.0, 0.0, 0.0]);
+        lanes.push([at(0), at(1), at(2), at(3)]);
+        lanes.push([at(4), at(5), at(6), 0.0]);
+        lanes.push([0.0; 4]);
+        for m in slots {
+            lanes.extend_from_slice(&slot_record(m));
+        }
+        let key: Vec<u32> = lanes.iter().flatten().map(|v| v.to_bits()).collect();
+        if let Some(&t) = self.slot_tables.get(&key) {
+            return Some(t);
+        }
+        let t = (self.mat_ext_cpu.len() / EXT_LANES) as u32;
+        self.mat_ext_cpu.extend_from_slice(&lanes);
+        self.slot_tables.insert(key, t);
+        self.mat_ext_dirty = true;
+        Some(t)
     }
 
     /// Store raw lanes, sharing an entry that already holds the same bits.
@@ -5578,6 +5635,93 @@ fn layer_of(depth: f32, cuts: &[f32]) -> usize {
 pub fn set_ext_index(raw: &mut InstanceRaw, ext: u32) {
     let modul = (raw.normal_mat[1][3] as u32) & 1;
     raw.normal_mat[1][3] = (modul | (ext << 1)) as f32;
+}
+
+/// The most material slots one merged model may carry in a single instance.
+/// Eight keeps a table's header in one extras entry (seven slot starts).
+pub const MAX_SLOTS: usize = 8;
+
+/// `normal_mat[2].w` of an instance whose material comes from a slot table
+/// ([`Raster::push_slot_table`]) picked per vertex. Plain instances hold 0
+/// there and terrain chunks 1 or more, so the three never meet.
+pub const SLOT_MARK: f32 = -1.0;
+
+/// Whether an instance draws a merged model's slot table.
+pub fn is_slotted(raw: &InstanceRaw) -> bool {
+    raw.normal_mat[2][3] < -0.5
+}
+
+/// One slot's eight lanes in a slot table: the six material lanes an instance
+/// of that material would carry (exactly what [`instance_of_mat`] packs),
+/// then its extras index and unlit flag, then a spare.
+fn slot_record(m: &MaterialParams) -> [[f32; 4]; 8] {
+    let raw = instance_of_mat(Mat4::IDENTITY, m);
+    [
+        raw.color,
+        raw.emissive,
+        raw.specular,
+        [raw.params[0], raw.params[1], 0.0, raw.params[3]],
+        raw.rim,
+        raw.tile,
+        [m.ext_index as f32, if m.unlit { 1.0 } else { 0.0 }, 0.0, 0.0],
+        [0.0; 4],
+    ]
+}
+
+/// The instance that draws a merged model from slot table `table`: its
+/// transform, and material lanes that change nothing (white, no glow, no rim,
+/// ambient ×1), which a node's `Tint` then modifies exactly as it modifies
+/// any instance; the shader lays them over each vertex's slot. The paint
+/// base is the merged mesh's own (`paint_base`), as for a plain instance.
+pub fn instance_of_slots(model: Mat4, table: u32, paint_base: u32, paint_modulate: bool) -> InstanceRaw {
+    let mut raw = instance_of_mat(model, &MaterialParams::flat([1.0; 3]));
+    raw.normal_mat[0][3] = 0.0;
+    raw.normal_mat[1][3] = (u32::from(paint_modulate) | (table << 1)) as f32;
+    raw.normal_mat[2][3] = SLOT_MARK;
+    raw.color = [1.0, 1.0, 1.0, 1.0];
+    raw.emissive = [0.0; 4];
+    raw.specular = [0.0; 4];
+    raw.params = [0.0, 0.0, (paint_base << 1) as f32, 1.0];
+    raw.rim = [0.0; 4];
+    raw.tile = [0.0; 4];
+    raw
+}
+
+/// One mesh of a model's parts laid end to end, and the first vertex of each
+/// part after the first: what a merged model registers and its slot table's
+/// starts. A part's colours ride along; a part without any is painted white,
+/// which multiplies by one. `None` for fewer than two parts, more than
+/// [`MAX_SLOTS`], an empty part, or more vertices than an f32 holds exactly.
+pub fn merge_parts(parts: &[&crate::mesh::MeshData]) -> Option<(crate::mesh::MeshData, Vec<u32>)> {
+    if parts.len() < 2 || parts.len() > MAX_SLOTS || parts.iter().any(|p| p.vertices.is_empty()) {
+        return None;
+    }
+    let total: usize = parts.iter().map(|p| p.vertices.len()).sum();
+    if total >= 1 << 24 {
+        return None;
+    }
+    let colored = parts.iter().any(|p| p.colors.as_ref().is_some_and(|c| c.len() == p.vertices.len()));
+    let mut out = crate::mesh::MeshData {
+        vertices: Vec::with_capacity(total),
+        indices: Vec::with_capacity(parts.iter().map(|p| p.indices.len()).sum()),
+        colors: colored.then(|| Vec::with_capacity(total)),
+    };
+    let mut starts = Vec::with_capacity(parts.len() - 1);
+    for (i, p) in parts.iter().enumerate() {
+        let base = out.vertices.len() as u32;
+        if i > 0 {
+            starts.push(base);
+        }
+        out.vertices.extend_from_slice(&p.vertices);
+        out.indices.extend(p.indices.iter().map(|&ix| ix + base));
+        if let Some(c) = out.colors.as_mut() {
+            match p.colors.as_ref().filter(|c| c.len() == p.vertices.len()) {
+                Some(pc) => c.extend_from_slice(pc),
+                None => c.extend(std::iter::repeat_n([255u8; 4], p.vertices.len())),
+            }
+        }
+    }
+    Some((out, starts))
 }
 
 /// The packed tiling flags an instance carries in `rim.w`: bits 0-1 the mode,

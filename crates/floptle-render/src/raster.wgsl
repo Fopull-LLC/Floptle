@@ -1156,6 +1156,56 @@ fn skin_vertex(in: VsIn) -> Skinned {
 /// clip position, the material varyings, triplanar space and the vertex-paint
 /// unpack. Shared by `vs` and `vs_skin` so a skinned mesh cannot shade
 /// differently from an unskinned one.
+// ---- Merged models: one instance, a material per slot ------------------------
+// A model whose parts differ only in material numbers draws as one mesh and
+// one instance (`n2.w` = -1, `SLOT_MARK`). Its extras index points at a slot
+// table in `mat_ext` (`Raster::push_slot_table`): the base entry is slot 0's
+// extras, then a header (the slot count and the first vertex of each slot
+// after the first), then two entries per slot (its six material lanes, then
+// its own extras index and unlit flag). A vertex's slot is how many slot
+// starts its index has passed: indexed draws use base vertex 0, so
+// `vertex_index` is the mesh's own vertex, as `vpaint` already relies on.
+
+struct SlotLanes {
+    color: vec4<f32>,
+    emissive: vec4<f32>,
+    specular: vec4<f32>,
+    params: vec4<f32>,
+    rim: vec4<f32>,
+    tile: vec4<f32>,
+    ext: u32,
+    unlit: bool,
+};
+
+fn slot_of(t: u32, vid: u32) -> u32 {
+    let last = arrayLength(&mat_ext) - 1u;
+    let h = (t + 1u) * EXT_LANES;
+    let k = u32(mat_ext[min(h, last)].x + 0.5);
+    let b0 = mat_ext[min(h + 1u, last)];
+    let b1 = mat_ext[min(h + 2u, last)];
+    let v = f32(vid);
+    var s = 0u;
+    s += u32(k > 1u && v >= b0.x);
+    s += u32(k > 2u && v >= b0.y);
+    s += u32(k > 3u && v >= b0.z);
+    s += u32(k > 4u && v >= b0.w);
+    s += u32(k > 5u && v >= b1.x);
+    s += u32(k > 6u && v >= b1.y);
+    s += u32(k > 7u && v >= b1.z);
+    return s;
+}
+
+fn slot_lanes(t: u32, s: u32) -> SlotLanes {
+    let last = arrayLength(&mat_ext) - 1u;
+    let r = (t + 2u + 2u * s) * EXT_LANES;
+    let sm = mat_ext[min(r + 6u, last)];
+    return SlotLanes(
+        mat_ext[min(r, last)], mat_ext[min(r + 1u, last)], mat_ext[min(r + 2u, last)],
+        mat_ext[min(r + 3u, last)], mat_ext[min(r + 4u, last)], mat_ext[min(r + 5u, last)],
+        u32(sm.x + 0.5), sm.y > 0.5,
+    );
+}
+
 fn build_vs(in: VsIn, pos: vec3<f32>, normal: vec3<f32>, tbase_in: u32, tsplat_in: f32) -> VsOut {
     let model = mat4x4<f32>(in.m0, in.m1, in.m2, in.m3);
     let nmat = mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz);
@@ -1167,7 +1217,31 @@ fn build_vs(in: VsIn, pos: vec3<f32>, normal: vec3<f32>, tbase_in: u32, tsplat_i
     // read off a varying it has been interpolated.
     let nw = u32(in.n1.w);
     let modul = (nw & 1u) != 0u;
-    let ext_index = nw >> 1u;
+    var ext_index = nw >> 1u;
+    // The material lanes: the instance's own, or, on a merged model, this
+    // vertex's slot with the instance's lanes laid over it as a node's Tint
+    // lays them over any instance (they are white / none / ×1 unless tinted):
+    // colour and alpha multiply, a rim or a glow with strength replaces, the
+    // ambient multiplies. Every other instance keeps exactly what it had.
+    var m_color = in.color;
+    var m_emissive = in.emissive;
+    var m_specular = in.specular;
+    var m_params = in.params;
+    var m_rim = in.rim;
+    var m_tile = in.tile;
+    var slot_unlit = false;
+    let slotted = tsplat_in < -0.5;
+    if (slotted) {
+        let sl = slot_lanes(ext_index, slot_of(ext_index, in.vid));
+        ext_index = sl.ext;
+        m_color = vec4<f32>(sl.color.rgb * in.color.rgb, sl.color.a * in.color.a);
+        m_emissive = select(sl.emissive, in.emissive, in.emissive.a > 0.0);
+        m_specular = sl.specular;
+        m_rim = vec4<f32>(select(sl.rim.rgb, in.rim.rgb, in.params.y > 0.0), sl.rim.w);
+        m_params = vec4<f32>(sl.params.x, select(sl.params.y, in.params.y, in.params.y > 0.0), in.params.z, sl.params.w * in.params.w);
+        m_tile = sl.tile;
+        slot_unlit = sl.unlit;
+    }
     let ext = ext_at(ext_index);
     // A terrain chunk's `n2.w` is 1 + its fine paint volume (0 none, k for
     // volume k − 1), which rides bits 24..30 above the extras index (that
@@ -1209,12 +1283,12 @@ fn build_vs(in: VsIn, pos: vec3<f32>, normal: vec3<f32>, tbase_in: u32, tsplat_i
     out.uv = in.uv;
     out.uv_affine = in.uv;
     out.normal = normalize(nmat * normal);
-    out.color = in.color;
+    out.color = m_color;
     out.view_pos = view_pos.xyz;
-    out.emissive = in.emissive;
-    out.specular = in.specular;
-    out.rim = in.rim;
-    out.tile = in.tile;
+    out.emissive = m_emissive;
+    out.specular = m_specular;
+    out.rim = m_rim;
+    out.tile = m_tile;
     // Triplanar space is SCALE-AWARE object-local: multiply the mesh-local
     // position by the model's per-axis scale so texture density stays in
     // WORLD units. Without this, a unit cube stretched to a 48-unit wall
@@ -1235,9 +1309,9 @@ fn build_vs(in: VsIn, pos: vec3<f32>, normal: vec3<f32>, tbase_in: u32, tsplat_i
     //      integer-as-float can land off-by-one and read another block's colors.
     //      Decoding pre-interpolation makes that impossible rather than unlikely.
     let pz = u32(in.params.z);
-    let unlit = (pz & 1u) != 0u;
+    let unlit = (pz & 1u) != 0u || slot_unlit;
     let pbase = pz >> 1u;                       // 0 = this instance has no paint
-    out.params = vec4<f32>(in.params.x, in.params.y, select(0.0, 1.0, unlit), in.params.w);
+    out.params = vec4<f32>(m_params.x, m_params.y, select(0.0, 1.0, unlit), m_params.w);
 
     // `select` evaluates BOTH arms, so the index must be in bounds even when unpainted
     // (pbase = 0, vid unbounded). Clamp rather than lean on driver robustness.
