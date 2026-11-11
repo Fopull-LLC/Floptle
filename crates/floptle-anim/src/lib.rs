@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod ik;
+pub mod spring;
 pub use ik::PoseOp;
 
 /// Local translation/rotation/scale — the node-space currency of the runtime.
