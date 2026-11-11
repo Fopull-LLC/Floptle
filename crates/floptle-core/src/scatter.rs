@@ -228,6 +228,12 @@ pub struct ScatterSource {
     /// matters near the player and is a blur of the shadow map's texels far
     /// away.
     pub shadow_distance: f32,
+    /// Over this many metres up to [`shadow_distance`](Self::shadow_distance)
+    /// its props' shadows thin out on a dithered pattern rather than stop at
+    /// a line: 0, the default, cuts them off there, as sources always did.
+    /// A hard cut made a plant just past the line pop lighter than its
+    /// neighbours, and the line swept across a field as the camera moved.
+    pub shadow_fade: f32,
     /// Props drawn in a look of their own, by id: the plant a harvest is
     /// aimed at, the rock a build would replace. Read at draw time, so marking
     /// one prop every frame costs a map write and re-rolls nothing; an empty
@@ -794,6 +800,7 @@ mod tests {
             appear: 0.0,
             cast_shadow: true,
             shadow_distance: 0.0,
+            shadow_fade: 0.0,
             leaving: HashMap::new(),
             dying: None,
             marks: Default::default(),

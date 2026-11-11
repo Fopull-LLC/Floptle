@@ -263,6 +263,10 @@ struct Ext {
     backlight: f32,
     fade_near: f32,
     fade_far: f32,
+    // Where its sun shadow thins out, in metres from the camera: whole
+    // nearer than `cast_near`, gone at `cast_far` (`Raster::cast_fading_extras`).
+    cast_near: f32,
+    cast_far: f32,
 };
 
 // Read entry `idx`, clamped into the store. The store always holds at least the
@@ -274,7 +278,7 @@ fn ext_at(idx: u32) -> Ext {
     let b = mat_ext[i + 1u];
     let c = mat_ext[i + 2u];
     let d = mat_ext[i + 3u];
-    return Ext(a.x, a.y, a.z, a.w, u32(b.x + 0.5), b.y, b.z, b.w, c.x, c.y, c.z, c.w, d.x, d.y);
+    return Ext(a.x, a.y, a.z, a.w, u32(b.x + 0.5), b.y, b.z, b.w, c.x, c.y, c.z, c.w, d.x, d.y, d.z, d.w);
 }
 
 // NEAR FADE — whether this pixel of a surface that dissolves toward the camera
@@ -317,6 +321,21 @@ fn dissolve_cut(e: Ext, pix: vec2<u32>, share: f32) -> bool {
     let n = ign(pix);
     let t = select(n, 1.0 - n, ext_has(e, EXT_DITHER_INVERT));
     return t >= share;
+}
+
+// CAST FADE — whether this pixel of the sun's shadow map drops a surface whose
+// shadow fades out with distance (`Raster::cast_fading_extras`): none of it
+// nearer than `cast_near`, all of it at `cast_far`, and between them a share
+// that follows the distance from the camera, on gradient noise over the map's
+// texels. The map's filter averages the survivors, so the shadow on the ground
+// and the shading a plant throws on itself both thin out over the distance,
+// where a hard cut made a line of plants pop lighter as the camera moved.
+fn cast_fade_cut(e: Ext, view_pos: vec3<f32>, pix: vec2<u32>) -> bool {
+    if (e.cast_far <= e.cast_near) {
+        return false;
+    }
+    let k = clamp((length(view_pos) - e.cast_near) / (e.cast_far - e.cast_near), 0.0, 1.0);
+    return k > 0.0 && ign(pix) < k;
 }
 
 fn near_fade_cut(e: Ext, view_pos: vec3<f32>, pix: vec2<u32>) -> bool {
@@ -3012,6 +3031,11 @@ fn fs_depth(in: VsOut, @builtin(front_facing) front: bool) {
     // not apply there: a wall faded so the player can see past it still
     // stands in the sunlight and still shades the room.
     let sun_view = g.sun_extra.y > 0.5;
+    // Only the sun's view thins a shadow that fades with distance; the
+    // surface itself is drawn whole for the camera.
+    if (sun_view && cast_fade_cut(ext, in.view_pos, pix)) {
+        discard;
+    }
     // A surface its own shader draws is drawn whole, its alpha, its sides and
     // its screen door notwithstanding: the colour pass (`fs_flsl`) drops only
     // what its near fade cuts. So depth and the sun's shadow stand on the

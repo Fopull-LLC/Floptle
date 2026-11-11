@@ -240,6 +240,12 @@ fn a_scattered_plant_sways_like_the_same_plant_on_a_node() {
 /// `shadowDistance` shorter than the camera's distance to any post. With a
 /// `shadowDistance` past every post the picture is exactly the default's,
 /// and that one differs, the shadows being there.
+///
+/// `shadowFade` thins the shadows out before the shadow distance rather than
+/// cutting them there: a fade that ends nearer than every post is still no
+/// shadow, one that starts past every post is still the whole shadow, and
+/// one that runs across the posts leaves part of each shadow, so the floor
+/// is darker than with none and lighter than with all of it.
 #[test]
 fn a_scattered_field_casts_sun_shadows_only_as_its_source_says() {
     let shoot = |opts: &str, tag: &str| -> Option<image::RgbaImage> {
@@ -297,4 +303,20 @@ fn a_scattered_field_casts_sun_shadows_only_as_its_source_says() {
     assert!(differ(&casts, &quiet) > 500, "castShadow = false drew the same picture as the default: no shadow went, or none was there ({} pixels differ)", differ(&casts, &quiet));
     assert_eq!(differ(&quiet, &near), 0, "a shadow distance nearer than every post is not the same as no shadow");
     assert_eq!(differ(&casts, &far), 0, "a shadow distance past every post changed the picture");
+    // The posts stand 7 to 14 m from the camera.
+    let Some(fade_near) = shoot(", shadowDistance = 5, shadowFade = 4", "fade-near") else { return };
+    let Some(fade_far) = shoot(", shadowDistance = 200, shadowFade = 20", "fade-far") else { return };
+    let Some(fading) = shoot(", shadowDistance = 30, shadowFade = 30", "fade-across") else { return };
+    assert_eq!(differ(&quiet, &fade_near), 0, "a shadow fade ending nearer than every post is not the same as no shadow");
+    assert_eq!(differ(&casts, &fade_far), 0, "a shadow fade starting past every post changed the picture");
+    // How much darker than the unshadowed floor each picture is, summed.
+    let shade = |img: &image::RgbaImage| -> f64 {
+        img.pixels().zip(quiet.pixels()).map(|(p, q)| (0..3).map(|c| q[c] as f64 - p[c] as f64).sum::<f64>().max(0.0)).sum()
+    };
+    let (whole, part) = (shade(&casts), shade(&fading));
+    assert!(
+        part > 0.15 * whole && part < 0.85 * whole,
+        "a shadow fade across the posts left {:.0}% of their shadow; it should leave part of it",
+        100.0 * part / whole.max(1.0)
+    );
 }

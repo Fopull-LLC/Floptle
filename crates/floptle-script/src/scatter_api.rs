@@ -100,7 +100,7 @@ fn color_opt(opts: &mlua::Table, key: &str) -> Option<[f32; 3]> {
 pub(crate) const CREATE_KEYS: &[&str] = &[
     "asset", "lod", "range", "seed", "center", "radius", "halfX", "halfZ", "align", "perChunk",
     "chunk", "scaleMin", "scaleMax", "fade", "density", "densityRows", "parent", "tint", "emissive",
-    "emissiveStrength", "bend", "appear", "castShadow", "shadowDistance",
+    "emissiveStrength", "bend", "appear", "castShadow", "shadowDistance", "shadowFade",
 ];
 
 /// The keys a `scatter.setTint` look reads.
@@ -442,6 +442,9 @@ pub(crate) fn install_scatter_api(
                 // source says otherwise.
                 cast_shadow: opts.get::<Option<bool>>("castShadow").ok().flatten().unwrap_or(true),
                 shadow_distance: num(&opts, "shadowDistance", 0.0).max(0.0) as f32,
+                // A hard cut at the shadow distance unless the source asks
+                // its shadows to fade out before it.
+                shadow_fade: num(&opts, "shadowFade", 0.0).max(0.0) as f32,
                 leaving: std::collections::HashMap::new(),
                 dying: None,
                 marks: Default::default(),

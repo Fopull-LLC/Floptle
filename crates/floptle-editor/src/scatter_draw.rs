@@ -444,7 +444,10 @@ pub(crate) fn push_scatter(
         frustum,
         SCATTER_BUDGET,
         out,
-        &mut |e| raster.shadowless_extras(e),
+        &mut |e, fade: Option<(f32, f32)>| match fade {
+            Some((from, to)) => raster.cast_fading_extras(e, from, to),
+            None => raster.shadowless_extras(e),
+        },
     );
     out.len().saturating_sub(before)
 }
@@ -465,7 +468,7 @@ pub(crate) fn build_instances(
     budget: usize,
     out: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
 ) {
-    build_instances_with(cache, sources, eye, mesh_of, radius_of, ground, frustum, budget, out, &mut |e| e);
+    build_instances_with(cache, sources, eye, mesh_of, radius_of, ground, frustum, budget, out, &mut |e, _| e);
 }
 
 /// Everything visible from `eye`, packed as instanced draws.
@@ -475,10 +478,13 @@ pub(crate) fn build_instances(
 /// lighting, fog and shadows — including the underwater fog, which is how a
 /// forest at a shoreline goes murky at the same rate as the ground it stands on.
 ///
-/// `shadowless` turns a part's surface-extras entry into the same look
-/// casting no sun shadow (`Raster::shadowless_extras`): what a prop of a
+/// `recast` turns a part's surface-extras entry into the same look casting
+/// no sun shadow (`None`, `Raster::shadowless_extras`): what a prop of a
 /// source with `cast_shadow` off, or past its `shadow_distance`, is drawn
-/// with.
+/// with. Given `Some((from, to))` it is the same look whose shadow thins out
+/// between those distances from the camera (`Raster::cast_fading_extras`):
+/// what a prop within a source's `shadow_fade` of its shadow distance is
+/// drawn with.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_instances_with(
     cache: &mut ScatterCache,
@@ -490,10 +496,12 @@ pub(crate) fn build_instances_with(
     frustum: &floptle_render::Frustum,
     budget: usize,
     out: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
-    shadowless: &mut impl FnMut(u32) -> u32,
+    recast: &mut impl FnMut(u32, Option<(f32, f32)>) -> u32,
 ) {
-    // Each surface entry's shadowless twin, asked of the renderer once.
+    // Each surface entry's shadowless twin, and its fading twin for each
+    // fade range, asked of the renderer once.
     let mut quiet: HashMap<u32, u32> = HashMap::new();
+    let mut thinning: HashMap<(u32, u32, u32), u32> = HashMap::new();
     // The budget is scatter's own: `out` arrives holding the frame's meshes,
     // terrain and decals, and counted against the cap they cut a busy
     // scene's plants short, by whatever else happened to be on screen. It is
@@ -885,6 +893,11 @@ pub(crate) fn build_instances_with(
         // Its sun shadow: as the source says, and none past its shadow
         // distance. Measured as the bands are, in the source's frame.
         let casts = src.cast_shadow && (src.shadow_distance <= 0.0 || c.d <= src.shadow_distance);
+        // Within its shadow fade of that distance, the shadow thins out over
+        // the distance rather than stopping at it. The shader measures each
+        // pixel from the camera, so a prop is handed the range, not a share.
+        let thins = (casts && src.shadow_distance > 0.0 && src.shadow_fade > 0.0 && c.d > src.shadow_distance - src.shadow_fade)
+            .then(|| ((src.shadow_distance - src.shadow_fade).max(0.0), src.shadow_distance));
         let mut push = |b: usize, alpha: f32, arriving: bool| {
             let Some(Some(parts)) = band_parts.get(b) else { return };
             // The per-instance roll rides the albedo, so a game can
@@ -935,7 +948,10 @@ pub(crate) fn build_instances_with(
                     }
                 }
                 if !casts {
-                    mp.ext_index = *quiet.entry(mp.ext_index).or_insert_with(|| shadowless(mp.ext_index));
+                    mp.ext_index = *quiet.entry(mp.ext_index).or_insert_with(|| recast(mp.ext_index, None));
+                } else if let Some((from, to)) = thins {
+                    let e = mp.ext_index;
+                    mp.ext_index = *thinning.entry((e, from.to_bits(), to.to_bits())).or_insert_with(|| recast(e, Some((from, to))));
                 }
                 out.push((*mesh, *tex, instance_of_mat(model * *local, &mp)));
             }
@@ -1321,6 +1337,7 @@ end
             appear: 0.0,
             cast_shadow: true,
             shadow_distance: 0.0,
+            shadow_fade: 0.0,
             leaving: HashMap::new(),
             dying: None,
             marks: Default::default(),

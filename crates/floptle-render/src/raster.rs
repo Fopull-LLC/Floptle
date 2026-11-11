@@ -2904,6 +2904,27 @@ impl Raster {
         self.push_ext_lanes(lanes)
     }
 
+    /// The surface-extras entry `ext` with its sun shadow fading out between
+    /// `from` and `to` metres from the camera: the same look, whole in the
+    /// shadow map nearer than `from` and gone from it at `to`, and between them
+    /// dropped from a share of the map's texels that follows the distance. A
+    /// scatter source's `shadowFade` draws the props near its shadow distance
+    /// through this, so their shadows thin out rather than stop at a line.
+    /// `ext` unchanged when `to` is not past `from`.
+    pub fn cast_fading_extras(&mut self, ext: u32, from: f32, to: f32) -> u32 {
+        let start = ext as usize * EXT_LANES;
+        let Some(Ok(mut lanes)) = self.mat_ext_cpu.get(start..start + EXT_LANES).map(<[[f32; 4]; EXT_LANES]>::try_from)
+        else {
+            return ext;
+        };
+        if to.is_nan() || from.is_nan() || to <= from {
+            return ext;
+        }
+        lanes[3][2] = from.max(0.0);
+        lanes[3][3] = to;
+        self.push_ext_lanes(lanes)
+    }
+
     pub fn push_surface_extras(&mut self, mut e: SurfaceExtras) -> u32 {
         e.retro = e.retro.under(self.retro_defaults);
         e.refraction = e.refraction.under(self.refraction_default);
