@@ -709,6 +709,31 @@ is still the active one, but with no terrain in the menu nothing uses it, so
 then reads nil). Inside a scene whose terrain still streams from the slot it is
 refused, and the error says to release it first with `terrain.saveDir("")`.
 
+**Checkpoints and copies.** A checkpoint is a copy of both stores, taken where
+the player stands, and returning to it is the copy back:
+
+```lua
+-- take a checkpoint at the start of act 3
+save.copySlot("slot1", "slot1-act3")
+local cp = terrain.copySaveDir("saves/slot1/terrain", "saves/slot1-act3/terrain")
+-- cp:done() turns true a few frames later; nothing hitches meanwhile
+
+-- the player failed: back to the menu (or any scene with no terrain), then
+save.copySlot("slot1-act3", "slot1")
+terrain.copySaveDir("saves/slot1-act3/terrain", "saves/slot1/terrain")
+-- load the world again: the ground is as it was dug at the checkpoint
+```
+
+`save.copySlot` flushes the active slot first, so its unsaved keys are in the
+copy, and a copy onto the active slot is what the next `save.get` reads.
+`terrain.copySaveDir` copies only terrain files and replaces every terrain file
+the destination held, so a world first dug after the checkpoint does not
+survive a restore. Copying from the slot terrain is streaming from writes every
+edited field back first, in the background, so the copy is the ground as it
+stood when asked. Restoring into that slot is refused while its terrain is in
+the scene, like a delete. `save.slots()` lists the slots on disk, sorted, for
+a "load game" screen or an autosave rotation.
+
 **The full player flow** (the solar demo implements this — `menu.ron` +
 `game_manager.lua` are the reference):
 

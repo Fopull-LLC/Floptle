@@ -3297,6 +3297,7 @@ impl ScriptHost {
         let terrain_unmade: Rc<RefCell<Vec<crate::terrain_api::UnmadeRegion>>> = Rc::default();
         let terrain_dropped: Rc<std::cell::Cell<u64>> = Rc::default();
         let terrain_prepare: crate::terrain_api::PrepareCalls = Rc::default();
+        let terrain_copies: crate::terrain_api::TerrainCopies = Rc::default();
         crate::terrain_api::install_terrain_api(
             &lua,
             terrain_ops.clone(),
@@ -3314,6 +3315,7 @@ impl ScriptHost {
                 unmade: terrain_unmade.clone(),
                 prepare: terrain_prepare.clone(),
                 paths: paths.clone(),
+                copies: terrain_copies.clone(),
             },
             crate::terrain_api::TerrainReceipts {
                 yields: terrain_yields.clone(),
@@ -3539,6 +3541,7 @@ impl ScriptHost {
             terrain_lod_anchor,
             terrain_edit_budget,
             terrain_flush,
+            terrain_copies,
             terrain_busy,
             terrain_save_dir_in_use,
             terrain_unmade,
@@ -5069,6 +5072,17 @@ impl ScriptHost {
     /// fields to the save slot now — checkpoints, exit-to-menu).
     pub fn take_terrain_flush(&self) -> bool {
         std::mem::take(&mut *self.terrain_flush.borrow_mut())
+    }
+
+    /// Drain the `terrain.copySaveDir` calls that wait for the active slot's
+    /// edits to be written back before its files are copied.
+    pub fn take_terrain_copies(&self) -> Vec<crate::terrain_api::TerrainCopy> {
+        std::mem::take(&mut *self.terrain_copies.borrow_mut())
+    }
+
+    /// Where a terrain save slot path is on disk.
+    pub fn terrain_save_dir_on_disk(&self, sd: &str) -> std::path::PathBuf {
+        crate::terrain_api::terrain_save_dir_on_disk(&self.paths, sd)
     }
 
     /// Invoke `cb` with a fresh handle for `eid` — the shared callback shape

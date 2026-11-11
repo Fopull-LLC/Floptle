@@ -2208,6 +2208,18 @@ function terrain.flush() end
 ---@param path string e.g. \"saves/slot2/terrain\"
 ---@return number
 function terrain.deleteSaveDir(path) end
+---Copy one save slot's terrain into another (a checkpoint of the ground as
+---dug, \"duplicate this save\", the restore that copies a checkpoint back).
+---Relative paths with no \"..\", terrain files only, and every terrain file
+---`to` held is replaced, so ground dug after a checkpoint does not survive a
+---restore. `to` may not be the ACTIVE `terrain.saveDir` while terrain streams
+---from it. Copying FROM the active saveDir with terrain in the world writes
+---every edited field back first, in the background, and finishes a few frames
+---later; any other copy is done before it returns.
+---@param from string e.g. \"saves/slot1/terrain\"
+---@param to string e.g. \"saves/checkpoint/terrain\"
+---@return { done: fun(): boolean, files: fun(): number|nil }
+function terrain.copySaveDir(from, to) end
 ---Signed distance from (x,y,z) to the nearest terrain surface (negative =
 ---inside rock), or nil when the scene has no terrain.
 ---@param x number
@@ -2409,6 +2421,19 @@ function save.slot(name) end
 ---@param name string
 ---@return boolean
 function save.deleteSlot(name) end
+---Copy one slot over another, whole (checkpoints, \"duplicate this save\",
+---autosave rotation). The active slot is flushed first, so its unsaved keys
+---are in the copy, and a copy onto the active slot is what the next
+---`save.get` reads. False when `from` was never saved (`to` is left alone).
+---Per-slot terrain is a separate directory: pair with `terrain.copySaveDir`.
+---@param from string
+---@param to string
+---@return boolean
+function save.copySlot(from, to) end
+---The names of the slots saved on disk, sorted (\"load game\" lists,
+---autosave rotation).
+---@return string[]
+function save.slots() end
 ---Hand the store to the writer now (checkpoints) and return; the write
 ---finishes on its own thread. `{ wait = true }` returns only once it is on
 ---disk. False when a write failed (also surfaced in the Console).

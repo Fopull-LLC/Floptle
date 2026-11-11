@@ -768,3 +768,93 @@ fn a_frame_the_gpu_ran_out_of_memory_in_names_its_untimed_time() {
     profile.borrow_mut().end_frame();
     assert_eq!(named(&profile.borrow()), 0.0, "a frame with no new error was named too");
 }
+
+/// **A checkpoint of the ground copies a save slot, and restoring it takes
+/// back what was dug since.** In the world, terrain.copySaveDir from the
+/// slot in use goes through the engine (edits written back first) and its
+/// handle says done a frame or so later. A restore INTO the slot in use is
+/// refused, as a delete is. From the menu the restore is done at once, and a
+/// field dug only after the checkpoint is gone from the slot.
+#[test]
+fn a_terrain_checkpoint_copies_a_slot_and_restoring_it_drops_later_digs() {
+    let dir = std::env::temp_dir().join(format!("floptle_arrival_savecopy_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    floptle_vfs::create_dir_all(dir.join("scenes")).unwrap();
+    floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+    floptle_vfs::write(
+        dir.join("scripts/game.lua"),
+        "local h, n = nil, 0\n\
+         function start(node) terrain.saveDir('saves/slot1/terrain') end\n\
+         function update(node, dt)\n\
+         \x20 n = n + 1\n\
+         \x20 if n == 2 then\n\
+         \x20   h = terrain.copySaveDir('saves/slot1/terrain', 'saves/cp/terrain')\n\
+         \x20   print('asked done=' .. tostring(h:done()))\n\
+         \x20   local ok, why = pcall(terrain.copySaveDir, 'saves/cp/terrain', 'saves/slot1/terrain')\n\
+         \x20   print('restore in world ok=' .. tostring(ok) .. ' why=' .. tostring(why))\n\
+         \x20 elseif h and h:done() then\n\
+         \x20   print('copied files=' .. tostring(h:files()) .. ' at ' .. n)\n\
+         \x20   h = nil\n\
+         \x20 end\n\
+         end\n",
+    )
+    .unwrap();
+    floptle_vfs::write(
+        dir.join("scripts/menu.lua"),
+        "function start(node)\n\
+         \x20 local h = terrain.copySaveDir('saves/cp/terrain', 'saves/slot1/terrain')\n\
+         \x20 print('menu done=' .. tostring(h:done()) .. ' files=' .. tostring(h:files()))\n\
+         end\n",
+    )
+    .unwrap();
+    let scripted = |w: &mut floptle_core::World, kind: &str| {
+        let e = w.spawn();
+        w.insert(e, Transform::IDENTITY);
+        w.insert(e, Name(kind.into()));
+        w.insert(e, Matter::Empty);
+        w.insert(e, Scripts(vec![ScriptInst { kind: kind.into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]));
+    };
+    let mut menu = floptle_core::World::default();
+    scripted(&mut menu, "menu");
+    floptle_scene::save(&floptle_scene::to_doc("menu", &menu), &dir.join("scenes/menu.ron")).unwrap();
+    let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+    let ground = ed.world.spawn();
+    ed.world.insert(ground, Transform::IDENTITY);
+    ed.world.insert(ground, Name("Ground".into()));
+    ed.world.insert(ground, Matter::Terrain { id: 7, collision: Default::default() });
+    scripted(&mut ed.world, "game");
+    ed.toggle_play();
+    ed.play_step(1.0 / 60.0, true);
+    let slot = ed.script_host.terrain_save_path().expect("the world's script set no save slot");
+    floptle_vfs::create_dir_all(&slot).unwrap();
+    floptle_vfs::write(slot.join("world.7.cfield"), b"first dig").unwrap();
+    floptle_vfs::write(slot.join("world.7.meta"), b"m").unwrap();
+    // A frame: the tick, then the terrain's own half (residency, the
+    // background checkpoint that finishes the copy).
+    for _ in 0..12 {
+        ed.play_step(1.0 / 60.0, true);
+        ed.pump_world_streaming();
+    }
+    let said: Vec<String> = ed.script_host.drain_logs().into_iter().map(|l| l.msg).collect();
+    let line = |p: &str| said.iter().find(|m| m.starts_with(p)).cloned().unwrap_or_default();
+    assert_eq!(line("asked done="), "asked done=false", "a copy from the slot in use did not wait for the engine: {said:?}");
+    assert!(line("restore in world ok=").starts_with("restore in world ok=false"), "a restore into the slot in use went through: {said:?}");
+    assert!(line("copied files=").starts_with("copied files=2"), "the engine never finished the copy: {said:?}");
+    let cp = dir.join("saves/cp/terrain");
+    assert_eq!(floptle_vfs::read(cp.join("world.7.cfield")).unwrap(), b"first dig");
+
+    // Played on: a second dig, and a field only dug after the checkpoint.
+    floptle_vfs::write(slot.join("world.7.cfield"), b"second dig").unwrap();
+    floptle_vfs::write(slot.join("world.9.cfield"), b"new ground").unwrap();
+    let req = floptle_script::SceneRequest::Load { name: "menu".into(), fade: None };
+    ed.perform_scene_request(&req);
+    ed.play_step(1.0 / 60.0, true);
+    let said: Vec<String> = ed.script_host.drain_logs().into_iter().map(|l| l.msg).collect();
+    let menu_line = said.iter().find(|m| m.starts_with("menu done=")).cloned().unwrap_or_default();
+    let restored = floptle_vfs::read(slot.join("world.7.cfield")).unwrap_or_default();
+    let later = slot.join("world.9.cfield").exists();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(menu_line, "menu done=true files=2", "the restore from the menu: {said:?}");
+    assert_eq!(restored, b"first dig", "the restore kept the later dig");
+    assert!(!later, "ground dug after the checkpoint survived the restore");
+}

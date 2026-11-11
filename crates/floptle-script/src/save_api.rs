@@ -693,6 +693,7 @@ pub(crate) fn install_save_api(
     // and the next flush tries again.
     {
         let state = state.clone();
+        let paths = paths.clone();
         let logs = logs.clone();
         if let Ok(f) = lua.create_function(move |_, opts: Option<mlua::Table>| {
             let wait = match &opts {
@@ -710,6 +711,90 @@ pub(crate) fn install_save_api(
             Ok(true)
         }) {
             let _ = t.set("flush", f);
+        }
+    }
+
+    // save.copySlot(from, to) — copy one slot over another, whole: a
+    // checkpoint ("back to the start of act 3"), "duplicate this save",
+    // autosave rotation. What `from` holds is on disk first (the active slot
+    // is flushed and waited for; a write still on its way is finished), and
+    // the copy replaces `to` all at once. Copying onto the active slot reads
+    // it back, so the next save.get sees the copy. False when `from` has
+    // never been saved; `to` is then left as it was. Terrain a game keeps per
+    // slot is its own directory: see terrain.copySaveDir.
+    {
+        let state = state.clone();
+        let paths = paths.clone();
+        let logs = logs.clone();
+        if let Ok(f) = lua.create_function(move |_, (from, to): (String, String)| {
+            for name in [&from, &to] {
+                if !valid_slot(name) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "save.copySlot(\"{from}\", \"{to}\"): slot names are letters/digits/-/_ (max 64)"
+                    )));
+                }
+            }
+            let root = paths.runtime_base();
+            let mut s = state.borrow_mut();
+            // The active slot's unsaved keys belong in the copy; every write
+            // on its way, to either file, lands before the copy is taken.
+            let flushed = if from == s.slot { flush(&mut s, &root, true) } else { s.drain() };
+            if let Err(e) = flushed {
+                log_error(&logs, e);
+                return Ok(false);
+            }
+            if from == to {
+                return Ok(floptle_vfs::is_file(slot_path(&root, &from)));
+            }
+            let Ok(bytes) = floptle_vfs::read(slot_path(&root, &from)) else { return Ok(false) };
+            let dest = slot_path(&root, &to);
+            if let Some(dir) = dest.parent() {
+                let _ = floptle_vfs::create_dir_all(dir);
+            }
+            if let Err(e) = floptle_vfs::write_atomic(&dest, bytes) {
+                log_error(&logs, format!("save.copySlot(\"{from}\", \"{to}\"): {e}"));
+                return Ok(false);
+            }
+            if to == s.slot {
+                // Read the copy on the next touch, not the store it replaced.
+                s.reset(false);
+            }
+            Ok(true)
+        }) {
+            let _ = t.set("copySlot", f);
+        }
+    }
+
+    // save.slots() — the names of the slots saved on disk, sorted, for a
+    // "load game" list or autosave rotation. The active slot is in it once it
+    // has been written (save.flush{ wait = true } to be sure).
+    {
+        let state = state.clone();
+        let paths = paths.clone();
+        let logs = logs.clone();
+        if let Ok(f) = lua.create_function(move |_, ()| {
+            // A slot whose first write is on its way would be missing.
+            if let Err(e) = state.borrow_mut().drain() {
+                log_error(&logs, e);
+            }
+            let dir = paths.runtime_base().join("save");
+            let mut names: Vec<String> = floptle_vfs::read_dir(&dir)
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .filter(|e| !e.is_dir())
+                        .filter_map(|e| {
+                            let p = e.path();
+                            let stem = p.file_name()?.to_str()?.strip_suffix(".ron")?.to_string();
+                            valid_slot(&stem).then_some(stem)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort();
+            Ok(names)
+        }) {
+            let _ = t.set("slots", f);
         }
     }
 
@@ -753,6 +838,40 @@ mod tests {
         assert_eq!((d, leaf.as_str()), (10, "leaf"), "the 10-deep table did not come back");
         let (d, _): (usize, String) = lua.load(read.replace("KEY", "'deepest'")).eval().unwrap();
         assert_eq!(d, SAVE_MAX_DEPTH, "the deepest table allowed did not survive the file");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A slot copies whole, onto another or onto the active one, and the
+    /// slots on disk are listed.** The active slot's unsaved keys are in the
+    /// copy (it is flushed first). A copy onto the active slot is what the
+    /// next save.get reads, not the store it replaced. A slot never saved
+    /// copies as nothing and leaves the destination alone. save.slots names
+    /// the files and nothing else in the folder.
+    #[test]
+    fn a_slot_copies_whole_and_the_slots_on_disk_are_listed() {
+        let root = std::env::temp_dir().join(format!("floptle-savecopy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (lua, _state) = lua_with_save(&root);
+        // Unsaved in the active slot "main": the copy must carry it.
+        lua.load("save.set('act', 3) save.set('ore', { iron = 12 })").exec().unwrap();
+        assert!(lua.load("return save.copySlot('main', 'checkpoint')").eval::<bool>().unwrap());
+        // Play on, then restore the checkpoint onto the active slot.
+        lua.load("save.set('act', 4) save.set('ore', { iron = 99 }) save.set('later', true)").exec().unwrap();
+        assert!(lua.load("return save.copySlot('checkpoint', 'main')").eval::<bool>().unwrap());
+        let (act, iron, later): (i64, i64, Option<bool>) =
+            lua.load("return save.get('act'), save.get('ore').iron, save.get('later')").eval().unwrap();
+        assert_eq!((act, iron, later), (3, 12, None), "the restore did not bring back the checkpoint");
+        // A slot never saved: false, and the destination is untouched.
+        assert!(!lua.load("return save.copySlot('nothing', 'checkpoint')").eval::<bool>().unwrap());
+        lua.load("save.slot('checkpoint')").exec().unwrap();
+        assert_eq!(lua.load("return save.get('act')").eval::<i64>().unwrap(), 3);
+        // Something in the folder that is not a slot is not listed.
+        std::fs::write(root.join("save").join("notes.txt"), "x").unwrap();
+        std::fs::write(root.join("save").join("main.ron.unreadable"), "x").unwrap();
+        let names: Vec<String> = lua.load("return save.slots()").eval().unwrap();
+        assert_eq!(names, vec!["checkpoint".to_string(), "main".to_string()]);
+        let e = lua.load("save.copySlot('../x', 'y')").exec().unwrap_err().to_string();
+        assert!(e.contains("slot names"), "{e}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

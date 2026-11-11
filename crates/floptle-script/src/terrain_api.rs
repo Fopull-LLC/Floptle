@@ -347,6 +347,57 @@ pub(crate) struct TerrainStreamShared {
     /// What `terrain.deleteSaveDir` resolves its (validated, relative) path
     /// against — see [`save_dir_path`].
     pub(crate) paths: crate::paths::Paths,
+    /// `terrain.copySaveDir` calls from the slot in use, waiting for the
+    /// engine to write the edited fields back before the files are copied.
+    pub copies: TerrainCopies,
+}
+
+/// One `terrain.copySaveDir(from, to)` the engine finishes: `from` is the
+/// active slot with terrain in the world, so its edits are written back
+/// first. `done` becomes the number of files copied.
+pub struct TerrainCopy {
+    pub from: String,
+    pub to: String,
+    pub done: Rc<std::cell::Cell<Option<u32>>>,
+}
+
+pub type TerrainCopies = Rc<RefCell<Vec<TerrainCopy>>>;
+
+fn is_terrain_file(p: &std::path::Path) -> bool {
+    p.extension().and_then(|x| x.to_str()).is_some_and(|x| matches!(x, "cfield" | "tfield" | "meta"))
+}
+
+/// Copy one save slot's terrain files (.cfield/.tfield/.meta) into another,
+/// replacing every terrain file the destination held, so a field dug only
+/// after the checkpoint does not survive a restore. Each file is replaced
+/// whole. Returns the number of files copied.
+pub fn copy_terrain_files(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<u32> {
+    let entries = floptle_vfs::read_dir(from)?;
+    floptle_vfs::create_dir_all(to)?;
+    if let Ok(old) = floptle_vfs::read_dir(to) {
+        for e in old {
+            let p = e.path();
+            if !e.is_dir() && is_terrain_file(&p) {
+                floptle_vfs::remove_file(&p)?;
+            }
+        }
+    }
+    let mut copied = 0u32;
+    for e in entries {
+        let p = e.path();
+        if e.is_dir() || !is_terrain_file(&p) {
+            continue;
+        }
+        let Some(name) = p.file_name() else { continue };
+        floptle_vfs::write_atomic(to.join(name), floptle_vfs::read(&p)?)?;
+        copied += 1;
+    }
+    Ok(copied)
+}
+
+/// Where a `terrain.copySaveDir` path is on disk, for the engine side.
+pub fn terrain_save_dir_on_disk(paths: &crate::paths::Paths, sd: &str) -> std::path::PathBuf {
+    save_dir_path(paths, sd)
 }
 
 /// Where a `terrain.saveDir` path is on disk. A save slot is the player's
@@ -434,7 +485,7 @@ pub(crate) fn install_terrain_api(
     stream: TerrainStreamShared,
     receipts: TerrainReceipts,
 ) {
-    let TerrainStreamShared { save_dir, lod_anchor, edit_budget, warm, flush, busy, save_dir_in_use, unmade, prepare, paths } = stream;
+    let TerrainStreamShared { save_dir, lod_anchor, edit_budget, warm, flush, busy, save_dir_in_use, unmade, prepare, paths, copies } = stream;
     let TerrainReceipts { yields, next_op_id, planet, queued, generator, impostors, dropped } = receipts;
     lua.set_app_data(TerrainDrops(dropped.clone()));
     let Ok(t) = lua.create_table() else { return };
@@ -495,6 +546,71 @@ pub(crate) fn install_terrain_api(
             Ok(removed)
         }) {
             let _ = t.set("deleteSaveDir", f);
+        }
+    }
+
+    // terrain.copySaveDir(from, to) — copy one save slot's terrain into
+    // another: a checkpoint of the ground as dug ("back to the start of act
+    // 3"), "duplicate this save", and the restore that copies a checkpoint
+    // back. The same narrow rules as deleteSaveDir: relative paths with no
+    // "..", terrain files only, and every terrain file `to` held is replaced,
+    // so ground dug after the checkpoint does not survive a restore. `to`
+    // may not be the active saveDir while terrain streams from it.
+    //
+    // Returns a handle: handle:done() is true once the copy is on disk and
+    // handle:files() the number of files copied. Copying FROM the active
+    // saveDir with terrain in the world first writes every edited field back
+    // in the background (as terrain.flush does), so the copy is the ground
+    // as it stood when asked, and finishes a few frames later without a
+    // hitch. Any other copy is done before this returns.
+    {
+        let sd = save_dir.clone();
+        let in_use = save_dir_in_use.clone();
+        let paths = paths.clone();
+        let copies = copies.clone();
+        let logs = logs.clone();
+        if let Ok(f) = lua.create_function(move |lua, (from, to): (String, String)| {
+            let call = format!("terrain.copySaveDir(\"{from}\", \"{to}\")");
+            if !valid_save_dir(&from) || !valid_save_dir(&to) {
+                return Err(mlua::Error::RuntimeError(format!("{call}: needs relative project paths with no \"..\"")));
+            }
+            if from == to {
+                return Err(mlua::Error::RuntimeError(format!("{call}: copies a slot onto itself")));
+            }
+            let active = sd.borrow().clone();
+            let streaming = in_use.get();
+            if streaming && active.as_deref() == Some(to.as_str()) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "{call}: that is the ACTIVE saveDir, and terrain in this scene still streams \
+                     from it and saves edits into it. Restore into it from a scene with no terrain \
+                     (after scene.load into a menu), or release it first with terrain.saveDir(\"\")"
+                )));
+            }
+            let done: Rc<std::cell::Cell<Option<u32>>> = Rc::default();
+            if streaming && active.as_deref() == Some(from.as_str()) {
+                copies.borrow_mut().push(TerrainCopy { from, to, done: done.clone() });
+            } else {
+                match copy_terrain_files(&save_dir_path(&paths, &from), &save_dir_path(&paths, &to)) {
+                    Ok(n) => done.set(Some(n)),
+                    // A slot never saved copies as nothing.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => done.set(Some(0)),
+                    Err(e) => {
+                        logs.borrow_mut().push(crate::ScriptLog {
+                            level: crate::LogLevel::Error,
+                            msg: format!("{call}: {e}"),
+                            source: None,
+                        });
+                        done.set(Some(0));
+                    }
+                }
+            }
+            let h = lua.create_table()?;
+            let d = done.clone();
+            h.set("done", lua.create_function(move |_, _: mlua::MultiValue| Ok(d.get().is_some()))?)?;
+            h.set("files", lua.create_function(move |_, _: mlua::MultiValue| Ok(done.get()))?)?;
+            Ok(h)
+        }) {
+            let _ = t.set("copySaveDir", f);
         }
     }
 

@@ -766,6 +766,11 @@ pub(crate) fn give_memory_back() {
 /// …and puts away at most this many chunks of a terrain a scan.
 const EVICT_PER_SCAN: usize = 96;
 
+/// A `terrain.copySaveDir` from the slot in use, and the copy's answer
+/// once its thread is running.
+pub(crate) type PendingTerrainCopy =
+    (floptle_script::TerrainCopy, Option<std::sync::mpsc::Receiver<Result<u32, String>>>);
+
 /// One in-flight background checkpoint (`terrain.flush()` → the save slot):
 /// the field encodes a few chunks per frame on the main thread (it can't leave
 /// it — scripts keep digging it), then the finished blob writes on a thread.
@@ -4029,7 +4034,13 @@ impl Editor {
     /// autosave on a dug-up planet — the player must never feel a checkpoint.
     pub(crate) fn step_terrain_checkpoint(&mut self) {
         // 1. terrain.flush() → queue every dirty resident field (dedup).
-        if self.script_host.take_terrain_flush() {
+        //    A terrain.copySaveDir from the slot in use asks for the same,
+        //    and copies once the queue is through.
+        let copies = self.script_host.take_terrain_copies();
+        let flush = self.script_host.take_terrain_flush();
+        let flush = flush || !copies.is_empty();
+        self.terrain_copies.extend(copies.into_iter().map(|c| (c, None)));
+        if flush {
             if self.script_host.terrain_save_dir().is_some() {
                 let now = floptle_core::time::Instant::now();
                 let dirty: Vec<Entity> = self
@@ -4063,6 +4074,9 @@ impl Editor {
                 );
             }
         }
+
+        // The copies wait for what step 1 just queued.
+        self.drive_terrain_copies();
 
         // 2. Drive the in-flight job.
         if let Some(mut job) = self.terrain_save_job.take() {
@@ -4176,6 +4190,51 @@ impl Editor {
             stamp,
             state: TerrainSaveState::Encoding(t.field.begin_save()),
         });
+    }
+
+    /// Finish `terrain.copySaveDir` calls from the slot in use: once no
+    /// checkpoint is queued or writing (the fields dirty when it was asked are
+    /// on disk), copy the files on a thread, and hand the count to the
+    /// script's handle when it lands.
+    fn drive_terrain_copies(&mut self) {
+        if self.terrain_copies.is_empty() {
+            return;
+        }
+        let idle = self.terrain_flush_queue.is_empty() && self.terrain_save_job.is_none();
+        let mut errors = Vec::new();
+        for (c, rx) in &mut self.terrain_copies {
+            match rx {
+                None if idle => {
+                    let from = self.script_host.terrain_save_dir_on_disk(&c.from);
+                    let to = self.script_host.terrain_save_dir_on_disk(&c.to);
+                    let (tx, r) = std::sync::mpsc::channel();
+                    crate::worker::spawn("terrain-copy", move || {
+                        let res = floptle_script::copy_terrain_files(&from, &to).or_else(|e| {
+                            if e.kind() == std::io::ErrorKind::NotFound { Ok(0) } else { Err(e.to_string()) }
+                        });
+                        let _ = tx.send(res);
+                    });
+                    *rx = Some(r);
+                }
+                Some(r) => match r.try_recv() {
+                    Ok(Ok(n)) => c.done.set(Some(n)),
+                    Ok(Err(e)) => {
+                        errors.push(format!("terrain.copySaveDir(\"{}\", \"{}\"): {e}", c.from, c.to));
+                        c.done.set(Some(0));
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        errors.push(format!("terrain.copySaveDir(\"{}\", \"{}\"): the copy stopped", c.from, c.to));
+                        c.done.set(Some(0));
+                    }
+                },
+                None => {}
+            }
+        }
+        for e in errors {
+            self.console.push(floptle_script::LogLevel::Error, e, None);
+        }
+        self.terrain_copies.retain(|(c, _)| c.done.get().is_none());
     }
 
     /// Land or cancel the in-flight background checkpoint before a synchronous

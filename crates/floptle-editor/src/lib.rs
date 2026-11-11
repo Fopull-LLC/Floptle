@@ -2719,6 +2719,10 @@ struct Editor {
     /// The single in-flight checkpoint (encode → write). One at a time keeps
     /// the frame cost flat and makes exit-path settling a single join.
     terrain_save_job: Option<crate::terrain_edit::TerrainSaveJob>,
+    /// `terrain.copySaveDir` calls from the slot in use: each waits for the
+    /// checkpoint queue to write the edited fields back, then copies the
+    /// files on a thread (the receiver).
+    terrain_copies: Vec<crate::terrain_edit::PendingTerrainCopy>,
     /// Per-terrain edit stamps: (monotonic edit counter, wall time of the last
     /// edit). The counter detects a checkpoint that raced an edit (torn
     /// snapshot → the field stays dirty); the wall time defers checkpoints on

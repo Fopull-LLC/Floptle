@@ -410,7 +410,7 @@ pub use net_api::{
 };
 pub use assembly_api::{AssemblyCmd, AssemblyImpact, AssemblyInfo};
 pub use space_api::{belt_orbits, SpaceBodyInfo, SpaceInfo};
-pub use terrain_api::{ImpostorRule, LodAnchor, MAX_PENDING_OPS, PrepareAsk, TERRAIN_EDIT_BUDGET_MS, TerrainOp, TerrainOpMode, TerrainYield, UnmadeRegion};
+pub use terrain_api::{ImpostorRule, LodAnchor, MAX_PENDING_OPS, PrepareAsk, TERRAIN_EDIT_BUDGET_MS, TerrainCopy, TerrainOp, TerrainOpMode, TerrainYield, UnmadeRegion, copy_terrain_files};
 pub use rollback_api::{ScriptState, MAX_STATE_DEPTH};
 pub use view_api::ViewInfo;
 
@@ -801,6 +801,8 @@ pub struct ScriptHost {
     /// a terrain body, or a checkpoint in flight. `terrain.deleteSaveDir`
     /// refuses the active slot only while this holds.
     terrain_save_dir_in_use: Rc<std::cell::Cell<bool>>,
+    /// `terrain.copySaveDir` calls waiting for the active slot's edits.
+    terrain_copies: crate::terrain_api::TerrainCopies,
     /// The ground not made yet, published by the engine each frame for
     /// `terrain.ready` and `terrain.raycast`.
     terrain_unmade: Rc<RefCell<Vec<terrain_api::UnmadeRegion>>>,

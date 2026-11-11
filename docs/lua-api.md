@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 79
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 33
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 34
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 11
 - [weather — wind](#weather--wind) — 6
@@ -39,7 +39,7 @@ each group, and meant to be searched.
 - [physics controls — pause & step](#physics-controls--pause--step) — 5
 - [frame cost — perf.*](#frame-cost--perf) — 26
 - [accessibility — access.*](#accessibility--access) — 11
-- [persistence — save.*](#persistence--save) — 7
+- [persistence — save.*](#persistence--save) — 9
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
 - [components — getcomponent](#components--getcomponent) — 120
@@ -2975,6 +2975,10 @@ terrain.busy() — is the background terrain worker already occupied? True while
 
 terrain.capacity() → how many more terrain edits the queue takes right now before it refuses them (it holds 4,096 waiting). A game sending a big batch sends at most this many a frame and the rest on the frames after, and none of them is ever refused. A refused edit answers the receipt 0 and is counted in perf.counts().terrainDropped.
 
+### `terrain.copySaveDir`
+
+terrain.copySaveDir("saves/slot1/terrain", "saves/checkpoint/terrain") — copy one save slot's terrain into another: a checkpoint of the ground as dug, and the restore that copies it back (from a menu, or with the slot released). Same narrow rules as deleteSaveDir (relative, no "..", terrain files only), and every terrain file the destination held is replaced, so ground dug after the checkpoint does not survive a restore. The destination may not be the ACTIVE saveDir while terrain streams from it. Returns a handle: h:done() once it is on disk, h:files() the count. From the active saveDir with terrain in the world, the edited fields are written back first in the background and the copy finishes a few frames later without a hitch; any other copy is done before it returns.
+
 ### `terrain.deleteSaveDir`
 
 terrain.deleteSaveDir("saves/slot2/terrain") — delete a save slot's persisted terrain from disk (pair with save.deleteSlot in a "delete this save" UI). Narrow by design: relative path, no "..", and only .cfield/.tfield/.meta files in that one directory are removed (emptied dirs are tidied). The ACTIVE saveDir is refused while terrain in the scene still uses it (release it with terrain.saveDir("")); from a scene with no terrain, such as a menu after scene.load, it is deleted and released, so terrain.saveDir() reads nil. Returns the number of files removed.
@@ -3776,6 +3780,10 @@ caption("a door unlocks somewhere" [, seconds]) → true if it was shown. Says a
 
 The persistent store: save.set / save.get, named slots, and flushing to disk. A slot holds at most 10 000 keys and 4 MB — store the player's progress and settings; something the player made (a blueprint library, a level, a recording) goes in a user:// file with assets.writeJson / assets.writeBytes.
 
+### `save.copySlot`
+
+save.copySlot("main", "checkpoint") — copy one slot over another, whole: a checkpoint (copy it back to return to it), "duplicate this save", autosave rotation. The active slot is flushed first, so its unsaved keys are in the copy, and a copy onto the active slot is what the next save.get reads. False when the source was never saved (the destination is left alone). Per-slot terrain is its own directory: pair with terrain.copySaveDir.
+
 ### `save.delete`
 
 save.delete("gold") — remove a key; true if something was removed.
@@ -3804,6 +3812,10 @@ hp = save.get("hp", 100)
 ### `save.slot`
 
 save.slot("slot2") — switch the active save slot; save.slot() reads the current name. Each slot is its own file under save/. The slot left is handed to the writer, not waited for, so a switch costs the frame almost nothing; the new slot is read on its first save.get, which waits only if a write of that same slot is still on its way.
+
+### `save.slots`
+
+save.slots() — the names of the slots saved on disk, sorted: a "load game" list, autosave rotation. The active slot is in it once written (save.flush{ wait = true } to be sure).
 
 ## timers — after, every, tween
 
