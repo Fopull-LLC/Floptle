@@ -551,7 +551,12 @@ struct MeshAhead {
 /// chunk's width can visit. `None` when the box needs more, and the caller
 /// asks [`Surface::each_in`] instead.
 struct NearChunks<'a> {
+    /// The surface the table was read from, asked directly for any chunk the
+    /// table does not hold.
+    s: &'a Surface,
     lo: [i32; 3],
+    /// The last chunk the table was filled for, per axis: `lo` or `lo + 1`.
+    hi: [i32; 3],
     table: [Option<&'a CollisionChunk>; 8],
     /// Every bucket any of them holds triangles in is inside this range.
     occupied: ((i32, i32, i32), (i32, i32, i32)),
@@ -580,7 +585,7 @@ impl<'a> NearChunks<'a> {
                 }
             }
         }
-        Some(Self { lo, table, occupied })
+        Some(Self { s, lo, hi, table, occupied })
     }
 
     #[inline]
@@ -590,14 +595,29 @@ impl<'a> NearChunks<'a> {
 
     /// [`Surface::each_in`], from the table: the same chunks in the same
     /// order, so the same triangles in the same order.
+    ///
+    /// A cell near the table's edge reaches a chunk past it (a chunk's
+    /// triangles reach two cells over), and that chunk is asked of the
+    /// surface directly. Indexing the table for it went negative and killed
+    /// the game (card 0687); skipping it would have lost its triangles.
     #[inline]
     fn each_in(&self, cell: (i32, i32, i32), mut f: impl FnMut(&SurfaceTri)) {
         let span = |k: i32| ((k - 2).div_euclid(floptle_field::CHUNK), (k + 2).div_euclid(floptle_field::CHUNK));
         let ((x0, x1), (y0, y1), (z0, z1)) = (span(cell.0), span(cell.1), span(cell.2));
+        let held = |k: i32, i: usize| (self.lo[i]..=self.hi[i]).contains(&k);
         for z in z0..=z1 {
             for y in y0..=y1 {
                 for x in x0..=x1 {
-                    if let Some(ch) = self.table[Self::at(self.lo, x, y, z)] {
+                    let ch = if held(x, 0) && held(y, 1) && held(z, 2) {
+                        self.table[Self::at(self.lo, x, y, z)]
+                    } else {
+                        let ch = self.s.chunks.get(&[x, y, z]);
+                        if let Some(ch) = ch {
+                            ch.used.set(true);
+                        }
+                        ch
+                    };
+                    if let Some(ch) = ch {
                         ch.cell(cell).iter().for_each(&mut f);
                     }
                 }
@@ -1449,7 +1469,11 @@ impl ChunkTerrain {
         if let Some(near) = &near
             && olo.0 <= ohi.0
         {
-            let at = (c.0.clamp(olo.0, ohi.0), c.1.clamp(olo.1, ohi.1), c.2.clamp(olo.2, ohi.2));
+            // The occupied range covers whole chunks and can run well past
+            // the query's box, so the seed's bucket is kept inside the box
+            // too: any bucket near the point gives a sound bound.
+            let near_c = |k: i32, lo: i32, hi: i32| k.clamp(lo, hi).clamp(k - max_ring, k + max_ring);
+            let at = (near_c(c.0, olo.0, ohi.0), near_c(c.1, olo.1, ohi.1), near_c(c.2, olo.2, ohi.2));
             near.each_in(at, |tri| {
                 let q = closest_point_on_triangle(local, tri.p[0], tri.p[1], tri.p[2]);
                 let d2 = (q - local).length_squared();
@@ -3178,6 +3202,52 @@ mod drawn_surface_tests {
             f.sculpt(b, c, 3.0 + rnd() * 4.5, 1.0, BrushProfile::default());
         }
         f
+    }
+
+    #[test]
+    fn the_near_chunk_table_answers_a_cell_past_its_edge_like_the_surface() {
+        // Card 0687: the table a terrain query builds holds the 2x2x2 chunks
+        // round it, and a cell near the table's edge reaches a chunk past it
+        // (a chunk's triangles reach two cells over). The query's bounding
+        // seed asked for such a cell, the table was indexed at -4, and the
+        // game died. Asked of the table, a cell past its edge must give
+        // exactly the triangles the surface itself gives for it.
+        let f = coarse();
+        let t = ChunkTerrain::new(f.clone());
+        let mut s = t.surface.borrow_mut();
+        let n = floptle_field::CHUNK;
+        let coords = f.all_chunk_coords();
+        for c in &coords {
+            t.mesh_into(*c, &mut s);
+        }
+        let mut checked = 0;
+        for c in &coords {
+            // A table round cells in the middle of chunk `c` holds `c` and
+            // its neighbours on the high side; the chunk below `c` is past
+            // its low edge.
+            let mid = (c[0] * n + n / 2, c[1] * n + n / 2, c[2] * n + n / 2);
+            let Some(near) = NearChunks::new(&s, mid, mid) else { continue };
+            // Every cell on `c`'s three low faces, two deep: each reaches the
+            // chunk across that face, past the table.
+            for u in 0..n {
+                for v in 0..n {
+                    for d in 0..2 {
+                        for cell in [
+                            (c[0] * n + d, c[1] * n + u, c[2] * n + v),
+                            (c[0] * n + u, c[1] * n + d, c[2] * n + v),
+                            (c[0] * n + u, c[1] * n + v, c[2] * n + d),
+                        ] {
+                            let (mut a, mut b) = (Vec::new(), Vec::new());
+                            near.each_in(cell, |tri| a.push(tri.p));
+                            s.each_in(cell, |tri| b.push(tri.p));
+                            assert_eq!(a, b, "the table and the surface disagree about cell {cell:?}");
+                            checked += !b.is_empty() as usize;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 0, "no cell at a chunk's floor held a triangle, so nothing was tested");
     }
 
     #[test]
