@@ -756,29 +756,57 @@ impl Editor {
                     .collect();
                 // Parts that share one texture and its maps and do not blend
                 // can draw as one instance, a material per slot (card 0685):
-                // their mesh laid end to end is registered beside them. Whether
+                // their mesh laid end to end is registered beside them. Parts
+                // whose pictures differ can too, when each kind of picture
+                // (base, normal, metal-rough, occlusion, emissive) is one size
+                // and sampling across the parts that have it: those pictures
+                // are written into texture arrays here (card 0690). Whether
                 // a node's parts really do merge is decided each frame, against
                 // what its overrides make of them; this only says they can.
                 let merged = {
                     let first = &model.parts[0];
                     let refs: Vec<&floptle_render::MeshData> = model.parts.iter().map(|p| &p.mesh).collect();
-                    model
-                        .parts
-                        .iter()
-                        .all(|p| {
-                            p.texture == first.texture
-                                && p.maps.normal == first.maps.normal
-                                && p.maps.metallic_roughness == first.maps.metallic_roughness
-                                && p.maps.occlusion == first.maps.occlusion
-                                && p.maps.emissive == first.maps.emissive
-                                && !matches!(p.maps.alpha_mode, floptle_assets::glb_write::AlphaMode::Blend)
+                    let opaque = model.parts.iter().all(|p| !matches!(p.maps.alpha_mode, floptle_assets::glb_write::AlphaMode::Blend));
+                    let kinds = |p: &floptle_assets::gltf_import::ImportedPart| [p.texture, p.maps.normal, p.maps.metallic_roughness, p.maps.occlusion, p.maps.emissive];
+                    let same = model.parts.iter().all(|p| kinds(p) == kinds(first));
+                    let sampling_of = |i: usize| embedded_sampling(chosen, &model.texture_filters, Some(i));
+                    // Each kind: one size and one sampling across the parts that
+                    // have a picture of it.
+                    let fits = (0..5).all(|k| {
+                        let mut seen: Option<((u32, u32), floptle_render::TexSampling)> = None;
+                        model.parts.iter().filter_map(|p| kinds(p)[k]).all(|i| {
+                            let Some(t) = model.textures.get(i) else { return false };
+                            let this = ((t.width, t.height), sampling_of(i));
+                            *seen.get_or_insert(this) == this
                         })
+                    });
+                    let arrays = opaque && !same && fits && crate::mesh_instances::merge_arrays_on();
+                    (opaque && (same || arrays))
                         .then(|| floptle_render::merge_parts(&refs))
                         .flatten()
                         .map(|(mesh, starts)| {
-                            let sampling = embedded_sampling(chosen, &model.texture_filters, first.texture);
-                            let id = raster.register_sampled(gpu, &mesh, first.texture.map(|i| &model.textures[i]), sampling);
-                            crate::MergedMesh { mesh: id, starts }
+                            let id = if arrays {
+                                raster.register(gpu, &mesh, None)
+                            } else {
+                                let sampling = embedded_sampling(chosen, &model.texture_filters, first.texture);
+                                raster.register_sampled(gpu, &mesh, first.texture.map(|i| &model.textures[i]), sampling)
+                            };
+                            let mut own_tex = Vec::new();
+                            if arrays {
+                                // Every picture the parts wear, as the shared ids
+                                // their looks bind, written into the pools.
+                                let mut pictures: Vec<usize> = model.parts.iter().flat_map(|p| kinds(p).into_iter().flatten()).collect();
+                                pictures.sort_unstable();
+                                pictures.dedup();
+                                for i in pictures {
+                                    let data = &model.textures[i];
+                                    let sampling = sampling_of(i);
+                                    let t = *images.entry(i).or_insert_with(|| raster.register_texture_shared(gpu, data, sampling));
+                                    raster.pool_texture(gpu, t, data, sampling);
+                                }
+                                own_tex = model.parts.iter().map(|p| p.texture.and_then(|i| images.get(&i).copied())).collect();
+                            }
+                            crate::MergedMesh { mesh: id, starts, arrays, own_tex }
                         })
                 };
                 self.mesh_registry.insert(

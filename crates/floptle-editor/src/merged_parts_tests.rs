@@ -77,11 +77,28 @@ fn one_object(glb: &[u8]) -> Vec<u8> {
 }
 
 fn editor_with_wall(tag: &str) -> Option<(crate::Editor, floptle_core::Entity, std::path::PathBuf)> {
+    editor_with_glb(tag, wall_glb())
+}
+
+fn editor_with_glb(tag: &str, glb: Vec<u8>) -> Option<(crate::Editor, floptle_core::Entity, std::path::PathBuf)> {
+    editor_with_glb_rules(tag, glb, None)
+}
+
+/// [`editor_with_glb`] under the given imported-material rules (`None`: the
+/// test editor's own).
+fn editor_with_glb_rules(
+    tag: &str,
+    glb: Vec<u8>,
+    rules: Option<floptle_scene::ImportedMaterialsDoc>,
+) -> Option<(crate::Editor, floptle_core::Entity, std::path::PathBuf)> {
     let mut ed = crate::offscreen::test_editor_with_gpu()?;
+    if let Some(r) = rules {
+        ed.project.imported_materials = Some(r);
+    }
     let root = std::env::temp_dir().join(format!("floptle_merged_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("models")).unwrap();
-    std::fs::write(root.join("models/wall.glb"), wall_glb()).unwrap();
+    std::fs::write(root.join("models/wall.glb"), glb).unwrap();
     ed.project_root = root.clone();
     let lighting = ed.world.spawn();
     ed.world.insert(lighting, floptle_core::Light { direction: [0.4, 0.6, 0.7], shadows: false, ..Default::default() });
@@ -198,5 +215,118 @@ fn a_merged_wall_draws_the_same_pixels_as_its_parts() {
         let differ = parts.chunks(4).zip(merged.chunks(4)).filter(|(a, b)| a != b).count();
         assert_eq!(differ, 0, "step {step}: merged, the wall differs from its parts in {differ} pixels");
     }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A wall of three parts, each wearing its own 32² picture (`third` sets the
+/// size of the third), the first two with normal maps of their own (card
+/// 0690): the pictures differ, so only texture arrays can merge it.
+fn textured_wall_glb(third: u32) -> Vec<u8> {
+    use floptle_assets::glb_write::{write_glb, WriteMaterial, WriteMesh, WriteNode};
+    let picture = |size: u32, tint: [u8; 3]| {
+        let mut pixels = Vec::new();
+        for y in 0..size {
+            for x in 0..size {
+                let band = if (x / 4 + y / 8) % 2 == 0 { 255 } else { 110 };
+                pixels.extend_from_slice(&[(tint[0] as u32 * band / 255) as u8, (tint[1] as u32 * band / 255) as u8, tint[2], 255]);
+            }
+        }
+        floptle_render::TextureData { width: size, height: size, pixels }
+    };
+    let ridges = |axis: usize| {
+        let mut pixels = Vec::new();
+        for y in 0..32u32 {
+            for x in 0..32u32 {
+                let t = if axis == 0 { x } else { y };
+                let tilt = ((t as f32 * 0.8).sin() * 90.0) as i32;
+                let (nx, ny) = if axis == 0 { (128 + tilt, 128) } else { (128, 128 + tilt) };
+                pixels.extend_from_slice(&[nx as u8, ny as u8, 220, 255]);
+            }
+        }
+        floptle_render::TextureData { width: 32, height: 32, pixels }
+    };
+    let textures = [picture(32, [230, 80, 40]), picture(32, [50, 200, 90]), picture(third, [70, 90, 240]), ridges(0), ridges(1)];
+    let quad = |x: f32| WriteMesh {
+        positions: vec![[x - 0.45, -0.5, 0.0], [x + 0.45, -0.5, 0.0], [x + 0.45, 0.5, 0.0], [x - 0.45, 0.5, 0.0]],
+        normals: vec![[0.0, 0.0, 1.0]; 4],
+        uvs: Some(vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]),
+        indices: vec![0, 1, 2, 0, 2, 3],
+        base_color: [1.0; 4],
+        ..Default::default()
+    };
+    let part = |name: &str, x: f32, base: usize, normal: Option<usize>, roughness: f32| {
+        let mut n = WriteNode::mesh_node(name, quad(x));
+        n.material = Some(WriteMaterial {
+            name: name.to_string(),
+            base_color: [1.0; 4],
+            base_texture: Some(base),
+            normal,
+            normal_scale: 1.0,
+            roughness,
+            metallic: 0.0,
+            ..Default::default()
+        });
+        n
+    };
+    let glb = write_glb(
+        &[part("Outside", -1.0, 0, Some(3), 0.3), part("Inside", 0.0, 1, Some(4), 0.8), part("Trim", 1.0, 2, None, 0.5)],
+        &[],
+        &textures,
+        &[None; 5],
+    );
+    one_object(&glb)
+}
+
+/// **A wall whose parts wear different pictures of one size is one
+/// instance, and looks the same as its parts** (card 0690): imported, its
+/// merged mesh is marked for texture arrays; drawn, it is one instance, the
+/// same picture byte for byte as drawn part by part, plain and tinted.
+#[test]
+fn a_wall_of_three_pictures_is_one_instance_and_draws_as_its_parts() {
+    // Under today's rules every part's look names its picture; under the
+    // classic rules a part with a picture and no maps (the trim) has no look
+    // and draws its mesh's own picture, which its slot then binds.
+    for (tag, rules) in [("arrays", None), ("arrays-classic", Some(floptle_scene::ImportedMaterialsDoc::Classic))] {
+        a_wall_of_three_pictures_under(tag, rules);
+    }
+}
+
+fn a_wall_of_three_pictures_under(tag: &str, rules: Option<floptle_scene::ImportedMaterialsDoc>) {
+    let Some((mut ed, wall, root)) = editor_with_glb_rules(tag, textured_wall_glb(32), rules) else { return };
+    if rules.is_some() {
+        let asset = ed.mesh_registry.get("models/wall.glb").unwrap();
+        assert!(asset.part_meta[2].imported.is_none(), "the fixture: under the classic rules the trim has a look of its own");
+    }
+    assert!(
+        ed.mesh_registry.get("models/wall.glb").and_then(|a| a.merged.as_ref()).is_some_and(|m| m.arrays),
+        "the wall of three pictures was not marked for texture arrays"
+    );
+    assert_eq!(instances_of(&mut ed, wall), 1, "the wall of three pictures draws as more than one instance");
+    for tinted in [false, true] {
+        if tinted {
+            ed.world.insert(wall, floptle_core::Tint { color: [0.6, 0.9, 1.0], alpha: 1.0, ..Default::default() });
+        }
+        crate::mesh_instances::merge_parts_off_here(true);
+        let parts = picture(&mut ed);
+        crate::mesh_instances::merge_parts_off_here(false);
+        let merged = picture(&mut ed);
+        let lit = parts.chunks(4).filter(|p| p[0] > 10 || p[1] > 10 || p[2] > 10).count();
+        assert!(lit > 160 * 90 / 10, "the wall is not in the picture: {lit} lit pixels");
+        let differ = parts.chunks(4).zip(merged.chunks(4)).filter(|(a, b)| a != b).count();
+        assert_eq!(differ, 0, "{tag}, tinted {tinted}: the array-merged wall differs from its parts in {differ} pixels");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **Pictures of different sizes do not share an array, so that wall draws
+/// part by part.**
+#[test]
+fn a_wall_whose_pictures_differ_in_size_draws_as_its_parts() {
+    let Some((mut ed, wall, root)) = editor_with_glb("sizes", textured_wall_glb(16)) else { return };
+    assert!(
+        ed.mesh_registry.get("models/wall.glb").is_some_and(|a| a.merged.is_none()),
+        "a wall whose base pictures differ in size was merged"
+    );
+    assert_eq!(instances_of(&mut ed, wall), 3);
     let _ = std::fs::remove_dir_all(&root);
 }

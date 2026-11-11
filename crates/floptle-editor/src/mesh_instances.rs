@@ -335,6 +335,15 @@ fn merge_parts_on() -> bool {
     *ON.get_or_init(|| std::env::var("FLOPTLE_MERGE_PARTS").map_or(true, |v| v != "0")) && !MERGE_OFF_HERE.with(|c| c.get())
 }
 
+/// Whether a merged model whose parts wear different pictures may draw
+/// through texture arrays (card 0690). On unless `FLOPTLE_MERGE_ARRAYS=0`,
+/// which draws such a model part by part again while models whose parts share
+/// their pictures still merge: the A/B for this one change.
+pub(crate) fn merge_arrays_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOPTLE_MERGE_ARRAYS").map_or(true, |v| v != "0"))
+}
+
 thread_local! {
     /// A test drawing the same scene with and without merging, on one thread.
     static MERGE_OFF_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -522,8 +531,26 @@ pub(crate) fn push_mesh_instances(
             }
             let tex0 = looks[0].0;
             let exts: Vec<u32> = looks.iter().map(|l| l.1.ext_index).collect();
-            let alike = looks.iter().all(|(t, p, f)| f.is_none() && *t == tex0 && p.alpha >= 0.999)
-                && raster.exts_route_alike(&exts);
+            let opaque = looks.iter().all(|(_, p, f)| f.is_none() && p.alpha >= 0.999) && raster.exts_route_alike(&exts);
+            let alike = opaque && looks.iter().all(|(t, _, _)| *t == tex0);
+            // **Different pictures, one instance, through texture arrays**
+            // (card 0690): each slot's pictures are layers of the arrays its
+            // set binds. A part whose look names no picture draws its own
+            // (`own_tex`). Glass stays parts (its pass has no array build of
+            // its own to composite with), and a picture an override brought
+            // that is not in the pools refuses the set: the parts draw.
+            if opaque && !alike && m.arrays && merge_arrays_on() && !exts.iter().any(|&e| raster.is_transmissive(e)) {
+                let slot_tex: Vec<Option<TexId>> =
+                    looks.iter().enumerate().map(|(i, l)| l.0.or_else(|| m.own_tex.get(i).copied().flatten())).collect();
+                if let Some((set, layers)) = raster.array_set_for(gpu, &slot_tex) {
+                    let slots: Vec<MaterialParams> = looks.iter().map(|l| l.1).collect();
+                    if let Some(t) = raster.push_slot_table_layered(&m.starts, &slots, Some(&layers)) {
+                        let paint = raster.mesh_paint_base(m.mesh);
+                        instances.push((m.mesh, Some(set), floptle_render::instance_of_slots(model, t, paint, false)));
+                        return;
+                    }
+                }
+            }
             if alike {
                 let paint = raster.mesh_paint_base(m.mesh);
                 if looks.iter().all(|l| l.1 == looks[0].1) {

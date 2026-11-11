@@ -3132,6 +3132,13 @@ impl Raster {
             .collect()
     }
 
+    /// Whether surface-extras entry `ext` lets light through: glass, which
+    /// its own pass draws ([`Self::draw_transmissive`]).
+    pub fn is_transmissive(&self, ext: u32) -> bool {
+        let at = ext as usize * EXT_LANES + 1;
+        self.mat_ext_cpu.get(at).is_some_and(|c| c[3] > 0.0 && (c[0] as u32) & EXT_PHYSICAL != 0)
+    }
+
     /// Does anything in this draw list let light through it?
     ///
     /// The caller asks before drawing, because the answer decides whether the
