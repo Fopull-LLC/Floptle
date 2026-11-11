@@ -549,6 +549,9 @@ struct EditorCmd {
     /// Create a starter `.vfx.ron` effect and attach it to this entity.
     new_particles: Option<Entity>,
     remove_particles: Option<Entity>,
+    /// Give this rigged mesh a SpringBones component (card 0693).
+    add_springs: Option<Entity>,
+    remove_springs: Option<Entity>,
     /// Open an effect (by key) in the Particles tab and focus it.
     open_particle_editor: Option<String>,
     /// Bring the Particles tab to the front (re-adding it if closed).

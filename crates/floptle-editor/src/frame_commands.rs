@@ -834,6 +834,20 @@ impl Editor {
                 cmd.open_particle_editor = Some(key);
             }
         }
+        if let Some(e) = cmd.add_springs.take() {
+            self.record();
+            for e in self.selected_group(e) {
+                if self.world.get::<floptle_core::SpringBones>(e).is_none() {
+                    self.world.insert(e, floptle_core::SpringBones::default());
+                }
+            }
+        }
+        if let Some(e) = cmd.remove_springs.take() {
+            self.record();
+            for e in self.selected_group(e) {
+                self.world.remove::<floptle_core::SpringBones>(e);
+            }
+        }
         if let Some(e) = cmd.remove_particles.take() {
             self.record();
             for e in self.selected_group(e) {

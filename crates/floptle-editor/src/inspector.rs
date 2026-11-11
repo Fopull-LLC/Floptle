@@ -6204,6 +6204,133 @@ impl EditorTabViewer<'_> {
         }
     }
 
+    /// The Spring Bones component, when the node has one: its chains, each
+    /// from a root bone down, and the colliders they stay out of.
+    fn node_springs_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        if world.get::<floptle_core::SpringBones>(e).is_none() {
+            return;
+        }
+        ui.separator();
+        let (_, _, remove) = component_header(ui, "〰 Spring Bones", false, true);
+        if remove {
+            cmd.remove_springs = Some(e);
+            return;
+        }
+        let bones: Vec<String> = self.bone_names.get(&e).map(|b| b.iter().filter(|n| !n.is_object).map(|n| n.name.clone()).collect()).unwrap_or_default();
+        let pick = |ui: &mut egui::Ui, id: (usize, &str), label: &str, current: &mut String, changed: &mut bool| {
+            egui::ComboBox::from_id_salt(("spring_bone", id.0, id.1))
+                .selected_text(if current.is_empty() { "(pick a bone)".to_string() } else { current.clone() })
+                .show_ui(ui, |ui| {
+                    for b in &bones {
+                        if ui.selectable_label(b == current, b).clicked() {
+                            *current = b.clone();
+                            *changed = true;
+                        }
+                    }
+                });
+            ui.label(label);
+        };
+        let Some(sb) = world.get_mut::<floptle_core::SpringBones>(e) else { return };
+        let mut changed = false;
+        ui.indent("springs_props", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Gravity").on_hover_text("The world's gravity as the chains feel it, m/s² (a script can set it with anim:setSpringGravity)");
+                for v in sb.gravity.iter_mut() {
+                    changed |= ui.add(egui::DragValue::new(v).speed(0.1)).changed();
+                }
+            });
+            let mut drop_chain = None;
+            for (i, c) in sb.chains.iter_mut().enumerate() {
+                let title = if c.name.is_empty() { format!("Chain {}", i + 1) } else { c.name.clone() };
+                egui::CollapsingHeader::new(title).id_salt(("spring_chain", i)).default_open(true).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Name");
+                        changed |= ui.text_edit_singleline(&mut c.name).on_hover_text("What scripts call it: anim:setSpringEnabled(name, on)").changed();
+                    });
+                    ui.horizontal(|ui| pick(ui, (i, "root"), "Root bone", &mut c.root, &mut changed));
+                    ui.horizontal(|ui| {
+                        let mut to_end = c.end.is_some();
+                        if crate::responsive::check(ui, &mut to_end, "Down to a bone").on_hover_text("Off: this many bones down from the root, through each bone's first child (0: to the end)").changed() {
+                            c.end = to_end.then(String::new);
+                            changed = true;
+                        }
+                        match &mut c.end {
+                            Some(end) => pick(ui, (i, "end"), "End bone", end, &mut changed),
+                            None => {
+                                changed |= ui.add(egui::DragValue::new(&mut c.length).range(0..=32)).changed();
+                                ui.label("bones");
+                            }
+                        }
+                    });
+                    let mut num = |ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, speed: f64, hover: &str| {
+                        ui.horizontal(|ui| {
+                            ui.label(label).on_hover_text(hover);
+                            changed |= ui.add(egui::DragValue::new(v).range(range).speed(speed)).changed();
+                        });
+                    };
+                    num(ui, "Stiffness", &mut c.stiffness, 0.0..=20.0, 0.05, "Pull back toward the animated pose, cycles a second: 0 hangs free, 2 is hair, 6 a stiff antenna");
+                    num(ui, "Gravity", &mut c.gravity, 0.0..=4.0, 0.05, "The share of the world's gravity it feels");
+                    num(ui, "Drag", &mut c.drag, 0.0..=1.0, 0.01, "The share of its speed lost each sixtieth of a second: 0.2 settles a free chain in about a second");
+                    num(ui, "Max angle", &mut c.max_angle, 0.0..=180.0, 1.0, "Furthest a segment turns from its animated direction, degrees");
+                    num(ui, "Thickness", &mut c.hit_radius, 0.0..=1.0, 0.005, "The chain's radius against colliders, metres");
+                    ui.horizontal(|ui| {
+                        changed |= crate::responsive::check(ui, &mut c.enabled, "Enabled").changed();
+                        if ui.small_button("🗑 Remove chain").clicked() {
+                            drop_chain = Some(i);
+                        }
+                    });
+                });
+            }
+            if let Some(i) = drop_chain {
+                sb.chains.remove(i);
+                changed = true;
+            }
+            if ui.button("➕ Chain").clicked() {
+                sb.chains.push(floptle_core::SpringChainSpec { name: format!("Chain{}", sb.chains.len() + 1), ..Default::default() });
+                changed = true;
+            }
+            ui.label(egui::RichText::new("Colliders").strong()).on_hover_text("Spheres (or capsules) riding bones that every chain stays out of: the head, the neck, the shoulders");
+            let mut drop_collider = None;
+            for (i, c) in sb.colliders.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    pick(ui, (i, "collider"), "", &mut c.bone, &mut changed);
+                    ui.label("r");
+                    changed |= ui.add(egui::DragValue::new(&mut c.radius).range(0.0..=5.0).speed(0.005)).changed();
+                    if ui.small_button("🗑").clicked() {
+                        drop_collider = Some(i);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("offset");
+                    for v in c.offset.iter_mut() {
+                        changed |= ui.add(egui::DragValue::new(v).speed(0.005)).changed();
+                    }
+                    let mut capsule = c.end.is_some();
+                    if crate::responsive::check(ui, &mut capsule, "capsule").changed() {
+                        c.end = capsule.then_some([0.0, 0.1, 0.0]);
+                        changed = true;
+                    }
+                    if let Some(end) = c.end.as_mut() {
+                        for v in end.iter_mut() {
+                            changed |= ui.add(egui::DragValue::new(v).speed(0.005)).changed();
+                        }
+                    }
+                });
+            }
+            if let Some(i) = drop_collider {
+                sb.colliders.remove(i);
+                changed = true;
+            }
+            if ui.button("➕ Collider").clicked() {
+                sb.colliders.push(floptle_core::SpringColliderSpec { bone: String::new(), offset: [0.0; 3], radius: 0.1, end: None });
+                changed = true;
+            }
+        });
+        cmd.inspector_changed |= changed;
+    }
+
     /// The Particle System component, when the node has one.
     fn node_particles_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
         let cmd = &mut *self.cmd;
@@ -7914,6 +8041,7 @@ impl EditorTabViewer<'_> {
                 Particles(String),
                 ParticlesNew,
                 Audio,
+                Springs,
             }
             let mut items: Vec<(&str, String, Add)> = Vec::new();
             if !has_rb {
@@ -7962,6 +8090,10 @@ impl EditorTabViewer<'_> {
             }
             if world.get::<floptle_audio::AudioSource>(e).is_none() {
                 items.push(("Effects", "♪  Audio Source".into(), Add::Audio));
+            }
+            // Spring bones need a rig to swing.
+            if self.bone_names.contains_key(&e) && world.get::<floptle_core::SpringBones>(e).is_none() {
+                items.push(("Animation", "〰  Spring Bones".into(), Add::Springs));
             }
             // Particle System: attach an existing effect asset, or create a
             // starter effect (a small looping fountain to shape from).
@@ -8080,6 +8212,7 @@ impl EditorTabViewer<'_> {
                                     cmd.add_particles = Some((e, k.clone()))
                                 }
                                 Add::ParticlesNew => cmd.new_particles = Some(e),
+                                Add::Springs => cmd.add_springs = Some(e),
                                 Add::Audio => cmd.add_audio = Some(e),
                             }
                             picked = true;
@@ -8107,6 +8240,7 @@ impl EditorTabViewer<'_> {
         self.node_material_ui(ui, e);
         self.node_model_materials_ui(ui, e);
         self.node_particles_ui(ui, e);
+        self.node_springs_ui(ui, e);
         self.node_audio_ui(ui, e);
         self.node_rigidbody_ui(ui, e);
         self.node_celestial_ui(ui, e);
