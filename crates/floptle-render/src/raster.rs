@@ -15,6 +15,9 @@ use glam::Mat4;
 use crate::device::Gpu;
 use crate::mesh::{GpuMesh, MeshData, MeshId, TextureData, Vertex};
 
+mod texture_pool;
+pub use texture_pool::PoolLayer;
+
 /// How a texture is filtered (and, for `SmoothMipmaps`, minified). The default
 /// `Pixelated` is crisp nearest-neighbor — the engine's pixel-art look.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -496,6 +499,13 @@ pub(crate) fn make_surface_bind(
 
 /// The group(1) layout: six texture + sampler pairs (see [`SURFACE_SLOTS`]).
 pub(crate) fn surface_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    surface_bind_layout_of(device, wgpu::TextureViewDimension::D2, "raster-surface")
+}
+
+/// [`surface_bind_layout`] over textures of `dim`: `D2Array` is the layout a
+/// merged model whose slots wear different pictures binds, each picture a
+/// layer of a pooled array (`texture_pool`).
+pub(crate) fn surface_bind_layout_of(device: &wgpu::Device, dim: wgpu::TextureViewDimension, label: &str) -> wgpu::BindGroupLayout {
     let mut entries = Vec::with_capacity(SURFACE_SLOTS * 2);
     for i in 0..SURFACE_SLOTS as u32 {
         entries.push(wgpu::BindGroupLayoutEntry {
@@ -503,7 +513,7 @@ pub(crate) fn surface_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
+                view_dimension: dim,
                 multisampled: false,
             },
             count: None,
@@ -515,10 +525,7 @@ pub(crate) fn surface_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
             count: None,
         });
     }
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("raster-surface"),
-        entries: &entries,
-    })
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries: &entries })
 }
 
 /// The per-material properties that live in the surface EXTRAS store rather than
@@ -1125,6 +1132,9 @@ pub struct Raster {
     /// lanes: a table is several entries in a row, so it is shared whole or
     /// not at all, apart from the one-entry index above.
     slot_tables: HashMap<Vec<u32>, u32>,
+    /// Texture arrays for merged models whose slots wear different pictures
+    /// (`texture_pool`).
+    pools: texture_pool::Pools,
     mat_ext_dirty: bool,
     /// The project's retro artefacts, folded into every pushed material.
     /// See [`Raster::set_retro_defaults`].
@@ -2133,6 +2143,7 @@ impl Raster {
             mat_ext_cap,
             mat_ext_index: HashMap::new(),
             slot_tables: HashMap::new(),
+            pools: texture_pool::Pools::new(&gpu.device),
             mat_ext_dirty: false,
             retro_defaults: floptle_core::Retro::default(),
             refraction_default: floptle_core::Refraction::Solid,
@@ -2806,6 +2817,7 @@ impl Raster {
         let id = TexId(self.textures.len() as u32);
         self.textures.push(TexBind { bind, view, linear_view, sampling, _texture: texture, revision: Default::default() });
         self.mat_sets.insert(key, id);
+        self.pools.note_set(id, key);
         id
     }
 
@@ -2962,6 +2974,18 @@ impl Raster {
     /// `None` past [`MAX_SLOTS`] slots, a start that does not climb, or a
     /// vertex count an f32 cannot hold exactly.
     pub fn push_slot_table(&mut self, starts: &[u32], slots: &[MaterialParams]) -> Option<u32> {
+        self.push_slot_table_layered(starts, slots, None)
+    }
+
+    /// [`Self::push_slot_table`] for a model drawn through a texture-array
+    /// set ([`Self::array_set_for`]): each slot also names the layer each of
+    /// its six pictures is in, in the order the set binds them (base,
+    /// normal, roughness, metallic, occlusion, emissive). `None` writes
+    /// layer 0 everywhere, which is the table `push_slot_table` makes.
+    pub fn push_slot_table_layered(&mut self, starts: &[u32], slots: &[MaterialParams], layers: Option<&[[u8; SURFACE_SLOTS]]>) -> Option<u32> {
+        if layers.is_some_and(|l| l.len() != slots.len()) {
+            return None;
+        }
         if slots.is_empty() || slots.len() > MAX_SLOTS || starts.len() + 1 != slots.len() {
             return None;
         }
@@ -2979,8 +3003,8 @@ impl Raster {
         lanes.push([at(0), at(1), at(2), at(3)]);
         lanes.push([at(4), at(5), at(6), 0.0]);
         lanes.push([0.0; 4]);
-        for m in slots {
-            lanes.extend_from_slice(&slot_record(m));
+        for (i, m) in slots.iter().enumerate() {
+            lanes.extend_from_slice(&slot_record(m, layers.map_or([0; SURFACE_SLOTS], |l| l[i])));
         }
         let key: Vec<u32> = lanes.iter().flatten().map(|v| v.to_bits()).collect();
         if let Some(&t) = self.slot_tables.get(&key) {
@@ -4181,6 +4205,7 @@ impl Raster {
             // The cached copies are at the old quality.
             self.mesh_textures.clear();
             self.shared_textures.clear();
+            self.pools.forget_layers();
         }
     }
 
@@ -5591,12 +5616,22 @@ fn upload_texture_mips(gpu: &Gpu, t: &TextureData, gen_mips: bool, drop: u32) ->
         // data rather than colour. See `TexBind::linear_view`.
         view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
     });
+    write_mip_chain(gpu, &texture, 0, t, mip_count);
+    texture
+}
+
+/// Write `t` and, past level 0, its box-filtered mips into layer `layer` of
+/// `texture`, `mip_count` levels in all. One writer for a standalone picture
+/// and a layer of a pooled array, so the two hold the same bytes.
+pub(crate) fn write_mip_chain(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, t: &TextureData, mip_count: u32) {
+    let (w0, h0) = (t.width.max(1), t.height.max(1));
+    let gen_mips = mip_count > 1;
     let write = |level: u32, w: u32, h: u32, pixels: &[u8]| {
         gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &texture,
+                texture,
                 mip_level: level,
-                origin: wgpu::Origin3d::ZERO,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
                 aspect: wgpu::TextureAspect::All,
             },
             pixels,
@@ -5631,7 +5666,6 @@ fn upload_texture_mips(gpu: &Gpu, t: &TextureData, gen_mips: bool, drop: u32) ->
             ch = nh;
         }
     }
-    texture
 }
 
 /// Pack a model matrix + a plain matte color into an `InstanceRaw`.
@@ -5711,8 +5745,11 @@ pub fn is_slotted(raw: &InstanceRaw) -> bool {
 
 /// One slot's eight lanes in a slot table: the six material lanes an instance
 /// of that material would carry (exactly what [`instance_of_mat`] packs),
-/// then its extras index and unlit flag, then a spare.
-fn slot_record(m: &MaterialParams) -> [[f32; 4]; 8] {
+/// then its extras index, unlit flag and the layers of its base and normal
+/// pictures, then the layers of its other four (zero for a model drawn
+/// through ordinary 2D textures).
+fn slot_record(m: &MaterialParams, layers: [u8; SURFACE_SLOTS]) -> [[f32; 4]; 8] {
+    let l = layers.map(f32::from);
     let raw = instance_of_mat(Mat4::IDENTITY, m);
     [
         raw.color,
@@ -5721,8 +5758,8 @@ fn slot_record(m: &MaterialParams) -> [[f32; 4]; 8] {
         [raw.params[0], raw.params[1], 0.0, raw.params[3]],
         raw.rim,
         raw.tile,
-        [m.ext_index as f32, if m.unlit { 1.0 } else { 0.0 }, 0.0, 0.0],
-        [0.0; 4],
+        [m.ext_index as f32, if m.unlit { 1.0 } else { 0.0 }, l[0], l[1]],
+        [l[2], l[3], l[4], l[5]],
     ]
 }
 
