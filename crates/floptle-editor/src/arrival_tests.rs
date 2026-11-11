@@ -830,12 +830,17 @@ fn a_terrain_checkpoint_copies_a_slot_and_restoring_it_drops_later_digs() {
     floptle_vfs::write(slot.join("world.7.cfield"), b"first dig").unwrap();
     floptle_vfs::write(slot.join("world.7.meta"), b"m").unwrap();
     // A frame: the tick, then the terrain's own half (residency, the
-    // background checkpoint that finishes the copy).
-    for _ in 0..12 {
+    // background checkpoint that finishes the copy). The files copy on a
+    // thread, so frames run until the handle says done, up to a deadline a
+    // slow runner cannot reach: twelve frames passed here and failed in CI.
+    let mut said: Vec<String> = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline && !said.iter().any(|m| m.starts_with("copied files=")) {
         ed.play_step(1.0 / 60.0, true);
         ed.pump_world_streaming();
+        said.extend(ed.script_host.drain_logs().into_iter().map(|l| l.msg));
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let said: Vec<String> = ed.script_host.drain_logs().into_iter().map(|l| l.msg).collect();
     let line = |p: &str| said.iter().find(|m| m.starts_with(p)).cloned().unwrap_or_default();
     assert_eq!(line("asked done="), "asked done=false", "a copy from the slot in use did not wait for the engine: {said:?}");
     assert!(line("restore in world ok=").starts_with("restore in world ok=false"), "a restore into the slot in use went through: {said:?}");
