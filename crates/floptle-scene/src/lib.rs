@@ -169,6 +169,10 @@ pub struct NodeDoc {
     /// See [`floptle_core::ParticleSystem`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub particles: Option<ParticleSystemDoc>,
+    /// Spring bones on this rigged mesh (`None` = none).
+    /// See [`floptle_core::SpringBones`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spring_bones: Option<SpringBonesDoc>,
     /// A stable identity for this node **within this scene**, allocated on save
     /// and never reused. What [`NodeDoc::parent_id`] points at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -359,6 +363,124 @@ impl ReplicatedDoc {
             interp: r.interp,
             interp_delay: r.interp_delay,
             always_relevant: r.always_relevant,
+        }
+    }
+}
+
+/// Serializable spring bones, mirroring [`floptle_core::SpringBones`].
+///
+/// `version` is 1. It is written so a later change to what a field means
+/// can be told apart on load, as every format here should be able to.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SpringBonesDoc {
+    #[serde(default = "spring_doc_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub chains: Vec<SpringChainDoc>,
+    #[serde(default)]
+    pub colliders: Vec<SpringColliderDoc>,
+    #[serde(default = "spring_default_gravity")]
+    pub gravity: [f32; 3],
+}
+
+fn spring_doc_version() -> u32 {
+    1
+}
+
+fn spring_default_gravity() -> [f32; 3] {
+    [0.0, -9.81, 0.0]
+}
+
+/// One chain of [`SpringBonesDoc`]; see [`floptle_core::SpringChainSpec`].
+/// A field left out takes the component's default.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct SpringChainDoc {
+    pub name: String,
+    pub root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+    pub length: u8,
+    pub stiffness: f32,
+    pub gravity: f32,
+    pub drag: f32,
+    pub max_angle: f32,
+    pub hit_radius: f32,
+    pub enabled: bool,
+}
+
+impl Default for SpringChainDoc {
+    fn default() -> Self {
+        Self::from_spec(&floptle_core::SpringChainSpec::default())
+    }
+}
+
+impl SpringChainDoc {
+    fn from_spec(c: &floptle_core::SpringChainSpec) -> Self {
+        Self {
+            name: c.name.clone(),
+            root: c.root.clone(),
+            end: c.end.clone(),
+            length: c.length,
+            stiffness: c.stiffness,
+            gravity: c.gravity,
+            drag: c.drag,
+            max_angle: c.max_angle,
+            hit_radius: c.hit_radius,
+            enabled: c.enabled,
+        }
+    }
+}
+
+/// One collider of [`SpringBonesDoc`]; see [`floptle_core::SpringColliderSpec`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SpringColliderDoc {
+    pub bone: String,
+    #[serde(default)]
+    pub offset: [f32; 3],
+    pub radius: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<[f32; 3]>,
+}
+
+impl SpringBonesDoc {
+    pub fn to_component(&self) -> floptle_core::SpringBones {
+        floptle_core::SpringBones {
+            chains: self
+                .chains
+                .iter()
+                .map(|c| floptle_core::SpringChainSpec {
+                    name: c.name.clone(),
+                    root: c.root.clone(),
+                    end: c.end.clone(),
+                    length: c.length,
+                    stiffness: c.stiffness,
+                    gravity: c.gravity,
+                    drag: c.drag,
+                    max_angle: c.max_angle,
+                    hit_radius: c.hit_radius,
+                    enabled: c.enabled,
+                })
+                .collect(),
+            colliders: self
+                .colliders
+                .iter()
+                .map(|c| floptle_core::SpringColliderSpec { bone: c.bone.clone(), offset: c.offset, radius: c.radius, end: c.end })
+                .collect(),
+            gravity: self.gravity,
+        }
+    }
+
+    pub fn from_component(s: &floptle_core::SpringBones) -> Self {
+        Self {
+            version: spring_doc_version(),
+            chains: s.chains.iter().map(SpringChainDoc::from_spec).collect(),
+            colliders: s
+                .colliders
+                .iter()
+                .map(|c| SpringColliderDoc { bone: c.bone.clone(), offset: c.offset, radius: c.radius, end: c.end })
+                .collect(),
+            gravity: s.gravity,
         }
     }
 }
@@ -4814,6 +4936,9 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if let Some(p) = &node.particles {
         world.insert(e, p.to_component());
     }
+    if let Some(s) = &node.spring_bones {
+        world.insert(e, s.to_component());
+    }
     if let Some(n) = &node.net {
         world.insert(e, n.to_component());
     }
@@ -5087,6 +5212,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let particles = world
             .get::<floptle_core::ParticleSystem>(e)
             .map(ParticleSystemDoc::from_component);
+        let spring_bones = world.get::<floptle_core::SpringBones>(e).map(SpringBonesDoc::from_component);
         let net = world.get::<floptle_core::Replicated>(e).map(ReplicatedDoc::from_component);
         let ui_layer = world.get::<floptle_ui::UiLayer>(e).copied();
         let ui = world.get::<floptle_ui::ElementSpec>(e).cloned();
@@ -5182,6 +5308,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             surface_friction,
             anim_controller,
             particles,
+            spring_bones,
             parent,
             attachment,
             net,
@@ -5848,6 +5975,7 @@ mod tests {
             },
             nodes: vec![
                 NodeDoc {
+                    spring_bones: None,
                     camera_2d: None,
                     joint: None,
                     sort_mode: None,
@@ -6012,6 +6140,7 @@ mod tests {
                     light_height: None,
                 },
                 NodeDoc {
+                    spring_bones: None,
                     camera_2d: None,
                     joint: None,
                     sort_mode: None,
@@ -6066,6 +6195,7 @@ mod tests {
                     light_height: None,
                 },
                 NodeDoc {
+                    spring_bones: None,
                     camera_2d: None,
                     joint: None,
                     sort_mode: None,
@@ -6117,6 +6247,7 @@ mod tests {
                     light_height: None,
                 },
                 NodeDoc {
+                    spring_bones: None,
                     camera_2d: None,
                     joint: None,
                     sort_mode: None,
@@ -7178,5 +7309,32 @@ mod camera_stack_doc_tests {
                 "post_after {want} did not survive: {text}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod spring_bones_doc_tests {
+    use super::*;
+
+    /// **A node's spring bones survive a save and a load**, and a chain
+    /// written with only its name and root takes every other value from the
+    /// component's defaults: what a hand-written scene or a package gives.
+    #[test]
+    fn spring_bones_round_trip_and_fill_in_defaults() {
+        let text = r#"(name: "s", nodes: [(name: "Crew", matter: Mesh(asset_path: "crew.glb"), spring_bones: Some((chains: [(name: "Ponytail", root: "Hair_root")], colliders: [(bone: "Head", radius: 0.11), (bone: "Neck", offset: (0.0, 0.02, 0.0), radius: 0.05, end: Some((0.0, 0.12, 0.0)))])))])"#;
+        let doc = from_ron(text).expect("the scene parses");
+        let s = doc.nodes[0].spring_bones.clone().expect("the spring bones loaded");
+        assert_eq!(s.version, 1);
+        assert_eq!(s.gravity, [0.0, -9.81, 0.0]);
+        let c = s.to_component();
+        let want = floptle_core::SpringChainSpec { name: "Ponytail".into(), root: "Hair_root".into(), ..Default::default() };
+        assert_eq!(c.chains, vec![want]);
+        assert_eq!(c.colliders[1].end, Some([0.0, 0.12, 0.0]));
+        let mut world = floptle_core::World::default();
+        let e = world.spawn();
+        world.insert(e, c.clone());
+        let back = SpringBonesDoc::from_component(world.get::<floptle_core::SpringBones>(e).unwrap());
+        let again = ron::from_str::<SpringBonesDoc>(&ron::to_string(&back).unwrap()).unwrap();
+        assert_eq!(again.to_component(), c, "the spring bones changed through a save and a load");
     }
 }

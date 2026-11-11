@@ -158,6 +158,8 @@ impl Editor {
             .world
             .get::<floptle_core::ParticleSystem>(e)
             .map(floptle_scene::ParticleSystemDoc::from_component);
+        let spring_bones =
+            self.world.get::<floptle_core::SpringBones>(e).map(floptle_scene::SpringBonesDoc::from_component);
         let net = self
             .world
             .get::<floptle_core::Replicated>(e)
@@ -208,6 +210,7 @@ impl Editor {
         let shadow_2d =
             self.world.get::<floptle_core::Shadow2D>(e).map(|s| s.0.name().to_string());
         Some(NodeDoc {
+            spring_bones,
             id: None,
             parent_id: None,
             // …and how it follows, so a duplicated 2D camera keeps its target,
@@ -379,6 +382,9 @@ impl Editor {
         if let Some(p) = &node.particles {
             self.world.insert(e, p.to_component());
         }
+        if let Some(s) = &node.spring_bones {
+            self.world.insert(e, s.to_component());
+        }
         if let Some(n) = &node.net {
             self.world.insert(e, n.to_component());
         }
@@ -487,6 +493,7 @@ impl Editor {
             surface_friction: _,
             anim_controller,
             particles,
+            spring_bones,
             id,
             parent_id,
             parent,
@@ -532,6 +539,7 @@ impl Editor {
         self.world.remove::<floptle_core::CastShadow>(e);
         self.world.remove::<floptle_core::AnimController>(e);
         self.world.remove::<floptle_core::ParticleSystem>(e);
+        self.world.remove::<floptle_core::SpringBones>(e);
         self.world.remove::<floptle_core::Layer>(e);
         self.world.remove::<floptle_core::Tags>(e);
         self.world.remove::<floptle_core::camera2d::Camera2D>(e);
@@ -616,6 +624,7 @@ impl Editor {
             None => TransformDoc { translation: [pos.x, pos.y, pos.z], ..Default::default() },
         };
         let node = NodeDoc {
+            spring_bones: None,
             id: None,
             parent_id: None,
             camera_2d: None,
@@ -867,6 +876,7 @@ impl Editor {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "mesh".into());
             let node = NodeDoc {
+                spring_bones: None,
                 id: None,
                 parent_id: None,
                 camera_2d: None,

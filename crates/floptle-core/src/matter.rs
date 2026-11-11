@@ -616,6 +616,75 @@ pub struct BoneAttach {
     pub offset: crate::transform::Transform,
 }
 
+/// **Spring bones** on a rigged `Matter::Mesh`: chains of bones that follow
+/// their animated pose loosely (hair, a ponytail, a cable, an antenna, a
+/// strap), hanging under gravity, swinging as the body turns or speeds up,
+/// and kept out of colliders riding other bones (the head, the neck). Run
+/// each frame after the animation and IK, before the skin is drawn; nothing
+/// is asked of scripts per frame. See `floptle_anim::spring`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpringBones {
+    pub chains: Vec<SpringChainSpec>,
+    pub colliders: Vec<SpringColliderSpec>,
+    /// The world's gravity as the chains feel it, m/s² (a moon's is weaker).
+    pub gravity: [f32; 3],
+}
+
+impl Default for SpringBones {
+    fn default() -> Self {
+        Self { chains: Vec::new(), colliders: Vec::new(), gravity: [0.0, -9.81, 0.0] }
+    }
+}
+
+/// One chain: from `root` down to `end`, or `length` bones down through
+/// each bone's first child when `end` is `None` (0 is as far as it goes).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpringChainSpec {
+    /// What scripts call it (`spring:setEnabled("Ponytail", false)`).
+    pub name: String,
+    pub root: String,
+    pub end: Option<String>,
+    pub length: u8,
+    /// Pull back toward the animated pose, cycles a second: 0 hangs free.
+    pub stiffness: f32,
+    /// Share of the world's gravity it feels.
+    pub gravity: f32,
+    /// Share of its speed lost each sixtieth of a second, 0..1.
+    pub drag: f32,
+    /// Furthest a segment turns from its animated direction, degrees.
+    pub max_angle: f32,
+    /// The chain's thickness against colliders, metres.
+    pub hit_radius: f32,
+    pub enabled: bool,
+}
+
+impl Default for SpringChainSpec {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            root: String::new(),
+            end: None,
+            length: 0,
+            stiffness: 1.5,
+            gravity: 1.0,
+            drag: 0.2,
+            max_angle: 60.0,
+            hit_radius: 0.02,
+            enabled: true,
+        }
+    }
+}
+
+/// A sphere riding `bone` at `offset` (its space), or a capsule from
+/// `offset` to `end`, that every chain stays out of.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpringColliderSpec {
+    pub bone: String,
+    pub offset: [f32; 3],
+    pub radius: f32,
+    pub end: Option<[f32; 3]>,
+}
+
 /// A procedural primitive shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shape {

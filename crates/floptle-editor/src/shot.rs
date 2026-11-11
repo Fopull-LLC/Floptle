@@ -1319,6 +1319,7 @@ mod tests {
 
         fn blank_node() -> floptle_scene::NodeDoc {
             floptle_scene::NodeDoc {
+                spring_bones: None,
                 name: String::new(),
                 transform: Default::default(),
                 matter: floptle_scene::MatterDoc::Empty,

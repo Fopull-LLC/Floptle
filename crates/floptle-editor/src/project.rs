@@ -2910,6 +2910,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
     let up = right.cross(fwd);
     let rot = Quat::from_mat3(&Mat3::from_cols(right, up, -fwd));
     floptle_scene::NodeDoc {
+        spring_bones: None,
         camera_2d: None,
         joint: None,
         sort_mode: None,

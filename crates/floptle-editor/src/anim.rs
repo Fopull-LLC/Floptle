@@ -24,7 +24,7 @@ use floptle_anim::{
     Clip, Controller, Interp, Layer, NodeChannels, PropValue, PropertyTrack, SkelNode, Skeleton,
     State, Track, TransformTRS,
 };
-use floptle_core::math::{Mat3, Mat4, Quat, Vec3};
+use floptle_core::math::{DVec3, Mat3, Mat4, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::{AnimController, BoneAttach, Entity, Matter, Name, World};
 use floptle_scene::{
@@ -254,6 +254,26 @@ pub struct AnimInstance {
     pose_fresh: bool,
     /// Scratch: the rig path's final local pose, script changes included.
     local: Vec<floptle_anim::TransformTRS>,
+    /// Its spring bones, bound to its skeleton ([`advance_springs`]).
+    springs: Option<SpringRuntime>,
+    /// The rig path posed it this frame, so its springs may step.
+    posed: bool,
+}
+
+/// A rigged instance's spring bones (`floptle_core::SpringBones`), bound to
+/// its skeleton, and how its node moved last frame.
+pub struct SpringRuntime {
+    spec: floptle_core::SpringBones,
+    pub set: floptle_anim::spring::SpringSet,
+    /// The chains' names, in the set's order, for scripts.
+    pub names: Vec<String>,
+    /// Where the node was and how it was turned (with its rig offset) the
+    /// last frame its springs stepped: `None` starts the chains afresh.
+    last: Option<(DVec3, Quat)>,
+    /// Its velocity then, m/s, carry taken out.
+    vel: DVec3,
+    /// Scratch: the skeleton-space matrices the solver reads and writes.
+    skel_world: Vec<Mat4>,
 }
 
 /// Everything animation the editor owns. One field on `Editor`.
@@ -314,7 +334,7 @@ pub struct AnimSystem {
 }
 
 /// A script's say over one animator.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct AnimOverride {
     /// `anim:setEnabled(false)`: no advance and no pose until switched back on.
     pub enabled: bool,
@@ -322,11 +342,17 @@ pub struct AnimOverride {
     /// `anim:holdPose(true)`: a frame that writes nothing to the pose keeps
     /// the writes of the last one that did.
     pub hold_pose: bool,
+    /// Spring-bones chains a script switched off, by name.
+    pub springs_off: HashSet<String>,
+    /// `anim:setSpringGravity`: the gravity the chains feel instead.
+    pub spring_gravity: Option<[f32; 3]>,
+    /// `anim:resetSprings` asks not yet carried out (`None`: every chain).
+    pub spring_resets: Vec<Option<String>>,
 }
 
 impl Default for AnimOverride {
     fn default() -> Self {
-        Self { enabled: true, culling: None, hold_pose: false }
+        Self { enabled: true, culling: None, hold_pose: false, springs_off: HashSet::new(), spring_gravity: None, spring_resets: Vec::new() }
     }
 }
 
@@ -1216,6 +1242,8 @@ pub fn bind_entity(
                 pose_ops: Vec::new(),
                 pose_fresh: false,
                 local: Vec::new(),
+                springs: None,
+                posed: false,
             })
         }
         // Controller on anything else: animate the node + its descendants.
@@ -1252,6 +1280,8 @@ pub fn bind_entity(
                 pose_ops: Vec::new(),
                 pose_fresh: false,
                 local: Vec::new(),
+                springs: None,
+                posed: false,
             })
         }
         // No controller, but a rigged mesh: embedded clips, "Idle" (or the
@@ -1292,6 +1322,8 @@ pub fn bind_entity(
                 pose_ops: Vec::new(),
                 pose_fresh: false,
                 local: Vec::new(),
+                springs: None,
+                posed: false,
             })
         }
         (None, None) => None,
@@ -1406,7 +1438,9 @@ pub fn advance_animators(
     let mut fired = Vec::new();
     let (mut counted, mut culled) = (0usize, 0usize);
     for e in wanted {
-        let ov = system.overrides.get(&e).copied().unwrap_or_default();
+        // The two small switches only: the override also holds spring state
+        // that is not worth copying per animator per frame.
+        let (ov_enabled, ov_culling) = system.overrides.get(&e).map_or((true, None), |o| (o.enabled, o.culling));
         let Some(inst) = system.instances.get_mut(&e) else {
             // A wanted entity with no instance never got bound — diagnose why.
             diagnose_anim(system, world, mesh_registry, e, DiagBind::Missing);
@@ -1414,7 +1448,7 @@ pub fn advance_animators(
         };
         counted += 1;
         // Switched off by a script: nothing at all, and the last pose stays.
-        if !ov.enabled {
+        if !ov_enabled {
             culled += 1;
             continue;
         }
@@ -1424,7 +1458,7 @@ pub fn advance_animators(
         };
         let mode = match cull {
             CullBy::Nothing => floptle_scene::AnimCullingDoc::Always,
-            CullBy::Camera(_) => ov.culling.unwrap_or(inst.culling),
+            CullBy::Camera(_) => ov_culling.unwrap_or(inst.culling),
         };
         let view = match cull {
             CullBy::Camera(v) => v,
@@ -1567,6 +1601,13 @@ pub fn apply_instance(
                 floptle_anim::ik::apply(&rig.skeleton, &mut inst.local, &ops);
             }
             rig.skeleton.world_matrices(&inst.local, &mut inst.world);
+            // The spring bones where they last swung to, laid on this pose
+            // now: scripts reading bones this frame see what is drawn. The
+            // frame's step comes after physics (`advance_springs`).
+            if let Some(rt) = inst.springs.as_ref() {
+                rt.set.apply(&rig.skeleton, &mut inst.local, &mut inst.world);
+            }
+            inst.posed = true;
             // Same placement offset as rest_world so pose and rest agree.
             for m in inst.world.iter_mut() {
                 *m = rig.offset * *m;
@@ -1613,6 +1654,200 @@ pub fn apply_instance(
                 }
             }
         }
+    }
+    for (key, msg) in warn {
+        if system.warned.insert(key) {
+            system.warnings.push(msg);
+        }
+    }
+}
+
+/// Bind `spec` to `skel`: chain and collider bones by name, warnings for
+/// the names it lacks (that chain is left out).
+fn bind_springs(spec: &floptle_core::SpringBones, skel: &floptle_anim::Skeleton, warn: &mut Vec<(String, String)>) -> SpringRuntime {
+    use floptle_anim::spring::{SpringChain, SpringCollider, SpringParams, SpringSet};
+    let first_child = |i: usize| skel.nodes.iter().enumerate().skip(i + 1).find(|(_, n)| n.parent == Some(i)).map(|(j, _)| j);
+    let mut chains = Vec::new();
+    let mut names = Vec::new();
+    for c in &spec.chains {
+        let mut bones = Vec::new();
+        match skel.index_of(&c.root) {
+            None => warn.push((format!("spring:{}:{}", c.name, c.root), format!("spring bones: chain \"{}\" names a root bone \"{}\" this model does not have, so it does not move", c.name, c.root))),
+            Some(root) => match &c.end {
+                Some(end) => match skel.index_of(end) {
+                    Some(mut at) => {
+                        let mut up = vec![at];
+                        while at != root {
+                            match skel.nodes[at].parent {
+                                Some(p) => {
+                                    at = p;
+                                    up.push(p);
+                                }
+                                None => {
+                                    up.clear();
+                                    break;
+                                }
+                            }
+                        }
+                        if up.is_empty() {
+                            warn.push((format!("spring:{}:{end}", c.name), format!("spring bones: chain \"{}\" ends at \"{end}\", which is not below its root \"{}\"", c.name, c.root)));
+                        }
+                        up.reverse();
+                        bones = up;
+                    }
+                    None => warn.push((format!("spring:{}:{end}", c.name), format!("spring bones: chain \"{}\" names an end bone \"{end}\" this model does not have", c.name))),
+                },
+                None => {
+                    bones.push(root);
+                    let mut at = root;
+                    while c.length == 0 || bones.len() <= c.length as usize {
+                        match first_child(at) {
+                            Some(ch) => {
+                                bones.push(ch);
+                                at = ch;
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            },
+        }
+        let params = SpringParams {
+            stiffness: c.stiffness,
+            gravity: c.gravity,
+            drag: c.drag,
+            max_angle: c.max_angle.to_radians(),
+            hit_radius: c.hit_radius,
+        };
+        chains.push(SpringChain { bones, params, enabled: c.enabled });
+        names.push(c.name.clone());
+    }
+    let colliders = spec
+        .colliders
+        .iter()
+        .filter_map(|c| match skel.index_of(&c.bone) {
+            Some(bone) => Some(SpringCollider { bone, offset: c.offset.into(), radius: c.radius, end: c.end.map(Into::into) }),
+            None => {
+                warn.push((format!("spring:collider:{}", c.bone), format!("spring bones: a collider rides \"{}\", a bone this model does not have", c.bone)));
+                None
+            }
+        })
+        .collect();
+    SpringRuntime { spec: spec.clone(), set: SpringSet::new(chains, colliders), names, last: None, vel: DVec3::ZERO, skel_world: Vec::new() }
+}
+
+/// A jump bigger than this in a frame is a teleport, not motion: the chains
+/// start afresh rather than whip across it.
+fn spring_teleport(dt: f32) -> f64 {
+    (60.0 * dt as f64).max(2.0)
+}
+
+/// **Step every rigged model's spring bones** (`floptle_core::SpringBones`)
+/// and lay them into this frame's poses: after physics has moved the bodies
+/// and the late script pose changes have landed, before bone attachments
+/// ride the bones and before the skin is drawn. Only models the animator
+/// posed this frame step; one that was culled or switched off starts its
+/// chains afresh when it comes back. The node's turn swings the chains, and
+/// its acceleration is felt (a steady speed, or a planet's rails carrying
+/// it, is not).
+pub fn advance_springs(
+    system: &mut AnimSystem,
+    world: &World,
+    mesh_registry: &HashMap<String, MeshAsset>,
+    dt: f32,
+    carry: &HashMap<u32, [f64; 3]>,
+) {
+    let mut warn: Vec<(String, String)> = Vec::new();
+    let AnimSystem { instances, poses, overrides, .. } = system;
+    for (&e, inst) in instances.iter_mut() {
+        let posed = std::mem::take(&mut inst.posed);
+        let Some(spec) = world.get::<floptle_core::SpringBones>(e) else {
+            inst.springs = None;
+            continue;
+        };
+        if !matches!(inst.binding, AnimBinding::Rig) {
+            continue;
+        }
+        let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(e) else { continue };
+        let Some(rig) = mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref()) else { continue };
+        if inst.springs.as_ref().is_none_or(|r| r.spec != *spec) {
+            inst.springs = Some(bind_springs(spec, &rig.skeleton, &mut warn));
+        }
+        let Some(rt) = inst.springs.as_mut() else { continue };
+        // What scripts asked: chains off, a world's gravity, resets.
+        let mut gravity_world = spec.gravity;
+        if let Some(o) = overrides.get_mut(&e) {
+            for (i, name) in rt.names.iter().enumerate() {
+                let authored = spec.chains.get(i).is_none_or(|c| c.enabled);
+                rt.set.set_enabled(i, authored && !o.springs_off.contains(name));
+            }
+            for off in &o.springs_off {
+                if !rt.names.contains(off) {
+                    warn.push((format!("spring:off:{}:{off}", e.index()), format!("anim:setSpringEnabled: this model's spring bones have no chain \"{off}\" (it has {:?})", rt.names)));
+                }
+            }
+            if let Some(g) = o.spring_gravity {
+                gravity_world = g;
+            }
+            for r in std::mem::take(&mut o.spring_resets) {
+                match r {
+                    None => rt.set.reset(None),
+                    Some(name) => match rt.names.iter().position(|n| *n == name) {
+                        Some(i) => rt.set.reset(Some(i)),
+                        None => warn.push((format!("spring:reset:{}:{name}", e.index()), format!("anim:resetSprings: this model's spring bones have no chain \"{name}\""))),
+                    },
+                }
+            }
+        }
+        if !posed || inst.local.len() != rig.skeleton.len() {
+            rt.last = None;
+            continue;
+        }
+        // The node's frame with its rig offset: model space for the solver.
+        let m = floptle_core::world_transform(world, e).world_matrix() * rig.offset.as_dmat4();
+        let (scale, rot, pos) = m.to_scale_rotation_translation();
+        let rot = rot.as_quat().normalize();
+        let scale = (scale.max_element() as f32).max(1e-6);
+        let rides = {
+            let mut at = Some(e);
+            let mut found = None;
+            while let Some(n) = at {
+                if let Some(c) = carry.get(&n.index()) {
+                    found = Some(DVec3::from_array(*c));
+                    break;
+                }
+                at = world.get::<floptle_core::Parent>(n).map(|p| p.0);
+            }
+            found.unwrap_or(DVec3::ZERO)
+        };
+        match rt.last {
+            Some((was, was_rot)) if dt > 0.0 => {
+                let moved = pos - was - rides;
+                if moved.length() > spring_teleport(dt) {
+                    rt.set.reset(None);
+                    rt.vel = DVec3::ZERO;
+                } else {
+                    let vel = moved / dt as f64;
+                    let accel = ((vel - rt.vel) / dt as f64).as_vec3();
+                    rt.vel = vel;
+                    // A hitch is not a shove: the felt acceleration is capped.
+                    let accel = accel.clamp_length_max(200.0);
+                    rt.set.feel(rot.inverse() * was_rot, rot.inverse() * accel / scale);
+                }
+            }
+            Some(_) => rt.set.feel(Quat::IDENTITY, Vec3::ZERO),
+            None => {
+                rt.set.reset(None);
+                rt.vel = DVec3::ZERO;
+            }
+        }
+        rt.last = Some((pos, rot));
+        let gravity = rot.inverse() * Vec3::from(gravity_world) / scale;
+        rig.skeleton.world_matrices(&inst.local, &mut rt.skel_world);
+        rt.set.step(&rig.skeleton, &mut inst.local, &mut rt.skel_world, gravity, dt);
+        inst.world.clear();
+        inst.world.extend(rt.skel_world.iter().map(|w| rig.offset * *w));
+        poses.insert(e, inst.world.clone());
     }
     for (key, msg) in warn {
         if system.warned.insert(key) {
@@ -2056,6 +2291,29 @@ fn apply_commands_keeping_pose_ops(
                 }
                 continue;
             }
+            AnimCmd::SpringEnabled { chain, on } => {
+                if let Some(e) = world.entity_at(eid) {
+                    let o = system.overrides.entry(e).or_default();
+                    if on {
+                        o.springs_off.remove(&chain);
+                    } else {
+                        o.springs_off.insert(chain);
+                    }
+                }
+                continue;
+            }
+            AnimCmd::SpringReset(chain) => {
+                if let Some(e) = world.entity_at(eid) {
+                    system.overrides.entry(e).or_default().spring_resets.push(chain);
+                }
+                continue;
+            }
+            AnimCmd::SpringGravity(g) => {
+                if let Some(e) = world.entity_at(eid) {
+                    system.overrides.entry(e).or_default().spring_gravity = Some(g);
+                }
+                continue;
+            }
             AnimCmd::HoldPose(on) => {
                 if let Some(e) = world.entity_at(eid) {
                     system.overrides.entry(e).or_default().hold_pose = on;
@@ -2143,7 +2401,12 @@ fn apply_commands_keeping_pose_ops(
                 }
                 inst.pose_ops.push(op)
             }
-            AnimCmd::SetEnabled(_) | AnimCmd::SetCulling(_) | AnimCmd::HoldPose(_) => {}
+            AnimCmd::SetEnabled(_)
+            | AnimCmd::SetCulling(_)
+            | AnimCmd::HoldPose(_)
+            | AnimCmd::SpringEnabled { .. }
+            | AnimCmd::SpringReset(_)
+            | AnimCmd::SpringGravity(_) => {}
         }
     }
     for (key, msg) in warn {

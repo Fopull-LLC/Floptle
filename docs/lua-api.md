@@ -43,7 +43,7 @@ each group, and meant to be searched.
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
 - [components — getcomponent](#components--getcomponent) — 120
-- [animation — node:animator](#animation--nodeanimator) — 29
+- [animation — node:animator](#animation--nodeanimator) — 32
 - [particles — effects from script](#particles--effects-from-script) — 16
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 36
 - [assets](#assets) — 19
@@ -4496,6 +4496,10 @@ anim:play("Run" [, fade [, layer]]) — transition to a state. The controller su
 
 anim:reach("Hand", target [, { pole = vec3, weight = 1, root = "UpperArm", mid = "Forearm" }]) — two-bone IK: bend the tip's parent and grandparent (or the named root and mid) so the tip lands on a world-space point, for this frame only. pole is a world point the middle joint bends toward: in front of a knee, behind an elbow. A target out of reach straightens the limb toward it. Runs after the clips and the bone writes. Call it from update or from lateUpdate: from lateUpdate it is solved the same frame against where the camera pass left everything, which is where hands that hold something under the camera belong.
 
+### `anim:resetSprings`
+
+anim:resetSprings([chain]) — start a spring-bones chain (every chain, with no name) from its animated pose with no speed: after moving the model somewhere new, so its hair does not whip across the jump. A jump bigger than a couple of metres in a frame resets on its own. Spring bones are the node's SpringBones component (Inspector ▸ Spring Bones, or `spring_bones` in a scene): chains of bones, each from a root bone down, that hang under gravity, swing as the body turns or speeds up, spring back toward the pose and stay out of colliders riding other bones (the head, the neck). They run each frame after the clips, bone writes and IK, so :boneWorld and things attached to a bone see them swung; a steady speed (a rover, a planet's rails) leaves them hanging, only turning and speeding up swing them.
+
 ### `anim:restart`
 
 anim:restart("Attack" [, fade [, layer]]) — like play, but re-enters even if that state is already playing (re-trigger a one-shot).
@@ -4535,6 +4539,14 @@ anim:setParam("speed", 3.2) — set a number the controller's blend states read.
 ### `anim:setSpeed`
 
 anim:setSpeed(2 [, layer]) — playback speed: with no layer, the whole animator's; with a layer, that layer's own rate on top of it, so a punch keeps its speed while the run under it is sped up to match the ground.
+
+### `anim:setSpringEnabled`
+
+anim:setSpringEnabled(chain, on) — switch one spring-bones chain off (it follows its animated pose exactly: hair under a helmet) or back on, from its pose with no swing. chain is the name the chain was given. A name the model's spring bones do not have is a Console line naming the ones it has.
+
+### `anim:setSpringGravity`
+
+anim:setSpringGravity(x, y, z) — the gravity this model's spring bones feel, in m/s² in the world (default (0, -9.81, 0), or what the component names): a moon's weaker pull, or toward a planet's centre where `down` is not -Y. Takes effect the next frame and lasts until set again.
 
 ### `anim:state`
 

@@ -7844,6 +7844,50 @@ fn install_anim_pose_methods(
         )?;
     }
     {
+        // anim:setSpringEnabled(chain, on) — one spring-bones chain off (it
+        // follows its pose exactly, as hair under a helmet) or back on, from
+        // its pose with no swing.
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "setSpringEnabled",
+            lua.create_function(move |_, (this, chain, on): (Table, String, bool)| {
+                let e: u32 = this.raw_get("__id")?;
+                queue(&cmds, e, AnimCmd::SpringEnabled { chain, on });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // anim:resetSprings([chain]) — start the chain (every chain with no
+        // name) from its pose with no speed: after moving the model somewhere
+        // new, so its hair does not whip across the jump.
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "resetSprings",
+            lua.create_function(move |_, (this, chain): (Table, Option<String>)| {
+                let e: u32 = this.raw_get("__id")?;
+                queue(&cmds, e, AnimCmd::SpringReset(chain));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // anim:setSpringGravity(x, y, z) — the gravity its spring bones feel,
+        // m/s², over the component's: a world's own.
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "setSpringGravity",
+            lua.create_function(move |_, (this, x, y, z): (Table, f32, f32, f32)| {
+                let e: u32 = this.raw_get("__id")?;
+                if !(x.is_finite() && y.is_finite() && z.is_finite()) {
+                    return Err(mlua::Error::runtime("anim:setSpringGravity takes three finite numbers"));
+                }
+                queue(&cmds, e, AnimCmd::SpringGravity([x, y, z]));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
         // anim:holdPose(on) — keep the last pose a script wrote while a frame
         // writes none, instead of falling back to the animator's pose.
         let cmds = shared.anim_commands.clone();

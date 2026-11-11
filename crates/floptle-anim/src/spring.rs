@@ -161,6 +161,27 @@ impl SpringSet {
         self.chains.get(i).and_then(|c| c.tips.last().copied())
     }
 
+    /// Lay the chains where they are now into `pose` (and `world`, its
+    /// model-space matrices) without stepping: so everything that reads a
+    /// pose between two steps (scripts asking where a bone is, attachments)
+    /// sees the same swung chain the picture shows. A chain not started yet
+    /// is left as animated.
+    pub fn apply(&self, skel: &Skeleton, pose: &mut [TransformTRS], world: &mut Vec<Mat4>) {
+        if world.len() < skel.len() {
+            return;
+        }
+        let mut wrote = false;
+        for c in &self.chains {
+            if c.def.enabled && !c.fresh && !c.tips.is_empty() {
+                write_back(c, skel, pose, world);
+                wrote = true;
+            }
+        }
+        if wrote {
+            skel.world_matrices(pose, world);
+        }
+    }
+
     /// Step `dt` seconds and write the chains into `pose`, then `world` (the
     /// model-space matrices of `pose`, as [`Skeleton::world_matrices`] makes
     /// them) again. `pose` and `world` arrive as the frame animated them;

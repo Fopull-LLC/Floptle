@@ -994,6 +994,7 @@ fn bare_map_node(
     matter: MatterDoc,
 ) -> floptle_scene::NodeDoc {
     floptle_scene::NodeDoc {
+        spring_bones: None,
         camera_2d: None,
         joint: None,
         sort_mode: None,
@@ -3734,6 +3735,7 @@ mod tests {
 
     fn blank_node() -> floptle_scene::NodeDoc {
         floptle_scene::NodeDoc {
+            spring_bones: None,
             camera_2d: None,
             joint: None,
             sort_mode: None,

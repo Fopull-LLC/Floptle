@@ -1478,6 +1478,15 @@ pub enum AnimCmd {
     /// `anim:holdPose(on)`: keep the last frame's pose writes while a frame
     /// sends none, so a still, non-rest pose costs nothing to keep.
     HoldPose(bool),
+    /// `anim:setSpringEnabled(chain, on)`: a spring-bones chain off (it
+    /// follows its pose, as under a helmet) or back on, without a swing.
+    SpringEnabled { chain: String, on: bool },
+    /// `anim:resetSprings([chain])`: start the chain (every chain, for
+    /// `None`) from its pose with no speed, after a teleport.
+    SpringReset(Option<String>),
+    /// `anim:setSpringGravity(x, y, z)`: the gravity the chains feel, m/s²,
+    /// over the one the component names (a world's own).
+    SpringGravity([f32; 3]),
 }
 
 /// What a script asks of a rig's pose after the animator made it. Positions

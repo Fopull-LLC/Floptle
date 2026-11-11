@@ -1623,6 +1623,9 @@ impl Editor {
         // Bone attachments resolve after physics: physics moves the mesh root (a
         // character body), while animation only bent the bones — so a weapon on a
         // bone must read the post-physics mesh world or it swims a frame behind.
+        // Spring bones swing on the post-physics root too, and before the
+        // attachments read the bones, so a clip on a braid rides the braid.
+        anim::advance_springs(&mut self.anim, &self.world, &self.mesh_registry, sdt, &self.frame_carry);
         anim::resolve_attachments(&self.anim, &mut self.world, &self.mesh_registry);
         // 2D cameras follow after all of that, for the same reason bone
         // attachments do: a camera chasing a player has to read where the
