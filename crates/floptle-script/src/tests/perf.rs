@@ -84,3 +84,42 @@ fn a_slow_frame_names_its_function_line_and_engine_calls() {
     drop(prof);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **The script bucket's time outside every hook is named.** A timer callback
+/// that spins for 20 ms runs in no hook, so no script's figure carries it, and
+/// it used to sit in the bucket as time nobody could see. It is charged to
+/// `scriptsTimers` now, and the rest of the pass is in its own named parts:
+/// the work list, the write flush, and the engine between the hooks.
+#[test]
+fn script_time_outside_the_hooks_is_named() {
+    let dir = std::env::temp_dir().join(format!("floptle-perf-parts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "timed",
+        "function start(node)\n  \
+           after(0.001, function() local t = os.clock() while os.clock() - t < 0.02 do end end)\n\
+         end\n\
+         function fixedUpdate(node, dt) end\n",
+    );
+    let (mut world, _) = world_with_script("timed");
+    let mut host = ScriptHost::new();
+    host.profile().borrow_mut().enable(true);
+    host.profile().borrow_mut().begin_frame();
+    host.run(&mut world, &dir, 0.016, 0.016);
+    host.profile().borrow_mut().end_frame();
+    host.profile().borrow_mut().begin_frame();
+    host.run_fixed(&mut world, 0.1, 0.1);
+    host.profile().borrow_mut().end_frame();
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let prof = host.profile().borrow();
+    let r = prof.recent_frames(1).next().expect("a frame").clone();
+    let part = |name: &str| r.parts.iter().find(|(p, _)| *p == name).map(|(_, ms)| *ms);
+    let timers = part("scriptsTimers").unwrap_or(0.0);
+    assert!(timers >= 15.0, "the 20 ms timer callback was charged {timers:.2} ms to scriptsTimers: {:?}", r.parts);
+    for name in ["scriptsWorkList", "scriptsFlush", "scriptsBetweenHooks"] {
+        assert!(part(name).is_some(), "{name} is not named: {:?}", r.parts);
+    }
+    let hooks: f32 = r.scripts.iter().map(|(_, ms)| *ms).sum();
+    assert!(hooks < 5.0, "the timer's spin was charged to a hook ({hooks:.2} ms)");
+}

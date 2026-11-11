@@ -6806,17 +6806,14 @@ impl ScriptHost {
         // `start`, and (because the node is out of the sim too) not its collision
         // hooks. `Disabled` is inherited, so turning off a folder turns off every
         // script under it.
-        let work: Vec<Entity> = world
-            .query::<Scripts>()
-            .filter(|(e, _)| !floptle_core::is_disabled(world, *e))
-            .map(|(e, _)| e)
-            .collect();
+        let work = self.scripted_and_on(world);
         // Pass 1: build/refresh every environment so cross-references (findScript, etc.)
         // resolve regardless of which script ticks first.
         self.kinds_this_frame.clear();
         if self.last_scripts_dir.as_deref() != Some(scripts_dir) {
             self.last_scripts_dir = Some(scripts_dir.to_path_buf());
         }
+        let seed_t = self.part_start();
         for &e in &work {
             let Some(scripts) = world.get::<Scripts>(e) else { continue };
             for inst in &scripts.0 {
@@ -6833,9 +6830,11 @@ impl ScriptHost {
         }
         self.charge_memory_to(None);
         self.keep_switched_off_instances(world);
+        self.part_end("scriptsSeed", seed_t);
         // Web replies land here — the frame pass, never the tick pass. A reply
         // arrives when it arrives, so a rollback replay must never see one.
         // Before `update`, so a callback's writes are visible to the same frame.
+        let drains_t = self.part_start();
         crate::http_api::set_now(&self.http, time as f64);
         crate::http_api::drain(&self.lua, &self.http, &self.logs);
         crate::account_api::drain(&self.lua, &self.account, &self.logs);
@@ -6849,6 +6848,7 @@ impl ScriptHost {
         // Pumps the platform backend's callbacks and fires
         // `steam.onPersonaChanged` — a no-op under `NullPlatform`.
         crate::steam_api::drain(&self.lua, &self.platform, &self.steam_state, &self.logs);
+        self.part_end("scriptsCallbacks", drains_t);
         // Sleepers whose timer ran out, or whose camera came close, wake before
         // the pass that would call them.
         self.script_clock.set(time as f64);
@@ -6866,11 +6866,15 @@ impl ScriptHost {
         self.run_pass(world, &work, dt, time, Pass::Frame, floptle_input::Domain::Frame);
         // Every `nav.agent` walks here: after the orders this frame's scripts
         // gave, before those writes reach the ECS.
+        let nav_t = self.part_start();
         self.step_nav_agents(dt);
+        self.part_end("scriptsNav", nav_t);
         // Bindings run after every `update`, so a label always shows this
         // frame's value rather than last frame's, and before the flush, so a
         // binding's write rides the same pass as a hand-written one.
+        let bind_t = self.part_start();
         self.run_ui_bindings();
+        self.part_end("scriptsBindings", bind_t);
         self.flush_writes(world);
         self.check_ui_listeners(world);
 
@@ -6914,16 +6918,18 @@ impl ScriptHost {
         // tick). `run_fixed_for` replays must not touch the scheduler, or a net
         // correction double-fires every pending timer. Before the script pass, so
         // a timer's effects are visible to this tick's `fixedUpdate`s.
-        crate::sched_api::tick(&self.sched, &self.logs, dt as f64);
+        {
+            let span = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
+            crate::sched_api::tick(&self.sched, &self.logs, dt as f64);
+            if let Some(span) = span {
+                self.profile.borrow_mut().record_part("scriptsTimers", span.ms());
+            }
+        }
         // A switched-off node's scripts do not run — not its `update`, not its
         // `start`, and (because the node is out of the sim too) not its collision
         // hooks. `Disabled` is inherited, so turning off a folder turns off every
         // script under it.
-        let work: Vec<Entity> = world
-            .query::<Scripts>()
-            .filter(|(e, _)| !floptle_core::is_disabled(world, *e))
-            .map(|(e, _)| e)
-            .collect();
+        let work = self.scripted_and_on(world);
         self.run_pass(world, &work, dt, time, Pass::Fixed, floptle_input::Domain::Tick);
         self.flush_writes(world);
     }
@@ -6942,11 +6948,7 @@ impl ScriptHost {
         // `start`, and (because the node is out of the sim too) not its collision
         // hooks. `Disabled` is inherited, so turning off a folder turns off every
         // script under it.
-        let work: Vec<Entity> = world
-            .query::<Scripts>()
-            .filter(|(e, _)| !floptle_core::is_disabled(world, *e))
-            .map(|(e, _)| e)
-            .collect();
+        let work = self.scripted_and_on(world);
         self.run_pass(world, &work, dt, time, Pass::Late, floptle_input::Domain::Frame);
         self.flush_writes(world);
     }
@@ -7075,6 +7077,39 @@ impl ScriptHost {
     /// One lifecycle pass over `work`: per-frame (`start`/`update`), per-tick
     /// (`fixedUpdate`), or post-physics (`lateUpdate`), with the same self-move
     /// write-back rules.
+    /// A wall clock for a named part of the script bucket, only while the
+    /// profiler collects (see [`Self::part_end`]).
+    fn part_start(&self) -> Option<floptle_core::profile::Span> {
+        self.profile.borrow().enabled().then(floptle_core::profile::Span::new)
+    }
+
+    /// Name the time since [`Self::part_start`] as `part` of the script
+    /// bucket. The bucket is the whole pass; its parts say what the engine
+    /// did around the hooks, which no Lua line and no named call shows.
+    fn part_end(&self, part: &'static str, span: Option<floptle_core::profile::Span>) {
+        if let Some(span) = span {
+            self.profile.borrow_mut().record_part(part, span.ms());
+        }
+    }
+
+    /// Every node with scripts that is not switched off, in scene order: one
+    /// pass's work list. Its ancestors are worked out once for the whole list
+    /// ([`floptle_core::TreeCache`]): asking each node climbed its chain once
+    /// per pass, three passes a frame. The time goes to `scriptsWorkList`.
+    fn scripted_and_on(&self, world: &World) -> Vec<Entity> {
+        let span = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
+        let mut tree = floptle_core::TreeCache::new();
+        let work = world
+            .query::<Scripts>()
+            .filter(|(e, _)| !tree.resolve(world, *e).disabled)
+            .map(|(e, _)| e)
+            .collect();
+        if let Some(span) = span {
+            self.profile.borrow_mut().record_part("scriptsWorkList", span.ms());
+        }
+        work
+    }
+
     fn run_pass(
         &mut self,
         world: &mut World,
@@ -7100,6 +7135,12 @@ impl ScriptHost {
         let g = self.lua.globals();
         let _ = g.raw_set("time", time as f64);
         let _ = g.raw_set("dt", dt as f64);
+        // The pass's own wall clock, and what of it went to the hooks (each
+        // script's figure). The rest is the engine between them: skips,
+        // sleepers, the transform write-back. Named, so the script bucket's
+        // remainder is never a mystery a game cannot see into.
+        let pass_t = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
+        let mut in_hooks = 0.0f32;
         for e in work {
             if self.script_skip.contains(&e.index()) {
                 continue; // networked: this node's state arrives in snapshots
@@ -7171,10 +7212,12 @@ impl ScriptHost {
                     // can still land on a script that is running; that is
                     // inherent to sampling a wall clock, and `docs/scripting.md`
                     // says so rather than implying otherwise.
-                    if let Some(span) = span
-                        && called
-                    {
-                        self.profile.borrow_mut().record_script(&inst.kind, span.ms());
+                    if let Some(span) = span {
+                        let ms = span.ms();
+                        in_hooks += ms;
+                        if called {
+                            self.profile.borrow_mut().record_script(&inst.kind, ms);
+                        }
                     }
                     ran = true;
                 }
@@ -7193,12 +7236,24 @@ impl ScriptHost {
             }
         }
         self.charge_memory_to(None);
+        if let Some(t) = pass_t {
+            self.profile.borrow_mut().record_part("scriptsBetweenHooks", (t.ms() - in_hooks).max(0.0));
+        }
     }
 
     /// Flush a pass's queued writes to the ECS: cross-node handle transforms, model /
     /// material / visibility swaps, and `node:getcomponent(...)` field writes. Runs
     /// after every pass (frame or fixed) so a tick's writes land before physics steps.
     fn flush_writes(&mut self, world: &mut World) {
+        let span = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
+        self.flush_writes_inner(world);
+        if let Some(span) = span {
+            self.profile.borrow_mut().record_part("scriptsFlush", span.ms());
+        }
+    }
+
+    /// [`Self::flush_writes`]'s body, timed by it into `scriptsFlush`.
+    fn flush_writes_inner(&mut self, world: &mut World) {
         // Flush transforms that a handle wrote on other nodes back to the ECS.
         self.flush_scene(world);
         // Model swaps: the node becomes the model before the construction
