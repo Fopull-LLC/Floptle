@@ -646,6 +646,7 @@ pub(crate) fn sun_map_lanes(
     sun: [f32; 4],
     star0: Option<[f32; 4]>,
     view_proj: floptle_core::math::Mat4,
+    camera: floptle_core::math::DVec3,
 ) -> ([[f32; 4]; 4], [f32; 4], [f32; 4]) {
     let off = ([[0.0; 4]; 4], [0.0; 4], [0.0; 4]);
     if !(l.shadows && l.shadow_map) {
@@ -664,7 +665,7 @@ pub(crate) fn sun_map_lanes(
         return off;
     }
     let size = floptle_render::sun_map_size_for(l.shadow_map_size);
-    let (vp, texel) = floptle_render::sun_shadow_matrix(to_sun, view_proj, l.shadow_distance, size);
+    let (vp, texel) = floptle_render::sun_shadow_matrix(to_sun, view_proj, l.shadow_distance, size, camera);
     let size = size as f32;
     // Softness widens the filter: 1.5 texels hard, about 7.5 at full softness.
     let radius = 1.5 + 6.0 * l.shadow_softness.clamp(0.0, 1.0);

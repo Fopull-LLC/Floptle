@@ -1739,6 +1739,7 @@ impl Editor {
             sun,
             (star_meta[0] >= 1.0).then_some(star_pos[0]),
             view_proj,
+            cam.world_position,
         );
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),

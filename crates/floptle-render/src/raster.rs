@@ -148,9 +148,13 @@ fn sun_depth_texture(device: &wgpu::Device, label: &str, size: u32) -> wgpu::Tex
 /// instances are drawn in. Snapped to whole texels in the sun's own frame, so a
 /// camera that moves does not make every shadow edge crawl.
 ///
-/// `size` is the map's edge in texels. Returns the matrix and the size of one
-/// texel in world units.
-pub fn sun_shadow_matrix(to_sun: glam::Vec3, view_proj: Mat4, distance: f32, size: u32) -> (Mat4, f32) {
+/// `size` is the map's edge in texels. `camera` is the camera's world position:
+/// the snap is to a grid fixed in the WORLD. Snapped in the camera-relative
+/// frame alone, the grid rode along with the camera, every shadow edge slid by
+/// the camera's fraction of a texel each frame, and driving made the shadows on
+/// plants and ground shimmer. Returns the matrix and the size of one texel in
+/// world units.
+pub fn sun_shadow_matrix(to_sun: glam::Vec3, view_proj: Mat4, distance: f32, size: u32, camera: glam::DVec3) -> (Mat4, f32) {
     let l = to_sun.try_normalize().unwrap_or(glam::Vec3::Y);
     let inv = view_proj.inverse();
     let near = inv.project_point3(glam::Vec3::new(0.0, 0.0, 0.0));
@@ -161,9 +165,14 @@ pub fn sun_shadow_matrix(to_sun: glam::Vec3, view_proj: Mat4, distance: f32, siz
     let texel = radius * 2.0 / size.max(1) as f32;
     let up = if l.y.abs() > 0.95 { glam::Vec3::Z } else { glam::Vec3::Y };
     let view = Mat4::look_to_rh(glam::Vec3::ZERO, -l, up);
-    // Snap the centre in the sun's frame to the texel grid.
+    // Snap the centre in the sun's frame to the world's texel grid: where the
+    // camera sits on that grid (in f64, as a planet-sized coordinate needs) is
+    // the offset the camera-relative centre is snapped against.
+    let t = texel as f64;
+    let at = glam::DMat4::look_to_rh(glam::DVec3::ZERO, -l.as_dvec3(), up.as_dvec3()).transform_point3(camera);
+    let (ox, oy) = (at.x.rem_euclid(t) as f32, at.y.rem_euclid(t) as f32);
     let c = view.transform_point3(fwd * (d / 3.0));
-    let c = glam::Vec3::new((c.x / texel).round() * texel, (c.y / texel).round() * texel, c.z);
+    let c = glam::Vec3::new(((c.x + ox) / texel).round() * texel - ox, ((c.y + oy) / texel).round() * texel - oy, c.z);
     // Casters well above the box (a tower outside the view) still reach in.
     let reach = radius + 300.0;
     let proj = Mat4::orthographic_rh(c.x - radius, c.x + radius, c.y - radius, c.y + radius, -c.z - radius, -c.z + reach);
@@ -5916,6 +5925,42 @@ mod tests {
         let mut owned = Vec::new();
         assert_eq!(super::bucket_into(items.iter().copied(), &mut owned).len(), want_b.len());
         assert_eq!(owned[..], want[2..]);
+    }
+
+    /// **A point that stays put in the world stays put on the sun map's texel
+    /// grid while the camera moves.** The map follows the camera, but only in
+    /// whole texels: a point's position within its texel is the same from
+    /// every camera, so a shadow edge does not slide as the view travels. Drawn
+    /// camera-relative, the grid used to ride with the camera, and driving made
+    /// every shadow edge on the ground and the plants shimmer. Checked near the
+    /// origin and at a planet-sized coordinate, for a high sun and a low one.
+    #[test]
+    fn the_sun_map_grid_stays_fixed_in_the_world_as_the_camera_moves() {
+        use glam::{DVec3, Mat4, Vec3};
+        let size = 2048u32;
+        let proj = Mat4::perspective_rh(1.0, 16.0 / 9.0, 0.1, 1000.0);
+        let view_proj = proj * Mat4::look_to_rh(Vec3::ZERO, Vec3::new(0.3, -0.2, -1.0).normalize(), Vec3::Y);
+        let place = |to_sun: Vec3, cam: DVec3, p: DVec3| -> (f32, f32) {
+            let (vp, _) = super::sun_shadow_matrix(to_sun, view_proj, 100.0, size, cam);
+            let n = vp.project_point3((p - cam).as_vec3());
+            ((n.x * 0.5 + 0.5) * size as f32, (n.y * 0.5 + 0.5) * size as f32)
+        };
+        for to_sun in [Vec3::new(0.2, 1.0, 0.4), Vec3::new(1.0, 0.12, -0.3)] {
+            for start in [DVec3::new(10.3, 2.0, -20.7), DVec3::new(1_830_412.6, 6_371_020.3, -402_117.9)] {
+                let p = start + DVec3::new(3.0, -1.5, -25.0);
+                let (x0, y0) = place(to_sun, start, p);
+                for step in [DVec3::new(0.37, 0.0, 0.21), DVec3::new(-1.913, 0.07, 4.4), DVec3::new(0.011, 0.0, -0.006)] {
+                    let (x, y) = place(to_sun, start + step, p);
+                    let slip = |a: f32, b: f32| ((a - b) - (a - b).round()).abs();
+                    assert!(
+                        slip(x, x0) < 0.02 && slip(y, y0) < 0.02,
+                        "sun {to_sun} from {start}: the point slid ({:.3}, {:.3}) of a texel when the camera moved {step}",
+                        slip(x, x0),
+                        slip(y, y0)
+                    );
+                }
+            }
+        }
     }
 }
 
