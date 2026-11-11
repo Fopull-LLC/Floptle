@@ -1362,7 +1362,7 @@ end
         let mut look = MaterialParams::flat([0.2, 0.4, 0.8]);
         look.emissive = [1.0, 0.5, 0.0];
         look.emissive_strength = 3.0;
-        let asset = crate::MeshAsset {
+        let asset = crate::MeshAsset { merged: None,
             parts: vec![MeshId(4)],
             part_meta: vec![crate::PartMeta { material: "Leaf".into(), base_color: [0.2, 0.4, 0.8], textured: false, imported: None }],
             tex_filter: None,
@@ -1374,7 +1374,7 @@ end
         // A part whose file names maps or a glow keeps them through the bake.
         let mut mapped = asset.part_meta[0].clone();
         mapped.imported = Some(crate::ImportedLook { material: floptle_core::Material::default(), base: None, maps: [None; 5] });
-        let with_maps = crate::MeshAsset { parts: vec![MeshId(4)], part_meta: vec![mapped], tex_filter: None, size: 1.0, rig: None };
+        let with_maps = crate::MeshAsset { merged: None, parts: vec![MeshId(4)], part_meta: vec![mapped], tex_filter: None, size: 1.0, rig: None };
         assert!(baked_parts(&with_maps, Mat4::IDENTITY)[0].imported.is_some(), "the bake dropped the part's imported maps");
         let s = ScatterSource { look: scatter::ScatterLook { tint: [1.0, 0.5, 1.0], ..Default::default() }, ..src() };
         let mut cache = ScatterCache::default();

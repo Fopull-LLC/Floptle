@@ -1558,7 +1558,7 @@ mod pick_tests {
         let mut ed = Editor::default();
         ed.mesh_registry.insert(
             "floor.glb".into(),
-            crate::MeshAsset { parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 100.0, rig: None },
+            crate::MeshAsset { merged: None, parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 100.0, rig: None },
         );
         ed.paint_meshes.get_or_build("floor.glb", || vec![floor_quad()]);
         let floor = put(&mut ed, Matter::Mesh { asset_path: "floor.glb".into() }, [0.0; 3], 1.0);

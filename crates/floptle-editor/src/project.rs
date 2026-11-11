@@ -546,7 +546,7 @@ impl Editor {
             .get(&floptle_vfs::normalize(file))
             .and_then(|first| self.mesh_registry.get(first))
             .filter(|a| a.rig.is_none())
-            .map(|a| MeshAsset {
+            .map(|a| MeshAsset { merged: None,
                 parts: a.parts.clone(),
                 part_meta: a.part_meta.clone(),
                 tex_filter: a.tex_filter,
@@ -619,7 +619,7 @@ impl Editor {
                 let rig = anim::rig_from_model(&model, &overrides);
                 self.mesh_registry.insert(
                     path.to_string(),
-                    MeshAsset {
+                    MeshAsset { merged: None,
                         parts: Vec::new(),
                         part_meta: Vec::new(),
                         tex_filter: overrides.texture_filter,
@@ -704,7 +704,7 @@ impl Editor {
                 let verts: usize = model.parts.iter().map(|p| p.mesh.vertices.len()).sum();
                 self.mesh_registry.insert(
                     path.to_string(),
-                    MeshAsset {
+                    MeshAsset { merged: None,
                         parts,
                         part_meta,
                         tex_filter: overrides.texture_filter,
@@ -754,9 +754,37 @@ impl Editor {
                         ),
                     })
                     .collect();
+                // Parts that share one texture and its maps and do not blend
+                // can draw as one instance, a material per slot (card 0685):
+                // their mesh laid end to end is registered beside them. Whether
+                // a node's parts really do merge is decided each frame, against
+                // what its overrides make of them; this only says they can.
+                let merged = {
+                    let first = &model.parts[0];
+                    let refs: Vec<&floptle_render::MeshData> = model.parts.iter().map(|p| &p.mesh).collect();
+                    model
+                        .parts
+                        .iter()
+                        .all(|p| {
+                            p.texture == first.texture
+                                && p.maps.normal == first.maps.normal
+                                && p.maps.metallic_roughness == first.maps.metallic_roughness
+                                && p.maps.occlusion == first.maps.occlusion
+                                && p.maps.emissive == first.maps.emissive
+                                && !matches!(p.maps.alpha_mode, floptle_assets::glb_write::AlphaMode::Blend)
+                        })
+                        .then(|| floptle_render::merge_parts(&refs))
+                        .flatten()
+                        .map(|(mesh, starts)| {
+                            let sampling = embedded_sampling(chosen, &model.texture_filters, first.texture);
+                            let id = raster.register_sampled(gpu, &mesh, first.texture.map(|i| &model.textures[i]), sampling);
+                            crate::MergedMesh { mesh: id, starts }
+                        })
+                };
                 self.mesh_registry.insert(
                     path.to_string(),
                     MeshAsset {
+                        merged,
                         parts,
                         part_meta,
                         tex_filter: overrides.texture_filter,

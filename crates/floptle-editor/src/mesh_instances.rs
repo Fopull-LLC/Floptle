@@ -326,6 +326,26 @@ pub(crate) fn part_look_rule<'a>(
     }
 }
 
+/// Whether models whose parts can merge draw as one instance. On, unless
+/// `FLOPTLE_MERGE_PARTS=0` asks otherwise: the switch a picture test uses to
+/// draw the same scene both ways, and an escape hatch while the project
+/// setting does not exist yet.
+fn merge_parts_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOPTLE_MERGE_PARTS").map_or(true, |v| v != "0")) && !MERGE_OFF_HERE.with(|c| c.get())
+}
+
+thread_local! {
+    /// A test drawing the same scene with and without merging, on one thread.
+    static MERGE_OFF_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Draw models part by part on this thread (`true`), or let them merge again.
+#[cfg(test)]
+pub(crate) fn merge_parts_off_here(off: bool) {
+    MERGE_OFF_HERE.with(|c| c.set(off));
+}
+
 /// Shared by the main surface gather and the offscreen `render_world_into` so the
 /// fullscreen, docked, split, and camera-preview views all animate identically —
 /// previously the offscreen path drew every mesh rigidly at its root, so a character
@@ -474,6 +494,54 @@ pub(crate) fn push_mesh_instances(
         m
     };
     let Some(rig) = asset.rig.as_ref() else {
+        // **One instance for the whole model, when its parts allow it.** A
+        // model whose parts share a texture and differ only in material
+        // numbers draws its merged mesh once, with a slot table holding each
+        // part's material (card 0685). Each part's look is resolved by the
+        // same rule as ever (override ▸ node Material ▸ imported), so what
+        // the parts would draw is exactly what the slots draw; the merge only
+        // happens when they would all take the same road through the passes.
+        if let Some(m) = asset.merged.as_ref()
+            && flsl.is_none()
+            && node_paint.is_none()
+            && merge_parts_on()
+        {
+            let mut looks: Vec<_> = (0..asset.parts.len()).map(|i| part_look(raster, asset, i)).collect();
+            // On a model with no picture of its own, "the mesh's texture"
+            // (None), an override's plain white and a physical surface's set
+            // with no maps all sample the same neutral values: say it one
+            // way, so a paint over one slot does not read as a different
+            // texture and split the model. The picture test holds the merge
+            // to the parts' pixels with such an override in place.
+            if !asset.part_meta.iter().any(|m| m.textured) {
+                for l in &mut looks {
+                    if l.0.is_some_and(|t| raster.is_plain_white(t)) {
+                        l.0 = None;
+                    }
+                }
+            }
+            let tex0 = looks[0].0;
+            let exts: Vec<u32> = looks.iter().map(|l| l.1.ext_index).collect();
+            let alike = looks.iter().all(|(t, p, f)| f.is_none() && *t == tex0 && p.alpha >= 0.999)
+                && raster.exts_route_alike(&exts);
+            if alike {
+                let paint = raster.mesh_paint_base(m.mesh);
+                if looks.iter().all(|l| l.1 == looks[0].1) {
+                    // One material for every part (a node Material, most
+                    // often): a plain instance of the merged mesh.
+                    let mut p = looks[0].1;
+                    p.paint_base = paint;
+                    p.paint_modulate = false;
+                    instances.push((m.mesh, tex0, instance_of_mat(model, &p)));
+                    return;
+                }
+                let slots: Vec<MaterialParams> = looks.iter().map(|l| l.1).collect();
+                if let Some(t) = raster.push_slot_table(&m.starts, &slots) {
+                    instances.push((m.mesh, tex0, floptle_render::instance_of_slots(model, t, paint, false)));
+                    return;
+                }
+            }
+        }
         for (i, &mid) in asset.parts.iter().enumerate() {
             let (ptex, pmp, part_flsl) = part_look(raster, asset, i);
             push_for(mid, ptex, instance_of_mat(model, &painted(raster, mid, i, pmp)), part_flsl);

@@ -483,7 +483,7 @@ impl Editor {
                 .max(0.1);
             self.mesh_registry.insert(
                 map_key(id),
-                MeshAsset {
+                MeshAsset { merged: None,
                     parts: parts.iter().map(|&(m, _)| m).collect(),
                     part_meta,
                     tex_filter: None,

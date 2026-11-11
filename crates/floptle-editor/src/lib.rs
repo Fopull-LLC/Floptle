@@ -178,6 +178,8 @@ mod sprite2d;
 #[cfg(test)]
 mod atmosphere_sky_tests;
 #[cfg(test)]
+mod merged_parts_tests;
+#[cfg(test)]
 mod spawn_scaling;
 #[cfg(test)]
 mod assembly_script_tests;
@@ -4198,6 +4200,18 @@ struct MeshAsset {
     tex_filter: Option<crate::assets::FilterMode>,
     size: f32,
     rig: Option<anim::RigAsset>,
+    /// The parts laid end to end as one mesh, for a model whose parts can
+    /// draw as one instance with a material per slot (card 0685): they share
+    /// one texture and maps and none of them blends. `None` draws the parts
+    /// one instance each, as every model did.
+    merged: Option<MergedMesh>,
+}
+
+/// A model's parts as one registered mesh, and where each part after the
+/// first starts in it (the slot table's starts).
+pub(crate) struct MergedMesh {
+    pub(crate) mesh: MeshId,
+    pub(crate) starts: Vec<u32>,
 }
 
 /// One part's import-time material facts (see [`MeshAsset::part_meta`]).
@@ -4408,7 +4422,7 @@ impl Editor {
                 let id = raster.register(gpu, &data, None);
                 self.mesh_registry.insert(
                     (*key).to_string(),
-                    MeshAsset {
+                    MeshAsset { merged: None,
                         parts: vec![id],
                         part_meta: Vec::new(),
                         tex_filter: None,

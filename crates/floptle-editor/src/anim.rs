@@ -3169,7 +3169,7 @@ mod tests {
         let mut reg: HashMap<String, crate::MeshAsset> = HashMap::new();
         reg.insert(
             "models/soldier.glb".to_string(),
-            crate::MeshAsset { parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 2.0, rig: Some(rig) },
+            crate::MeshAsset { merged: None, parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 2.0, rig: Some(rig) },
         );
         let mut world = World::new();
         let squad = world.spawn();
@@ -3266,7 +3266,7 @@ mod tests {
         let mut reg: HashMap<String, crate::MeshAsset> = HashMap::new();
         reg.insert(
             "models/arm.glb".to_string(),
-            crate::MeshAsset { parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 2.0, rig: Some(rig) },
+            crate::MeshAsset { merged: None, parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 2.0, rig: Some(rig) },
         );
         let mut world = World::new();
         let arm = world.spawn();
@@ -3358,7 +3358,7 @@ mod tests {
         let mut reg: HashMap<String, crate::MeshAsset> = HashMap::new();
         reg.insert(
             "models/arm.glb".to_string(),
-            crate::MeshAsset { parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 2.0, rig: Some(rig) },
+            crate::MeshAsset { merged: None, parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 2.0, rig: Some(rig) },
         );
         let mut world = World::new();
         let arm = world.spawn();
@@ -3765,7 +3765,7 @@ mod tests {
             skin_bases: Vec::new(),
             node_is_object: vec![false; n],
         };
-        crate::MeshAsset { parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 2.0, rig: Some(rig) }
+        crate::MeshAsset { merged: None, parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 2.0, rig: Some(rig) }
     }
 
     fn scripted(world: &mut World, kind: &str) -> Entity {

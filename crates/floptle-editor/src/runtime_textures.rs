@@ -139,7 +139,7 @@ impl Editor {
             let id = raster.register(gpu, &data, None);
             self.mesh_registry.insert(
                 req.name,
-                crate::MeshAsset { parts: vec![id], part_meta: Vec::new(), tex_filter: None, size: size.max(1e-3), rig: None },
+                crate::MeshAsset { merged: None, parts: vec![id], part_meta: Vec::new(), tex_filter: None, size: size.max(1e-3), rig: None },
             );
         }
     }

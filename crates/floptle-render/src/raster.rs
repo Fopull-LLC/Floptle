@@ -2800,6 +2800,14 @@ impl Raster {
         id
     }
 
+    /// Whether binding `tex` draws the same as an untextured mesh's own bind:
+    /// the shared one-texel white, or a material set that names no picture
+    /// and no map (white base, neutral maps). A merged model's slots may mix
+    /// these, since every one of them samples the same neutral values.
+    pub fn is_plain_white(&self, tex: TexId) -> bool {
+        Some(tex) == self.white_tex || self.mat_sets.get(&[u32::MAX; SURFACE_SLOTS]) == Some(&tex)
+    }
+
     /// The project's retro artefacts — the era's look asked for once instead of
     /// on every material (see [`floptle_core::Retro::under`] for the precedence
     /// rule). All-default, the initial value, is the identity.
@@ -2953,6 +2961,26 @@ impl Raster {
         self.slot_tables.insert(key, t);
         self.mat_ext_dirty = true;
         Some(t)
+    }
+
+    /// Whether surfaces with these extras entries take the same road through
+    /// the passes, so they can share one instance as a merged model's slots:
+    /// the same blend, screen-door and dissolve, the same glass, the same
+    /// part in the sun's shadow map, the same shader-surface rule for the
+    /// prepass, and the same sway (the sun-map cull reads it off the
+    /// instance). Everything else in an entry is read per vertex or per
+    /// pixel from the slot's own entry and may differ freely.
+    pub fn exts_route_alike(&self, exts: &[u32]) -> bool {
+        const ROUTE: u32 = EXT_BLEND | EXT_DITHER_ALPHA | EXT_DISSOLVE | EXT_DITHER_INVERT | EXT_NO_CAST | EXT_SHADED;
+        let key = |e: u32| {
+            let at = e as usize * EXT_LANES;
+            let c = self.mat_ext_cpu.get(at..at + EXT_LANES)?;
+            let flags = c[1][0] as u32;
+            let glass = c[1][3] > 0.0 && flags & EXT_PHYSICAL != 0;
+            Some((flags & ROUTE, glass, c[2][2].to_bits()))
+        };
+        let Some(first) = exts.first().and_then(|&e| key(e)) else { return false };
+        exts.iter().all(|&e| key(e) == Some(first))
     }
 
     /// Store raw lanes, sharing an entry that already holds the same bits.
