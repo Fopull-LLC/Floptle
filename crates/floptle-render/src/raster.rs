@@ -4291,6 +4291,7 @@ impl Raster {
     pub fn replace_texture(&mut self, gpu: &Gpu, id: TexId, data: &TextureData) {
         let Some(sampling) = self.textures.get(id.0 as usize).map(|t| t.sampling) else { return };
         self.textures[id.0 as usize] = self.tex_bind(gpu, data, sampling);
+        self.repool_replaced(gpu, id, data);
     }
 
     /// The bytes every picture on the GPU holds, mip chains included, each

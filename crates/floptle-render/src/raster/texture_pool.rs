@@ -154,6 +154,24 @@ impl Raster {
         Some(at)
     }
 
+    /// After [`Raster::replace_texture`] put new pixels under `id`: the same
+    /// pixels into its layer when they are the same size, so a merged model
+    /// shows them too; otherwise the picture leaves the pools, and a model
+    /// whose slot wore it draws its parts until it is imported again. Either
+    /// way the old pixels no longer answer for that layer.
+    pub(crate) fn repool_replaced(&mut self, gpu: &Gpu, id: TexId, data: &TextureData) {
+        let Some(at) = self.pools.of_tex.get(&id.0).copied() else { return };
+        self.pools.layers.retain(|_, l| *l != at);
+        let key = self.pools.pools[at.pool as usize].key;
+        let smaller = if key.mip_count > 1 && key.drop > 0 { super::drop_top_mips(data, key.drop) } else { None };
+        let t = smaller.as_ref().unwrap_or(data);
+        if (t.width.max(1), t.height.max(1)) == (key.width, key.height) {
+            super::write_mip_chain(gpu, &self.pools.pools[at.pool as usize].texture, at.layer, t, key.mip_count);
+        } else {
+            self.pools.of_tex.remove(&id.0);
+        }
+    }
+
     /// Where the picture registered as `id` is in the pools, if it is.
     pub fn pooled_layer(&self, id: TexId) -> Option<PoolLayer> {
         self.pools.of_tex.get(&id.0).copied()
@@ -501,6 +519,26 @@ mod tests {
         assert!(r.array_set_for(&gpu, &[Some(tw), Some(to)]).is_none(), "a 16² base shared a set with a 32² one");
         let loose = r.register_texture(&gpu, &picture(32, 32, 5), s);
         assert!(r.array_set_for(&gpu, &[Some(tw), Some(loose)]).is_none(), "a picture never pooled was bound");
+    }
+
+    /// **New pixels under a pooled picture reach its layer when they are the
+    /// same size, and take it out of the pools when they are not.**
+    #[test]
+    fn a_replaced_picture_rewrites_its_layer_or_leaves() {
+        let Some((gpu, mut r)) = raster() else { return };
+        let s = mipped();
+        let (a, b) = (picture(32, 32, 1), picture(32, 32, 2));
+        let ta = r.register_texture_shared(&gpu, &a, s);
+        let at = r.pool_texture(&gpu, ta, &a, s).unwrap();
+        let tex = |r: &Raster| r.pools.pools[at.pool as usize].texture.clone();
+        r.replace_texture(&gpu, ta, &b);
+        assert!(crate::probe::readback_layer(&gpu, &tex(&r), at.layer, 0) == b.pixels, "the layer kept the old pixels");
+        assert_eq!(r.pooled_layer(ta), Some(at));
+        // The old picture, brought again, is not the layer that now holds b.
+        let ta2 = r.register_texture(&gpu, &a, s);
+        assert_ne!(r.pool_texture(&gpu, ta2, &a, s), Some(at), "the old bytes still answered for the rewritten layer");
+        r.replace_texture(&gpu, ta, &picture(16, 16, 3));
+        assert_eq!(r.pooled_layer(ta), None, "a picture of another size stayed in its array");
     }
 
     /// **A slot table that names no layers is the table it always was; one
