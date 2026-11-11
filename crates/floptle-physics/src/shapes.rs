@@ -505,6 +505,13 @@ struct Surface {
     /// Chunks meshed by a query, on the thread that asked: what a cast near
     /// ground nobody had meshed pays for. Meshes handed in are not counted.
     meshed_by_queries: u64,
+    /// The milliseconds those cost, all told.
+    query_mesh_ms: f64,
+    /// Chunks a query found unmeshed while meshing was deferred
+    /// ([`defer_query_meshing`]): handed to the worker at the next step.
+    wanted: std::collections::HashSet<[i32; 3]>,
+    /// How many times a query answered from the field instead, deferred.
+    deferred: u64,
     /// Steps since the triangles far from every mover were last let go: see
     /// [`ChunkTerrain::release_far`].
     since_release: u32,
@@ -1115,7 +1122,7 @@ impl ChunkTerrain {
         let s = &mut *s;
         let a = &mut s.ahead;
         a.step += 1;
-        if a.worker.is_none() && boxes.is_empty() {
+        if a.worker.is_none() && boxes.is_empty() && s.wanted.is_empty() {
             return;
         }
         // Land what is due, waiting for any still on the worker.
@@ -1151,6 +1158,28 @@ impl ChunkTerrain {
             }
         }
         let mut asked = 0;
+        // Ground a query found unmeshed while it could not mesh it (scripts
+        // asking): made here, off the frame, ahead of what the movers want.
+        if !s.wanted.is_empty() {
+            let wanted: Vec<[i32; 3]> = s.wanted.drain().collect();
+            for c in wanted {
+                if s.chunks.contains_key(&c) || a.queued_set.contains(&c) {
+                    continue;
+                }
+                if asked >= PER_STEP || a.queued.len() >= OUTSTANDING {
+                    s.wanted.insert(c);
+                    continue;
+                }
+                let (tx, _) = a.worker.get_or_insert_with(Self::spawn_mesher);
+                let scratch = floptle_field::scratch_for_chunk(&self.field, c, 1);
+                if tx.send((a.epoch, c, scratch, self.bucket())).is_err() {
+                    return;
+                }
+                a.queued.push_back((a.step + Self::AHEAD_STEPS, a.epoch, c));
+                a.queued_set.insert(c);
+                asked += 1;
+            }
+        }
         for &(lo, hi) in boxes {
             // The box in the field's own frame, grown by how far a query
             // looks, in chunks.
@@ -1241,12 +1270,38 @@ impl ChunkTerrain {
         self.surface.borrow().ahead.landed
     }
 
-    /// Make sure every chunk within `cell()` of `local` has been meshed.
-    fn ensure_meshed(&self, local: Vec3, s: &mut Surface) {
+    /// Make sure every chunk within `cell()` of `local` has been meshed, and
+    /// say whether they all are. While queries defer their meshing
+    /// ([`defer_query_meshing`]) a chunk not meshed is asked of the worker
+    /// instead, and the answer is `false`: the caller answers from the field.
+    fn ensure_meshed(&self, local: Vec3, s: &mut Surface) -> bool {
+        let defer = query_meshing_deferred();
+        let mut all = true;
         self.each_chunk_near(local, |c| {
-            self.mesh_into(c, s);
+            if s.chunks.contains_key(&c) {
+                return true;
+            }
+            if defer {
+                s.wanted.insert(c);
+                s.deferred += 1;
+                all = false;
+            } else {
+                let t = floptle_core::time::Instant::now();
+                self.mesh_into(c, s);
+                s.query_mesh_ms += t.elapsed().as_secs_f64() * 1e3;
+            }
             true
         });
+        all
+    }
+
+    /// What queries have cost this terrain in meshing, all told: chunks they
+    /// meshed on their own thread, the milliseconds that took, and how many
+    /// times one answered from the field instead because meshing was
+    /// deferred. A game's perf counts read the change each frame.
+    pub fn query_meshing(&self) -> (u64, f64, u64) {
+        let s = self.surface.borrow();
+        (s.meshed_by_queries, s.query_mesh_ms, s.deferred)
     }
 
     /// The chunks the drawn surface near `local` is read from — the ones
@@ -1412,7 +1467,11 @@ impl ChunkTerrain {
             return None;
         }
         let mut s = self.surface.borrow_mut();
-        self.ensure_meshed(local, &mut s);
+        if !self.ensure_meshed(local, &mut s) {
+            // Deferred: the field answers this time, within half a voxel of
+            // the drawn surface, and the triangles come from the worker.
+            return None;
+        }
         let cell = self.bucket();
         let c = cell_coord(local, cell);
         let mut best = f32::INFINITY;
@@ -1548,6 +1607,28 @@ impl ChunkTerrain {
 /// meshed whole for collision: a box of cells costs a few times what a ray at
 /// a meshed chunk does, so a chunk asked about this often is worth meshing.
 const RAYS_BEFORE_MESHING: u8 = 4;
+
+thread_local! {
+    /// See [`defer_query_meshing`].
+    static DEFER_QUERY_MESHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While `on`, a query on this thread (a ray, a sphere, a distance) near
+/// terrain whose collision triangles are not built yet does not build them
+/// there and then: it answers from the field, within half a voxel of the
+/// drawn surface, and the chunk is handed to the worker at the next physics
+/// step. The scripts run with it on, so a script's raycast never waits tens
+/// of milliseconds on ground nobody had stood on; the physics step runs
+/// with it off and always collides with the drawn surface. Answers what it
+/// was before. Off on the web build, which has no worker to hand to.
+pub fn defer_query_meshing(on: bool) -> bool {
+    let on = on && !cfg!(target_arch = "wasm32");
+    DEFER_QUERY_MESHING.with(|c| c.replace(on))
+}
+
+fn query_meshing_deferred() -> bool {
+    DEFER_QUERY_MESHING.with(|c| c.get())
+}
 
 /// The triangles of one chunk as drawn: stride 1, no skirt — the LOD-0
 /// surface, which is what the renderer draws up close (it adds skirts to every
@@ -3017,6 +3098,46 @@ mod drawn_surface_tests {
     /// more up, where a craft's sweep asks most (97,044 of 212,881 here). Its distance is the one
     /// the full walk finds, bit for bit, over rough ground, across a chunk's
     /// faces and its corner, from inside the rock to the edge of the band.
+    /// **A query with meshing deferred answers from the field and leaves the
+    /// meshing to the worker; one without meshes on the spot.** A point a
+    /// little above rough ground nobody has stood on: deferred, the distance
+    /// is the field's, nothing was meshed on this thread and the chunks are
+    /// wanted; a few physics steps later the worker's triangles have landed
+    /// and the same deferred query reads the drawn surface. Not deferred, the
+    /// query meshes there and then, and its cost is counted.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_deferred_query_answers_from_the_field_and_hands_the_ground_to_the_worker() {
+        let mut t = ChunkTerrain::new(rough());
+        t.mesh_accurate = true;
+        let p = (0..40)
+            .map(|i| Vec3::new(i as f32 * 0.31 - 3.0, 0.0, 0.7))
+            .map(|q| q + Vec3::Y * (0.6 - t.field.d(q)))
+            .find(|q| t.field.d(*q) > 0.3 && t.field.d(*q) < t.field.band())
+            .expect("a point a little above the ground");
+        let was = defer_query_meshing(true);
+        let d = t.distance(p);
+        assert_eq!(d, t.field.d(p), "deferred, the distance is not the field's");
+        let (meshed, _, deferred) = t.query_meshing();
+        assert_eq!(meshed, 0, "a deferred query meshed on the asking thread");
+        assert!(deferred > 0 && !t.surface.borrow().wanted.is_empty(), "nothing was handed to the worker");
+        for _ in 0..(ChunkTerrain::AHEAD_STEPS + 2) {
+            t.mesh_ahead(&[]);
+        }
+        assert!(t.surface.borrow().wanted.is_empty(), "the wanted ground was never asked of the worker");
+        assert!(t.meshed_near(p), "the worker's triangles never landed");
+        let drawn = t.distance(p);
+        defer_query_meshing(was);
+        assert_eq!(t.query_meshing().0, 0, "landing the worker's chunks counted as query meshing");
+        assert!((drawn - d).abs() < t.field.voxel() * 0.6, "the drawn surface is {drawn}, the field said {d}");
+
+        let mut fresh = ChunkTerrain::new(rough());
+        fresh.mesh_accurate = true;
+        let _ = fresh.distance(p);
+        let (meshed, ms, deferred) = fresh.query_meshing();
+        assert!(meshed > 0 && ms > 0.0 && deferred == 0, "not deferred, the query did not mesh and count it: {meshed} {ms} {deferred}");
+    }
+
     #[test]
     fn a_distance_above_the_ground_skips_the_buckets_too_far_to_matter() {
         let mut t = ChunkTerrain::new(rough());

@@ -366,13 +366,19 @@ impl Editor {
     /// sum to the frame instead of counting the mirror twice.
     pub(crate) fn timed_script_pass(&mut self, run: impl FnOnce(&mut Self)) {
         use floptle_core::profile::{Bucket, Span};
+        // A script's query near ground whose collision triangles are not built
+        // answers from the field and hands the ground to a worker, rather
+        // than meshing it on the spot: a raycast cost 8 to 29 ms that way.
+        let was = floptle_physics::defer_query_meshing(true);
         if !self.script_host.profile().borrow().enabled() {
             run(self);
+            floptle_physics::defer_query_meshing(was);
             return;
         }
         let mirror_before = self.script_host.profile().borrow().frame_total(Bucket::Mirror);
         let span = Span::new();
         run(self);
+        floptle_physics::defer_query_meshing(was);
         let ms = span.ms();
         let mut p = self.script_host.profile().borrow_mut();
         let mirror = p.frame_total(Bucket::Mirror) - mirror_before;
@@ -467,12 +473,17 @@ impl Editor {
                     break;
                 }
             }
-            let FrameFeed { sdt, dir, aim, frame_input } = self.feed_frame_scripts(dt, game_focused);
-            self.run_frame_scripts(sdt, &dir);
-            self.queue_script_effects();
-            self.tick_loop(sdt, aim, game_focused);
-            self.late_pass(sdt, frame_input);
-            self.settle_frame(sdt);
+            // Each phase of the frame is named inside `untimed` for whatever of
+            // it no bucket measured, so a slow frame that no bucket explains
+            // still says which phase it happened in.
+            let FrameFeed { sdt, dir, aim, frame_input } = self.timed_wait("frameFeed", |ed| ed.feed_frame_scripts(dt, game_focused));
+            self.timed_wait("frameScripts", |ed| {
+                ed.run_frame_scripts(sdt, &dir);
+                ed.queue_script_effects();
+            });
+            self.timed_wait("frameTicks", |ed| ed.tick_loop(sdt, aim, game_focused));
+            self.timed_wait("frameLate", |ed| ed.late_pass(sdt, frame_input));
+            self.timed_wait("frameSettle", |ed| ed.settle_frame(sdt));
         } else if !self.script_errors.is_empty() {
             self.script_errors.clear();
         }
@@ -1607,6 +1618,29 @@ impl Editor {
             .collect()
     }
 
+    /// The terrain meshing queries paid for this frame, into the profile:
+    /// `perf.counts()`' queryMeshed / queryMeshMs / queryDeferred and the
+    /// `terrainQueryMeshing` part. Totals live on each terrain collider; this
+    /// takes the change since the last frame (a rebuilt collider starts over).
+    fn publish_query_meshing(&mut self) {
+        let Some(sim) = self.sim.as_ref() else { return };
+        let mut now = (0u64, 0f64, 0u64);
+        for c in &sim.world.colliders {
+            if let Some(t) = c.shape.chunk_terrain() {
+                let (m, ms, d) = t.query_meshing();
+                now = (now.0 + m, now.1 + ms, now.2 + d);
+            }
+        }
+        let was = self.query_meshing_totals;
+        let delta = if now.0 < was.0 || now.2 < was.2 || now.1 < was.1 { now } else { (now.0 - was.0, now.1 - was.1, now.2 - was.2) };
+        self.query_meshing_totals = now;
+        let mut p = self.script_host.profile().borrow_mut();
+        p.set_query_meshing(delta.0 as u32, delta.1 as f32, delta.2 as u32);
+        if delta.1 > 0.0 {
+            p.record_part("terrainQueryMeshing", delta.1 as f32);
+        }
+    }
+
     fn settle_frame(&mut self, sdt: f32) {
         // Prefab spawns + node destroys scripts queued this frame — applied
         // before attachments/particles so a spawned node is complete (body,
@@ -1625,6 +1659,7 @@ impl Editor {
         // bone must read the post-physics mesh world or it swims a frame behind.
         // Spring bones swing on the post-physics root too, and before the
         // attachments read the bones, so a clip on a braid rides the braid.
+        self.publish_query_meshing();
         anim::advance_springs(&mut self.anim, &self.world, &self.mesh_registry, sdt, &self.frame_carry);
         anim::resolve_attachments(&self.anim, &mut self.world, &self.mesh_registry);
         // 2D cameras follow after all of that, for the same reason bone
@@ -2142,5 +2177,30 @@ pub(crate) fn record_step_timing(
             .and_then(|e| world.get::<floptle_core::Name>(e).map(|n| n.0.clone()))
             .unwrap_or_else(|| format!("node {owner}"));
         p.record_body(&name, ms);
+    }
+}
+
+#[cfg(test)]
+mod frame_phase_tests {
+    /// **Every phase of a play frame is named inside `untimed`** (card
+    /// 0696): whatever of the frame feed, the scripts, the ticks, the late
+    /// pass and the settle no bucket measured is a part of its own, so a slow
+    /// frame no bucket explains still says which phase it was in.
+    #[test]
+    fn a_play_frame_names_its_phases() {
+        let mut ed = crate::Editor::default();
+        ed.toggle_play();
+        ed.script_host.profile().borrow_mut().enable(true);
+        ed.end_profile_frame();
+        for _ in 0..2 {
+            ed.script_host.profile().borrow_mut().begin_frame();
+            let _ = ed.player_frame(false);
+            ed.end_profile_frame();
+        }
+        let p = ed.script_host.profile().borrow();
+        let r = p.recent_frames(1).next().expect("a frame");
+        for phase in ["frameFeed", "frameScripts", "frameTicks", "frameLate", "frameSettle"] {
+            assert!(r.parts.iter().any(|(n, _)| *n == phase), "{phase} is not named: {:?}", r.parts);
+        }
     }
 }

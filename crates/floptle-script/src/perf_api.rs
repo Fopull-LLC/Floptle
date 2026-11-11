@@ -391,6 +391,16 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
             let (checked, relaid) = p.borrow().decal_relay_counts();
             out.set("decalsChecked", checked)?;
             out.set("decalsRelaid", relaid)?;
+            // Last frame's terrain collision meshing that queries paid for:
+            // chunks meshed on the spot (a raycast or a sphere query near
+            // ground nobody had stood on) and their milliseconds, and the
+            // queries that answered from the field instead, their ground
+            // handed to a worker. Scripts never mesh on the spot; physics
+            // contacts can.
+            let (qm, qms, qd) = p.borrow().query_meshing();
+            out.set("queryMeshed", qm)?;
+            out.set("queryMeshMs", qms)?;
+            out.set("queryDeferred", qd)?;
             // Terrain edits refused because the queue was full, since the
             // start: zero for a game that paces with `terrain.capacity()`.
             out.set("terrainDropped", crate::terrain_api::dropped_count(lua))?;

@@ -3286,6 +3286,9 @@ struct Editor {
     /// ticks for the next frame pass (see space.rs, play_step.rs).
     tick_carry: std::collections::HashMap<u32, [f64; 3]>,
     frame_carry: std::collections::HashMap<u32, [f64; 3]>,
+    /// Every terrain collider's query-meshing totals as of the last frame
+    /// (see `publish_query_meshing`).
+    query_meshing_totals: (u64, f64, u64),
     /// Kinematic bodies on a moving world as the last tick left their nodes,
     /// with that tick's carry: a node found elsewhere when the next tick
     /// starts was moved outside `fixedUpdate`. See `warn_kinematic_moved_between_ticks`.

@@ -558,6 +558,10 @@ pub struct FrameProfile {
     /// Last frame's marks asked whether the ground under them moved, and
     /// marks laid again.
     decal_relay_counts: (u32, u32),
+    /// Last frame's terrain meshing a query paid for: chunks meshed on
+    /// the asking thread, the milliseconds, and queries answered from the
+    /// field because their meshing was deferred.
+    query_meshing: (u32, f32, u32),
     /// Rays scripts cast this frame and the milliseconds they took, and last
     /// frame's once folded. Inside the `scripts` bucket, not beside it.
     rays_frame: (u64, f32),
@@ -1015,6 +1019,18 @@ impl FrameProfile {
         self.decal_relay_counts
     }
 
+    /// Last frame's terrain meshing queries paid for, set once a frame:
+    /// `(chunks meshed on the asking thread, their ms, queries answered
+    /// from the field instead because meshing was deferred)`.
+    pub fn set_query_meshing(&mut self, meshed: u32, ms: f32, deferred: u32) {
+        self.query_meshing = (meshed, ms, deferred);
+    }
+
+    /// See [`Self::set_query_meshing`].
+    pub fn query_meshing(&self) -> (u32, f32, u32) {
+        self.query_meshing
+    }
+
     /// Say whether the game has fallen behind real time.
     pub fn set_overloaded(&mut self, on: bool) {
         self.overloaded = on;
@@ -1102,6 +1118,18 @@ impl FrameProfile {
             let rest = between - self.frame_measured();
             if rest > 0.0 {
                 *self.frame.entry(Bucket::Other).or_insert(0.0) += rest;
+            }
+        }
+        // What the scripts bucket spent that no hook and no named `scripts*`
+        // part accounts for: named, so a pass that costs more than its hooks
+        // says how much is still unexplained instead of hiding it.
+        {
+            let bucket = self.frame.get(&Bucket::Scripts).copied().unwrap_or(0.0);
+            let hooks: f32 = self.script_frame.values().sum();
+            let parts: f32 = self.parts_frame.iter().filter(|(p, _)| p.starts_with("scripts")).map(|(_, ms)| ms).sum();
+            let rest = bucket - hooks - parts;
+            if rest > 0.05 {
+                self.record_part("scriptsUnnamed", rest);
             }
         }
         let waits = std::mem::take(&mut self.waits_frame);
@@ -1401,6 +1429,30 @@ mod tests {
         let other = h[0].buckets.iter().find(|(b, _)| *b == Bucket::Other).map(|(_, ms)| *ms);
         assert!(other.is_some_and(|ms| ms >= 45.0), "the unmeasured time must be named: {h:?}");
         assert_eq!(h[0].buckets[0].0, Bucket::Other, "and it is the costliest part");
+    }
+
+    /// **What the scripts bucket spent outside every hook and named part is
+    /// named too.** A 5 ms pass with 2 ms in a hook and 1 ms in a named part
+    /// leaves `scriptsUnnamed` at 2 ms; a pass its hooks and parts account
+    /// for leaves none.
+    #[test]
+    fn the_scripts_pass_names_what_its_hooks_and_parts_do_not() {
+        let mut p = FrameProfile::default();
+        p.enable(true);
+        p.end_frame();
+        p.record(Bucket::Scripts, 5.0);
+        p.record_script("player", 2.0);
+        p.record_part("scriptsSeed", 1.0);
+        p.end_frame();
+        let parts = p.recent_frames(1).next().expect("a frame").parts.clone();
+        let unnamed = parts.iter().find(|(n, _)| *n == "scriptsUnnamed").map(|(_, ms)| *ms);
+        assert!(unnamed.is_some_and(|ms| (ms - 2.0).abs() < 1e-3), "scriptsUnnamed is {unnamed:?}: {parts:?}");
+        p.record(Bucket::Scripts, 3.0);
+        p.record_script("player", 2.0);
+        p.record_part("scriptsSeed", 1.0);
+        p.end_frame();
+        let parts = p.recent_frames(1).next().expect("a frame").parts.clone();
+        assert!(!parts.iter().any(|(n, _)| *n == "scriptsUnnamed"), "a fully accounted pass named some: {parts:?}");
     }
 
     /// **A hitch names the work inside its bucket.** A mining laser's slow
