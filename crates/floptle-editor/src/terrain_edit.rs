@@ -6671,7 +6671,11 @@ mod residency_tests {
             }
         }
         each.sort_by(f64::total_cmp);
-        let p90 = each[each.len() * 9 / 10];
+        // The median bite, not a high percentile: on a four-core CI runner
+        // running other tests beside this one, the slowest few of thirty
+        // bites read seven chunk meshes on one run in two while a quiet
+        // machine read two. The cost this guards was fifteen times the limit.
+        let mid = each[each.len() / 2];
         // Against meshing one chunk at full detail, timed here too, so a busy
         // machine slows both: a bite costs about two of them, and with the
         // collision meshes built on the main thread it cost thirty.
@@ -6685,7 +6689,7 @@ mod residency_tests {
             })
             .collect();
         mesh.sort_by(f64::total_cmp);
-        assert!(p90 < 5.0 * mesh[2], "a bite costs the main thread {p90:.2} ms (90th percentile), a chunk's mesh {:.2} ms", mesh[2]);
+        assert!(mid < 5.0 * mesh[2], "a bite costs the main thread {mid:.2} ms (median), a chunk's mesh {:.2} ms", mesh[2]);
     }
 
     /// Sync terrain `e`'s meshes from `cam` until every chunk the field holds
