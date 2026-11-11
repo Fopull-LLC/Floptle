@@ -6834,20 +6834,38 @@ impl ScriptHost {
         // Web replies land here — the frame pass, never the tick pass. A reply
         // arrives when it arrives, so a rollback replay must never see one.
         // Before `update`, so a callback's writes are visible to the same frame.
+        // Each kind of reply named on its own as well as in the total, so a
+        // heavy one says which it is.
         let drains_t = self.part_start();
+        let t = self.part_start();
         crate::http_api::set_now(&self.http, time as f64);
         crate::http_api::drain(&self.lua, &self.http, &self.logs);
         crate::account_api::drain(&self.lua, &self.account, &self.logs);
+        self.part_end("callbacksHttp", t);
+        let t = self.part_start();
         crate::preload_api::drain(&self.lua, &self.preloads, &self.logs);
+        self.part_end("callbacksPreload", t);
+        let t = self.part_start();
         crate::write_api::drain(&self.lua, &self.writes, &self.logs);
-        crate::capture_api::drain(&self.lua, &self.captures, &self.logs);
-        crate::compute_api::drain(&self.lua, &self.compute, &self.logs);
         crate::file_api::drain(&self.lua, &self.files, &self.logs);
+        self.part_end("callbacksFile", t);
+        let t = self.part_start();
+        crate::capture_api::drain(&self.lua, &self.captures, &self.logs);
+        self.part_end("callbacksCapture", t);
+        let t = self.part_start();
+        crate::compute_api::drain(&self.lua, &self.compute, &self.logs);
+        self.part_end("callbacksCompute", t);
+        let t = self.part_start();
         crate::texture_api::drain(&self.lua, &self.textures, &self.logs);
+        self.part_end("callbacksTexture", t);
+        let t = self.part_start();
         crate::terrain_api::drain_planet_queries(&self.lua, &self.terrain_planet, &self.logs);
+        self.part_end("callbacksPlanet", t);
         // Pumps the platform backend's callbacks and fires
         // `steam.onPersonaChanged` — a no-op under `NullPlatform`.
+        let t = self.part_start();
         crate::steam_api::drain(&self.lua, &self.platform, &self.steam_state, &self.logs);
+        self.part_end("callbacksSteam", t);
         self.part_end("scriptsCallbacks", drains_t);
         // Sleepers whose timer ran out, or whose camera came close, wake before
         // the pass that would call them.
