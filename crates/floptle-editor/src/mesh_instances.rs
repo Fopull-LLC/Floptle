@@ -544,7 +544,13 @@ pub(crate) fn push_mesh_instances(
             if opaque && !alike && merge_arrays_on() && !exts.iter().any(|&e| raster.is_transmissive(e)) {
                 let slot_tex: Vec<Option<TexId>> =
                     looks.iter().enumerate().map(|(i, l)| l.0.or_else(|| m.own_tex.get(i).copied().flatten())).collect();
-                if let Some((set, layers)) = raster.array_set_for(gpu, &slot_tex) {
+                let set = raster.array_set_for(gpu, &slot_tex);
+                if set.is_none()
+                    && let Some(why) = raster.array_refusal(&slot_tex)
+                {
+                    raster.note_merge_refused(&entity.index().to_string(), why);
+                }
+                if let Some((set, layers)) = set {
                     let slots: Vec<MaterialParams> = looks.iter().map(|l| l.1).collect();
                     if let Some(t) = raster.push_slot_table_layered(&m.starts, &slots, Some(&layers)) {
                         let paint = raster.mesh_paint_base(m.mesh);

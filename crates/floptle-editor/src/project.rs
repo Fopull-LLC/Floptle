@@ -819,6 +819,10 @@ impl Editor {
                                     })
                                 })
                                 .collect();
+                            // It may draw through texture arrays (its own pictures,
+                            // or ones overrides bring): have their pipelines built
+                            // off the frame before it is first drawn.
+                            raster.prewarm_arrays(gpu);
                             crate::MergedMesh { mesh: id, starts, arrays, own_tex }
                         })
                 };

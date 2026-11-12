@@ -376,3 +376,36 @@ fn a_wall_textured_by_its_overrides_is_one_instance_and_draws_as_its_parts() {
     assert_eq!(differ, 0, "the override-textured wall, merged, differs from its parts in {differ} pixels");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A merge the arrays refuse is counted and says why** (card 0690): the
+/// override-textured wall with one picture of another size draws as its
+/// parts, and the refusal names the kind of picture and both sizes.
+#[test]
+fn a_refused_merge_is_counted_and_says_why() {
+    let Some((mut ed, wall, root)) = editor_with_wall("refused") else { return };
+    std::fs::create_dir_all(root.join("textures")).unwrap();
+    let img = |name: &str, size: u32, tint: [u8; 3]| {
+        let mut im = image::RgbaImage::new(size, size);
+        for (x, _, p) in im.enumerate_pixels_mut() {
+            *p = image::Rgba([tint[0], tint[1], (x * 8) as u8, 255]);
+        }
+        im.save(root.join("textures").join(name)).unwrap();
+    };
+    img("a.png", 32, [200, 90, 60]);
+    img("b.png", 32, [60, 200, 90]);
+    img("small.png", 16, [90, 60, 200]);
+    let mut om = floptle_core::ObjectMaterials::default();
+    let look = |tex: &str| floptle_core::Material { shading: floptle_core::Shading::Physical, texture: Some(format!("textures/{tex}")), ..Default::default() };
+    om.0.insert("Outside".into(), look("a.png"));
+    om.0.insert("Inside".into(), look("b.png"));
+    om.0.insert("Trim".into(), look("small.png"));
+    ed.world.insert(wall, om);
+    let _ = picture(&mut ed);
+    let _ = ed.raster.as_ref().unwrap().take_merge_refusals();
+    assert_eq!(instances_of(&mut ed, wall), 3, "a wall with a picture of another size merged");
+    let (n, why) = ed.raster.as_ref().unwrap().take_merge_refusals();
+    assert!(n >= 1, "the refused merge was not counted");
+    let reason = &why[0].1;
+    assert!(reason.contains("base") && reason.contains("32x32") && reason.contains("16x16"), "the reason does not say what clashed: {reason}");
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -404,6 +404,10 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
             // The scripts' heap now, KB: a level, not what a frame allocates
             // (perf.allocations says that).
             out.set("luaHeapKb", (lua.used_memory() / 1024) as u64)?;
+            // Last frame's merged models drawn as their parts because their
+            // pictures could not share texture arrays (another size or
+            // sampling for one kind of picture): the Console names each once.
+            out.set("mergesRefused", p.borrow().merges_refused())?;
             // Terrain edits refused because the queue was full, since the
             // start: zero for a game that paces with `terrain.capacity()`.
             out.set("terrainDropped", crate::terrain_api::dropped_count(lua))?;

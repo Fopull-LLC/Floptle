@@ -3289,6 +3289,8 @@ struct Editor {
     /// Every terrain collider's query-meshing totals as of the last frame
     /// (see `publish_query_meshing`).
     query_meshing_totals: (u64, f64, u64),
+    /// Models whose refused texture-array merge the Console has named.
+    merge_refusals_said: std::collections::HashSet<String>,
     /// Kinematic bodies on a moving world as the last tick left their nodes,
     /// with that tick's carry: a node found elsewhere when the next tick
     /// starts was moved outside `fixedUpdate`. See `warn_kinematic_moved_between_ticks`.

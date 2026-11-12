@@ -562,6 +562,9 @@ pub struct FrameProfile {
     /// the asking thread, the milliseconds, and queries answered from the
     /// field because their meshing was deferred.
     query_meshing: (u32, f32, u32),
+    /// Last frame's merged models that drew as their parts because their
+    /// pictures could not share texture arrays.
+    merges_refused: u32,
     /// Rays scripts cast this frame and the milliseconds they took, and last
     /// frame's once folded. Inside the `scripts` bucket, not beside it.
     rays_frame: (u64, f32),
@@ -1029,6 +1032,17 @@ impl FrameProfile {
     /// See [`Self::set_query_meshing`].
     pub fn query_meshing(&self) -> (u32, f32, u32) {
         self.query_meshing
+    }
+
+    /// Last frame's merged models that drew as their parts because their
+    /// pictures could not share texture arrays, set once a frame.
+    pub fn set_merges_refused(&mut self, n: u32) {
+        self.merges_refused = n;
+    }
+
+    /// See [`Self::set_merges_refused`].
+    pub fn merges_refused(&self) -> u32 {
+        self.merges_refused
     }
 
     /// Say whether the game has fallen behind real time.

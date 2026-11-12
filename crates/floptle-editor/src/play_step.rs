@@ -142,6 +142,40 @@ impl Editor {
     /// that nothing else names unless the game asks `perf.mirrorCause()`.
     pub(crate) fn end_profile_frame(&mut self) {
         self.name_gpu_out_of_memory(floptle_render::out_of_memory_events());
+        // A draw that waited for the texture-array pipelines (built off the
+        // frame, normally ready by then): compile time the frame paid, named.
+        if let Some(r) = self.raster.as_ref() {
+            let ms = r.take_array_compile_ms();
+            if ms > 0.05 {
+                self.note_asset("texture arrays", "pipelineCompile", ms);
+            }
+        }
+        // Merged models that drew as their parts because their pictures could
+        // not share texture arrays: counted for perf.counts, and each model's
+        // reason said once, naming it.
+        if let Some(r) = self.raster.as_ref() {
+            let (n, why) = r.take_merge_refusals();
+            self.script_host.profile().borrow_mut().set_merges_refused(n);
+            for (key, reason) in why {
+                let Some(e) = key.parse::<u32>().ok().and_then(|i| self.world.entity_at(i)) else { continue };
+                let path = match self.world.get::<floptle_core::Matter>(e) {
+                    Some(floptle_core::Matter::Mesh { asset_path }) => asset_path.clone(),
+                    _ => continue,
+                };
+                if !self.merge_refusals_said.insert(path.clone()) {
+                    continue;
+                }
+                let name = self.world.get::<floptle_core::Name>(e).map(|n| n.0.clone()).unwrap_or_default();
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!(
+                        "{path} (on \"{name}\") draws one instance per part instead of one for the whole model: {reason}. \
+                         Give its pictures the same size and sampling (textures.ron) to merge it."
+                    ),
+                    None,
+                );
+            }
+        }
         let (streak, cause) = {
             let mut p = self.script_host.profile().borrow_mut();
             p.set_pacing_setup(self.pacing_setup());

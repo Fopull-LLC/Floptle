@@ -1188,7 +1188,12 @@ pub struct Raster {
     /// with ([`Self::array_passes`]): made the first time one is drawn, so a
     /// project that never merges such a model never compiles them, and made
     /// again after the field shader changes.
-    array_passes: std::cell::OnceCell<ArrayPasses>,
+    array_passes: std::sync::Arc<std::sync::OnceLock<ArrayPasses>>,
+    /// A worker is building `array_passes` ([`Self::prewarm_arrays`]).
+    array_building: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// What the last draw that needed `array_passes` waited for them, ms,
+    /// not yet taken ([`Self::take_array_compile_ms`]).
+    array_wait_ms: std::cell::Cell<f32>,
     /// Bumped whenever `custom_field` changes, so a shader built on another
     /// thread against the old field is not installed.
     field_rev: u64,
@@ -1220,6 +1225,22 @@ pub(crate) fn splice_block(src: &str, begin: &str, end: &str, replacement: &str)
 /// pictures draws with.
 pub fn array_source(code: Option<(&str, &str)>) -> String {
     splice_block(&raster_custom_source(code), "//[group1-begin]", "//[group1-end]", include_str!("raster_arrays.wgsl").trim_end())
+}
+
+/// Build the array family from `source` over the given group(0), array
+/// group(1) and group(2) layouts. A free function, so a worker can run it.
+fn build_array_passes(
+    target: (&wgpu::Device, wgpu::TextureFormat, Option<&wgpu::PipelineCache>),
+    source: &str,
+    (globals, arrays, field): (&wgpu::BindGroupLayout, &wgpu::BindGroupLayout, &wgpu::BindGroupLayout),
+) -> ArrayPasses {
+    let module = target.0.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("raster-arrays"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let (pipeline, transparent, _mask, prepass, primed) =
+        Raster::build_pass_pipelines(target, &module, globals, arrays, field, "vs", "-array");
+    ArrayPasses { pipeline, primed, transparent, prepass }
 }
 
 /// The four pipelines of the array build: opaque, primed opaque, blended and
@@ -2185,7 +2206,9 @@ impl Raster {
             globals_layout,
             field_layout,
             custom_field: None,
-            array_passes: std::cell::OnceCell::new(),
+            array_passes: Default::default(),
+            array_building: Default::default(),
+            array_wait_ms: Default::default(),
             field_rev: 0,
             flsl_built: Default::default(),
         }
@@ -2209,7 +2232,7 @@ impl Raster {
         // shade, blend and silhouette from the same posed vertices — a prepass
         // that used the bind pose would depth-reject the pose that shades.
         let build = |vs_entry: &'static str, tag: &str| {
-            Self::build_pass_pipelines(gpu, module, globals_layout, tex_layout, field_layout, vs_entry, tag)
+            Self::build_pass_pipelines((&gpu.device, gpu.scene_format(), gpu.pipeline_cache.as_ref()), module, globals_layout, tex_layout, field_layout, vs_entry, tag)
         };
         let (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline, primed_pipeline) = build("vs", "");
         let (skin_pipeline, skin_transparent_pipeline, skin_mask_pipeline, skin_prepass_pipeline, skin_primed_pipeline) =
@@ -2228,25 +2251,69 @@ impl Raster {
         }
     }
 
-    /// The array build's pipelines ([`ArrayPasses`]), made on first use.
+    /// The array build's pipelines ([`ArrayPasses`]): the worker's, waiting
+    /// for it if it is still building them, else made here. What the draw
+    /// waited is kept for [`Self::take_array_compile_ms`].
     fn array_passes(&self, gpu: &Gpu) -> &ArrayPasses {
-        self.array_passes.get_or_init(|| {
+        if let Some(p) = self.array_passes.get() {
+            return p;
+        }
+        let t = floptle_core::time::Instant::now();
+        let p = if self.array_building.load(std::sync::atomic::Ordering::Acquire) {
+            self.array_passes.wait()
+        } else {
             let code = self.custom_field.as_ref().map(|(f, s)| (f.as_str(), s.as_str()));
-            let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("raster-arrays"),
-                source: wgpu::ShaderSource::Wgsl(array_source(code).into()),
-            });
-            let (pipeline, transparent, _mask, prepass, primed) = Self::build_pass_pipelines(
-                gpu,
-                &module,
-                &self.globals_layout,
-                &self.pools.layout,
-                &self.field_layout,
-                "vs",
-                "-array",
+            let made = build_array_passes(
+                (&gpu.device, gpu.scene_format(), gpu.pipeline_cache.as_ref()),
+                &array_source(code),
+                (&self.globals_layout, &self.pools.layout, &self.field_layout),
             );
-            ArrayPasses { pipeline, primed, transparent, prepass }
-        })
+            self.array_passes.get_or_init(|| made)
+        };
+        self.array_wait_ms.set(self.array_wait_ms.get() + t.elapsed().as_secs_f32() * 1000.0);
+        p
+    }
+
+    /// Start building the pipelines a merged model whose slots wear pooled
+    /// pictures draws with, on a worker thread, if nothing has yet: so the
+    /// first such model drawn finds them ready instead of compiling them
+    /// inside its frame (180 ms on a desktop). Call it when a model that
+    /// may merge that way arrives. Built inline on first use on the web,
+    /// which has no threads to build them on.
+    #[cfg(target_arch = "wasm32")]
+    pub fn prewarm_arrays(&self, _gpu: &Gpu) {}
+
+    /// See the web build's twin above: on a desktop the pipelines are built on
+    /// a worker thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn prewarm_arrays(&self, gpu: &Gpu) {
+        if self.array_passes.get().is_some() || self.array_building.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        let code = self.custom_field.as_ref().map(|(f, s)| (f.as_str(), s.as_str()));
+        let source = array_source(code);
+        let (device, format, cache) = (gpu.device.clone(), gpu.scene_format(), gpu.pipeline_cache.clone());
+        let layouts = (self.globals_layout.clone(), self.pools.layout.clone(), self.field_layout.clone());
+        let slot = self.array_passes.clone();
+        let spawned = std::thread::Builder::new().name("raster-array-pipelines".into()).spawn(move || {
+            let made = build_array_passes((&device, format, cache.as_ref()), &source, (&layouts.0, &layouts.1, &layouts.2));
+            let _ = slot.set(made);
+        });
+        if spawned.is_err() {
+            self.array_building.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Whether the array pipelines are built ([`Self::prewarm_arrays`]).
+    pub fn array_pipelines_ready(&self) -> bool {
+        self.array_passes.get().is_some()
+    }
+
+    /// What draws have waited for the array pipelines since the last call,
+    /// ms: compile time the frame paid, for the caller to name
+    /// `pipelineCompile`. Zero once they are ready.
+    pub fn take_array_compile_ms(&self) -> f32 {
+        self.array_wait_ms.replace(0.0)
     }
 
     /// The five pipelines of one vertex entry point (`vs` or `vs_skin`):
@@ -2256,7 +2323,7 @@ impl Raster {
     /// with ([`Self::array_passes`]).
     #[allow(clippy::type_complexity)]
     fn build_pass_pipelines(
-        gpu: &Gpu,
+        (device, scene_format, cache): (&wgpu::Device, wgpu::TextureFormat, Option<&wgpu::PipelineCache>),
         module: &wgpu::ShaderModule,
         globals_layout: &wgpu::BindGroupLayout,
         tex_layout: &wgpu::BindGroupLayout,
@@ -2264,7 +2331,6 @@ impl Raster {
         vs_entry: &'static str,
         tag: &str,
     ) -> (wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline) {
-        let device = &gpu.device;
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("raster"),
             bind_group_layouts: &[Some(globals_layout), Some(tex_layout), Some(field_layout)],
@@ -2297,13 +2363,13 @@ impl Raster {
                 entry_point: Some("fs"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.scene_format(),
+                    format: scene_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
             multiview_mask: None,
-            cache: gpu.pipeline_cache.as_ref(),
+            cache,
         });
 
         let primed_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -2329,13 +2395,13 @@ impl Raster {
                 entry_point: Some("fs"),
                 compilation_options: wgpu::PipelineCompilationOptions { constants: &[("primed_depth", 1.0)], ..Default::default() },
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.scene_format(),
+                    format: scene_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
             multiview_mask: None,
-            cache: gpu.pipeline_cache.as_ref(),
+            cache,
         });
 
         // Depth-only prepass (opaque instances, conservative alpha discard): primes
@@ -2372,7 +2438,7 @@ impl Raster {
                 targets: &[],
             }),
             multiview_mask: None,
-            cache: gpu.pipeline_cache.as_ref(),
+            cache,
         });
 
         // Transparent variant: identical vertex/fragment, but alpha-blends and does not
@@ -2407,13 +2473,13 @@ impl Raster {
                 entry_point: Some("fs"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.scene_format(),
+                    format: scene_format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
             multiview_mask: None,
-            cache: gpu.pipeline_cache.as_ref(),
+            cache,
         });
 
         // Silhouette-mask pipeline: rasterizes a selected mesh as solid 1.0 into a
@@ -2447,7 +2513,7 @@ impl Raster {
                 })],
             }),
             multiview_mask: None,
-            cache: gpu.pipeline_cache.as_ref(),
+            cache,
         });
             (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline, primed_pipeline)
     }
@@ -2578,8 +2644,10 @@ impl Raster {
         self.skin_prepass_pipeline = core.skin_prepass_pipeline;
         self.primed_pipeline = core.primed_pipeline;
         self.skin_primed_pipeline = core.skin_primed_pipeline;
-        // Built from the same source, so made again on first use.
-        self.array_passes = std::cell::OnceCell::new();
+        // Built from the same source, so made again (a worker still building
+        // the old ones fills a slot nobody reads any more).
+        self.array_passes = Default::default();
+        self.array_building = Default::default();
         // Rebuild every custom-shader pipeline against the new field module.
         for i in 0..self.flsl_shaders.len() {
             let (chunk, tex_slots, blend) = {

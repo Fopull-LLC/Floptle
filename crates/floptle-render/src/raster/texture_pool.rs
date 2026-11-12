@@ -78,6 +78,9 @@ pub(crate) struct Pools {
     pub array_ids: HashSet<u32>,
     /// group(1) over `D2Array` textures.
     pub layout: wgpu::BindGroupLayout,
+    /// Merges refused this frame ([`Raster::note_merge_refused`]), and why.
+    refused: std::cell::Cell<u32>,
+    refusals: std::cell::RefCell<Vec<(String, String)>>,
 }
 
 impl Pools {
@@ -91,6 +94,8 @@ impl Pools {
             array_sets: HashMap::new(),
             array_ids: HashSet::new(),
             layout: super::surface_bind_layout_of(device, wgpu::TextureViewDimension::D2Array, "raster-surface-array"),
+            refused: Default::default(),
+            refusals: Default::default(),
         }
     }
 
@@ -294,6 +299,61 @@ impl Raster {
         let id = self.make_array_set(gpu, pool_of_kind);
         self.pools.array_sets.insert(key, id);
         Some((id, layers))
+    }
+
+    /// Why [`Self::array_set_for`] refused these slots, in words a project
+    /// can act on: the first kind of picture whose pictures cannot share an
+    /// array, with each one's size and sampling. `None` when nothing stands
+    /// in the way.
+    pub fn array_refusal(&self, slots: &[Option<TexId>]) -> Option<String> {
+        const KINDS: [&str; SURFACE_SLOTS] = ["base", "normal map", "roughness map", "metallic map", "occlusion map", "emissive map"];
+        let describe = |t: u32| -> String {
+            match self.textures.get(t as usize) {
+                Some(b) => {
+                    let tex = &b._texture;
+                    format!("{}x{} with {} mip level(s), {:?}", tex.width(), tex.height(), tex.mip_level_count(), b.sampling.filter)
+                }
+                None => "a missing picture".into(),
+            }
+        };
+        let pictures: Vec<[u32; SURFACE_SLOTS]> = slots.iter().map(|&t| self.pools.pictures_of(t)).collect();
+        for (k, kind) in KINDS.iter().enumerate() {
+            let mut first: Option<(u32, PoolLayer)> = None;
+            for p in &pictures {
+                let t = p[k];
+                if t == u32::MAX {
+                    continue;
+                }
+                let Some(&at) = self.pools.of_tex.get(&t) else {
+                    return Some(format!("its {kind} {} could not be copied into a texture array", describe(t)));
+                };
+                match first {
+                    None => first = Some((t, at)),
+                    Some((t0, a0)) if a0.pool != at.pool => {
+                        return Some(format!(
+                            "its {kind}s differ: {} beside {} (pictures of one kind share an array only at the same size and sampling)",
+                            describe(t0),
+                            describe(t)
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    /// Note that a merged model `model` drew as its parts because its slots'
+    /// pictures could not share arrays (see [`Self::array_refusal`]): counted
+    /// for the frame, and the reason kept for the caller to report once.
+    pub fn note_merge_refused(&self, model: &str, why: String) {
+        self.pools.refused.set(self.pools.refused.get() + 1);
+        self.pools.refusals.borrow_mut().push((model.to_string(), why));
+    }
+
+    /// This frame's merges refused, and the reasons noted, since the last call.
+    pub fn take_merge_refusals(&self) -> (u32, Vec<(String, String)>) {
+        (self.pools.refused.replace(0), std::mem::take(&mut *self.pools.refusals.borrow_mut()))
     }
 
     /// The array that takes pictures of `key`, made if there is none.

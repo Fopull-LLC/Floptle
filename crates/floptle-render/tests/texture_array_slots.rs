@@ -205,3 +205,43 @@ fn three_textured_parts_and_their_array_merge_draw_the_same_pixels() {
         assert_eq!(differ, 0, "{mode:?}: the array-merged model differs from its parts in {differ} pixels");
     }
 }
+
+/// **The array pipelines can be built off the frame, and a draw that has to
+/// wait for them says so.** A renderer that was never told builds them inside
+/// its first array draw, and `take_array_compile_ms` reports that wait; one
+/// told to prewarm builds them on a worker, and once they are ready its first
+/// array draw waits for nothing.
+#[test]
+fn the_array_pipelines_build_off_the_frame() {
+    let gpu = Gpu::headless(SIZE, SIZE);
+    if !gpu.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
+        eprintln!("skipped — this device cannot build the raster pass, so nothing can be drawn");
+        return;
+    }
+    let color = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("texture-array-prewarm"),
+        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: gpu.config.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let light = Raymarch::new(&gpu);
+    let mut cold = Raster::new(&gpu);
+    assert!(!cold.array_pipelines_ready());
+    draw(&gpu, &mut cold, &light, &color, true, Mode::Plain);
+    assert!(cold.take_array_compile_ms() > 0.0, "the first array draw built the pipelines and said nothing");
+    assert_eq!(cold.take_array_compile_ms(), 0.0, "the wait was reported twice");
+
+    let mut warm = Raster::new(&gpu);
+    warm.prewarm_arrays(&gpu);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !warm.array_pipelines_ready() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(warm.array_pipelines_ready(), "the worker never finished the array pipelines");
+    draw(&gpu, &mut warm, &light, &color, true, Mode::Plain);
+    assert_eq!(warm.take_array_compile_ms(), 0.0, "a prewarmed renderer's first array draw still waited");
+}
