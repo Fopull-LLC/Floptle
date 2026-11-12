@@ -183,6 +183,43 @@ pub fn is_built_mesh(key: &str) -> bool {
 }
 
 /// A flat number array, `per` numbers per vertex, `n` vertices (when known).
+/// A `mesh.build` array: a flat list of numbers, or a buffer of
+/// little-endian f32s (`buffer.writef32`), which is read in one copy rather
+/// than a number at a time. A 45,000-vertex mesh read as lists cost 12 ms of
+/// the frame, nearly all of it crossing into the engine one number at a time.
+fn floats(v: &Value, key: &str, per: usize, n: Option<usize>) -> mlua::Result<Vec<f32>> {
+    match v {
+        Value::Table(t) => flat(t, key, per, n),
+        Value::Buffer(b) => {
+            let bytes = b.to_vec();
+            if !bytes.len().is_multiple_of(4 * per) {
+                return Err(mlua::Error::runtime(format!(
+                    "mesh.build: the `{key}` buffer is {} bytes, not a whole number of {per} f32s ({} bytes each)",
+                    bytes.len(),
+                    4 * per
+                )));
+            }
+            let out: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+            if let Some(n) = n
+                && out.len() / per != n
+            {
+                return Err(mlua::Error::runtime(format!(
+                    "mesh.build: the `{key}` buffer has {} entries for {n} vertices; it needs one per vertex",
+                    out.len() / per
+                )));
+            }
+            if let Some(i) = out.iter().position(|v| !v.is_finite()) {
+                return Err(mlua::Error::runtime(format!("mesh.build: the `{key}` buffer's f32 {i} (0-based) is not a finite number")));
+            }
+            Ok(out)
+        }
+        other => Err(mlua::Error::runtime(format!(
+            "mesh.build: `{key}` is a {}; it takes a flat list of numbers or a buffer of f32s",
+            other.type_name()
+        ))),
+    }
+}
+
 fn flat(t: &Table, key: &str, per: usize, n: Option<usize>) -> mlua::Result<Vec<f32>> {
     let len = t.raw_len();
     if !len.is_multiple_of(per) {
@@ -237,11 +274,13 @@ fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
 /// Read and check a `mesh.build{...}` table.
 pub(crate) fn parse_build(t: &Table) -> mlua::Result<MeshRequest> {
     crate::opts::check_keys(t, BUILD_KEYS, "mesh.build")?;
-    let need = |key: &str| -> mlua::Result<Table> {
-        t.raw_get::<Option<Table>>(key)?
-            .ok_or_else(|| mlua::Error::runtime(format!("mesh.build needs `{key}`, a flat list of numbers")))
+    let need = |key: &str| -> mlua::Result<Value> {
+        match t.raw_get::<Value>(key)? {
+            Value::Nil => Err(mlua::Error::runtime(format!("mesh.build needs `{key}`, a flat list of numbers or a buffer"))),
+            v => Ok(v),
+        }
     };
-    let pos = flat(&need("positions")?, "positions", 3, None)?;
+    let pos = floats(&need("positions")?, "positions", 3, None)?;
     let n = pos.len() / 3;
     if n == 0 {
         return Err(mlua::Error::runtime("mesh.build: `positions` is empty"));
@@ -254,7 +293,29 @@ pub(crate) fn parse_build(t: &Table) -> mlua::Result<MeshRequest> {
     let positions: Vec<[f32; 3]> = pos.as_chunks::<3>().0.to_vec();
 
     let idx = need("indices")?;
-    let count = idx.raw_len();
+    // A buffer of u32s is numbered from 0, as the GPU numbers vertices; a list
+    // from 1, as Lua numbers everything.
+    let from_buffer: Option<Vec<u32>> = match &idx {
+        Value::Buffer(b) => {
+            let bytes = b.to_vec();
+            if !bytes.len().is_multiple_of(4) {
+                return Err(mlua::Error::runtime(format!("mesh.build: the `indices` buffer is {} bytes, not a whole number of u32s", bytes.len())));
+            }
+            Some(bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect())
+        }
+        Value::Table(_) => None,
+        other => {
+            return Err(mlua::Error::runtime(format!(
+                "mesh.build: `indices` is a {}; it takes a list of vertex numbers or a buffer of u32s",
+                other.type_name()
+            )));
+        }
+    };
+    let count = match (&from_buffer, &idx) {
+        (Some(b), _) => b.len(),
+        (None, Value::Table(t)) => t.raw_len(),
+        _ => 0,
+    };
     if count == 0 || count % 3 != 0 {
         return Err(mlua::Error::runtime(format!(
             "mesh.build: `indices` holds {count} entries; it takes three per triangle"
@@ -265,35 +326,51 @@ pub(crate) fn parse_build(t: &Table) -> mlua::Result<MeshRequest> {
             "mesh.build: {count} indices is more than the {MAX_MESH_INDICES} one mesh may have"
         )));
     }
-    let mut indices = Vec::with_capacity(count);
-    for i in 1..=count {
-        let v: f64 = idx.raw_get(i)?;
-        if v.fract() != 0.0 || v < 1.0 || v > n as f64 {
-            return Err(mlua::Error::runtime(format!(
-                "mesh.build: `indices`[{i}] is {v}; a vertex is numbered 1 to {n}"
-            )));
+    let indices = match (from_buffer, &idx) {
+        (Some(b), _) => {
+            if let Some(i) = b.iter().position(|&v| v as usize >= n) {
+                return Err(mlua::Error::runtime(format!(
+                    "mesh.build: the `indices` buffer's u32 {i} is {}; numbered from 0, a vertex is 0 to {}",
+                    b[i],
+                    n - 1
+                )));
+            }
+            b
         }
-        indices.push(v as u32 - 1);
-    }
+        (None, Value::Table(idx)) => {
+            let mut indices = Vec::with_capacity(count);
+            for i in 1..=count {
+                let v: f64 = idx.raw_get(i)?;
+                if v.fract() != 0.0 || v < 1.0 || v > n as f64 {
+                    return Err(mlua::Error::runtime(format!(
+                        "mesh.build: `indices`[{i}] is {v}; a vertex is numbered 1 to {n}"
+                    )));
+                }
+                indices.push(v as u32 - 1);
+            }
+            indices
+        }
+        _ => Vec::new(),
+    };
 
-    let normals = match t.raw_get::<Option<Table>>("normals")? {
-        Some(nt) => flat(&nt, "normals", 3, Some(n))?.as_chunks::<3>().0.to_vec(),
-        None => smooth_normals(&positions, &indices),
+    let normals = match t.raw_get::<Value>("normals")? {
+        Value::Nil => smooth_normals(&positions, &indices),
+        v => floats(&v, "normals", 3, Some(n))?.as_chunks::<3>().0.to_vec(),
     };
-    let uvs = match t.raw_get::<Option<Table>>("uvs")? {
-        Some(ut) => flat(&ut, "uvs", 2, Some(n))?.as_chunks::<2>().0.to_vec(),
-        None => vec![[0.0, 0.0]; n],
+    let uvs = match t.raw_get::<Value>("uvs")? {
+        Value::Nil => vec![[0.0, 0.0]; n],
+        v => floats(&v, "uvs", 2, Some(n))?.as_chunks::<2>().0.to_vec(),
     };
-    let colors = match t.raw_get::<Option<Table>>("colors")? {
-        Some(ct) => Some(
-            flat(&ct, "colors", 4, Some(n))?
+    let colors = match t.raw_get::<Value>("colors")? {
+        Value::Nil => None,
+        v => Some(
+            floats(&v, "colors", 4, Some(n))?
                 .as_chunks::<4>()
                 .0
                 .iter()
                 .map(|c| c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8))
                 .collect(),
         ),
-        None => None,
     };
     Ok(MeshRequest { name: String::new(), positions, normals, uvs, colors, indices })
 }
@@ -344,6 +421,54 @@ pub(crate) fn install(lua: &Lua, book: Rc<RefCell<MeshBook>>) -> mlua::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A mesh built from buffers is the same mesh, read in a fraction of
+    /// the time** (card 0698). A 45,000-vertex sphere built from flat lists
+    /// and from buffers (positions and normals as f32s, indices as u32s from
+    /// 0) makes the same request, and the buffers are read at least three
+    /// times faster: a list is read a number at a time across into the
+    /// engine, a buffer in one copy. A buffer index past the last vertex is
+    /// refused, naming it.
+    #[test]
+    fn a_mesh_from_buffers_is_the_same_mesh_read_much_faster() {
+        let (lua, book) = lua();
+        lua.load(
+            "local n = 150 p, idx = {}, {}\n\
+             for j = 0, n do for i = 0, n*2 do local a, b = i / (n*2) * 6.283, j / n * 3.14159\n\
+               p[#p+1] = math.sin(b)*math.cos(a) p[#p+1] = math.cos(b) p[#p+1] = math.sin(b)*math.sin(a) end end\n\
+             local w = n*2+1\n\
+             for j = 0, n-1 do for i = 0, n*2-1 do local k = j*w + i + 1\n\
+               idx[#idx+1] = k idx[#idx+1] = k + w idx[#idx+1] = k + 1 idx[#idx+1] = k + 1 idx[#idx+1] = k + w idx[#idx+1] = k + w + 1 end end\n\
+             pb = buffer.create(#p * 4) for i = 1, #p do buffer.writef32(pb, (i-1)*4, p[i]) end\n\
+             ib = buffer.create(#idx * 4) for i = 1, #idx do buffer.writeu32(ib, (i-1)*4, idx[i] - 1) end",
+        )
+        .exec()
+        .unwrap();
+        // Warm both paths once, then time each.
+        lua.load("mesh.build{ positions = p, indices = idx, normals = p } mesh.build{ positions = pb, indices = ib, normals = pb }").exec().unwrap();
+        let time = |code: &str| {
+            let t = std::time::Instant::now();
+            for _ in 0..3 {
+                lua.load(code).exec().unwrap();
+            }
+            t.elapsed().as_secs_f64()
+        };
+        let lists = time("mesh.build{ positions = p, indices = idx, normals = p }");
+        let bufs = time("mesh.build{ positions = pb, indices = ib, normals = pb }");
+        let reqs = &book.borrow().requests;
+        let (a, b) = (&reqs[reqs.len() - 2], &reqs[reqs.len() - 1]);
+        assert_eq!(a.positions, b.positions);
+        assert_eq!(a.normals, b.normals);
+        assert_eq!(a.indices, b.indices);
+        assert!(bufs * 3.0 < lists, "buffers took {:.2} ms, lists {:.2} ms", bufs * 1e3, lists * 1e3);
+        let e = lua
+            .load("local ib = buffer.create(12) buffer.writeu32(ib, 0, 0) buffer.writeu32(ib, 4, 1) buffer.writeu32(ib, 8, 9)\n\
+                   mesh.build{ positions = { 0,0,0, 1,0,0, 0,1,0 }, indices = ib }")
+            .exec()
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("u32 2") && e.contains("0 to 2"), "{e}");
+    }
 
     fn lua() -> (Lua, Rc<RefCell<MeshBook>>) {
         let lua = Lua::new();

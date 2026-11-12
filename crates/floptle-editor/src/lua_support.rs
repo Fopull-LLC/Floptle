@@ -2404,7 +2404,9 @@ mesh = {}
 ---normals, uvs (u, v) and colors (r, g, b, a, 0..1). Answers its name at once;
 ---it draws from the next frame. Kept until mesh.free or Stop, or until the
 ---owner node is gone (owner) or the next scene load (scene = true).
----@param spec { positions: number[], indices: integer[], normals?: number[], uvs?: number[], colors?: number[], owner?: Node, scene?: boolean }
+---Any array may be a buffer instead (f32s; indices u32s numbered from 0),
+---read in one copy: much faster for a big mesh.
+---@param spec { positions: number[]|buffer, indices: integer[]|buffer, normals?: number[]|buffer, uvs?: number[]|buffer, colors?: number[]|buffer, owner?: Node, scene?: boolean }
 ---@return string name
 function mesh.build(spec) end
 ---Give a built mesh back. True if it was one.
