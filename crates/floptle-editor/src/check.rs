@@ -674,10 +674,12 @@ fn check_node_refs(
     if let Some(m) = &node.material {
         check_texture(root, m, who, where_, r);
         check_sheet_grid(root, m, cell(m), who, where_, settings, r);
+        check_map_sampling(root, m, who, where_, settings, r);
     }
     for m in node.object_materials.values() {
         check_texture(root, m, who, where_, r);
         check_sheet_grid(root, m, cell(m), who, where_, settings, r);
+        check_map_sampling(root, m, who, where_, settings, r);
     }
     note_node_shaders(node, who, where_, r);
     if let floptle_scene::MatterDoc::Mesh { asset_path } = &node.matter
@@ -902,6 +904,7 @@ fn check_material_file(
         Ok(m) => {
             check_texture(root, &m, "this material", where_, r);
             check_sheet_grid(root, &m, m.cell, "this material", where_, settings, r);
+            check_map_sampling(root, &m, "this material", where_, settings, r);
             if let Some(sh) = m.shader.as_deref().filter(|s| !s.is_empty()) {
                 r.shader_refs.push(ShaderRef {
                     path: sh.to_string(),
@@ -953,6 +956,55 @@ fn check_texture(
         && !exists(root, sh)
     {
         r.error(Some(where_.into()), format!("{who}: no shader at {sh}"));
+    }
+}
+
+/// **Is every surface map read smooth, with mips?** A picture with no entry
+/// in `.floptle/textures.ron` is read Pixelated, without mips: right for pixel
+/// art, wrong for a normal, roughness, metallic or occlusion map, which are
+/// numbers (nearest sampling with no mips shimmers into the distance), and
+/// wrong for the colour map of a physically shaded surface that has maps
+/// beside it. It also cannot share a texture array with the smooth pictures
+/// beside it, so a model that could merge into one instance draws as its
+/// parts. A project's timber had looked wrong and stayed unmerged for days
+/// that way. A **warning**: it draws, just not as meant.
+fn check_map_sampling(root: &Path, m: &floptle_scene::MaterialDoc, who: &str, where_: &str, settings: &Settings, r: &mut Report) {
+    let crisp = |path: &str| {
+        settings
+            .get(&crate::assets::asset_rel_path(path, root))
+            .is_none_or(|s| s.filter == crate::assets::FilterMode::Pixelated)
+    };
+    let maps = [
+        ("normal map", m.normal_map.as_deref()),
+        ("roughness map", m.roughness_map.as_deref()),
+        ("metallic map", m.metallic_map.as_deref()),
+        ("ambient occlusion map", m.ao_map.as_deref()),
+    ];
+    let mut flagged = Vec::new();
+    for (what, path) in maps {
+        if let Some(path) = path.filter(|p| !p.is_empty())
+            && crisp(path)
+        {
+            flagged.push((what, path));
+        }
+    }
+    let has_maps = maps.iter().any(|(_, p)| p.is_some_and(|p| !p.is_empty()));
+    if has_maps
+        && m.shading == floptle_scene::ShadingDoc::Physical
+        && let Some(base) = m.texture.as_deref().filter(|p| !p.is_empty())
+        && crisp(base)
+    {
+        flagged.push(("colour map", base));
+    }
+    for (what, path) in flagged {
+        r.warn(
+            Some(where_.into()),
+            format!(
+                "{who}: the {what} {path} is read Pixelated with no mips (it has no textures.ron entry, or one that says Pixelated): \
+                 a surface map shimmers that way and cannot share a texture array with smooth pictures, so a model that could \
+                 draw as one instance draws as its parts. Add \"{path}\": (filter: SmoothMipmaps) to .floptle/textures.ron"
+            ),
+        );
     }
 }
 
@@ -1444,6 +1496,46 @@ mod tests {
             .unwrap();
             assert_eq!(examine(&d).errors(), 0, "entry_scene {spelling:?} was rejected");
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **A surface map read Pixelated without mips is a warning, naming the
+    /// line to add** (card 0699). An object override with a normal map and a
+    /// physically shaded colour map, neither in `textures.ron`: both are
+    /// named, with the fix. Given SmoothMipmaps entries, nothing is said; and
+    /// a Classic material's colour map with no maps beside it is pixel art's
+    /// business, never warned.
+    #[test]
+    fn a_surface_map_read_pixelated_is_a_warning() {
+        let d = temp("mapsampling");
+        std::fs::create_dir_all(d.join("textures")).unwrap();
+        std::fs::write(d.join("textures/timber.png"), []).unwrap();
+        std::fs::write(d.join("textures/timber_n.png"), []).unwrap();
+        std::fs::write(d.join("textures/sprite.png"), []).unwrap();
+        std::fs::write(
+            d.join("scenes/first.ron"),
+            scene(
+                "(name: \"Hut\", object_materials: {\"Wall\": (shading: Physical, texture: Some(\"textures/timber.png\"), \
+                 normal_map: Some(\"textures/timber_n.png\"))}), \
+                 (name: \"Coin\", material: Some((texture: Some(\"textures/sprite.png\"))))",
+            ),
+        )
+        .unwrap();
+        let r = examine(&d);
+        let w: Vec<&str> = r.findings.iter().map(|f| f.message.as_str()).filter(|m| m.contains("Pixelated with no mips")).collect();
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w.iter().any(|m| m.contains("normal map textures/timber_n.png")), "{w:?}");
+        assert!(w.iter().any(|m| m.contains("colour map textures/timber.png")), "{w:?}");
+        assert!(w.iter().all(|m| m.contains("(filter: SmoothMipmaps)")), "the fix is not named: {w:?}");
+        assert!(!w.iter().any(|m| m.contains("sprite.png")), "a pixel-art sprite was warned: {w:?}");
+        std::fs::create_dir_all(d.join(".floptle")).unwrap();
+        std::fs::write(
+            d.join(".floptle/textures.ron"),
+            "{\"textures/timber.png\": (filter: SmoothMipmaps), \"textures/timber_n.png\": (filter: SmoothMipmaps)}",
+        )
+        .unwrap();
+        let r = examine(&d);
+        assert!(!r.findings.iter().any(|f| f.message.contains("Pixelated with no mips")), "smooth maps were warned anyway");
         let _ = std::fs::remove_dir_all(&d);
     }
 

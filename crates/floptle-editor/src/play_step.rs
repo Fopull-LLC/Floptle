@@ -1697,7 +1697,15 @@ impl Editor {
         // Some of the script collector's work, between frames, rather than
         // all of it inside whichever hook allocates when it falls due.
         self.timed_into(floptle_core::profile::Bucket::Scripts, |ed| ed.script_host.step_gc(GC_BUDGET_MS));
-        anim::advance_springs(&mut self.anim, &self.world, &self.mesh_registry, sdt, &self.frame_carry);
+        {
+            // Named, so the chains' cost is not lost in `untimed`.
+            let span = floptle_core::profile::Span::new();
+            anim::advance_springs(&mut self.anim, &self.world, &self.mesh_registry, sdt, &self.frame_carry);
+            let ms = span.ms();
+            let mut p = self.script_host.profile().borrow_mut();
+            p.record(floptle_core::profile::Bucket::Animation, ms);
+            p.record_part("springBones", ms);
+        }
         anim::resolve_attachments(&self.anim, &mut self.world, &self.mesh_registry);
         // 2D cameras follow after all of that, for the same reason bone
         // attachments do: a camera chasing a player has to read where the
@@ -2241,7 +2249,8 @@ mod frame_phase_tests {
         }
         let p = ed.script_host.profile().borrow();
         let r = p.recent_frames(1).next().expect("a frame");
-        for phase in ["frameFeed", "frameScripts", "frameTicks", "frameLate", "frameSettle"] {
+        // …and the spring bones' pass, named whether or not anything swung.
+        for phase in ["frameFeed", "frameScripts", "frameTicks", "frameLate", "frameSettle", "springBones"] {
             assert!(r.parts.iter().any(|(n, _)| *n == phase), "{phase} is not named: {:?}", r.parts);
         }
     }
