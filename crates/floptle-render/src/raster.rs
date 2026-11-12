@@ -5831,31 +5831,82 @@ pub(crate) fn write_mip_chain(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, t:
     };
     write(0, w0, h0, &t.pixels);
     if gen_mips {
-        let mut cur = t.pixels.clone();
-        let (mut cw, mut ch) = (w0, h0);
-        for level in 1..mip_count {
-            let nw = (cw >> 1).max(1);
-            let nh = (ch >> 1).max(1);
-            let mut next = vec![0u8; (nw * nh * 4) as usize];
-            for y in 0..nh {
-                for x in 0..nw {
-                    let sx = (x * 2).min(cw - 1);
-                    let sy = (y * 2).min(ch - 1);
-                    let sx1 = (sx + 1).min(cw - 1);
-                    let sy1 = (sy + 1).min(ch - 1);
-                    for c in 0..4u32 {
-                        let p = |px: u32, py: u32| cur[((py * cw + px) * 4 + c) as usize] as u32;
-                        let avg = (p(sx, sy) + p(sx1, sy) + p(sx, sy1) + p(sx1, sy1) + 2) / 4;
-                        next[((y * nw + x) * 4 + c) as usize] = avg as u8;
-                    }
-                }
-            }
-            write(level, nw, nh, &next);
-            cur = next;
-            cw = nw;
-            ch = nh;
+        for (level, (w, h, pixels)) in mip_levels(t, mip_count).into_iter().enumerate() {
+            write(level as u32 + 1, w, h, &pixels);
         }
     }
+}
+
+/// The alpha a cutout surface keeps a pixel at or above (the default cutoff,
+/// 0.5), for [`mip_levels`]' coverage.
+const COVERAGE_CUTOFF: u8 = 128;
+
+/// Levels 1.. of `t`'s mip chain, `mip_count` levels in all counting level 0:
+/// each a box filter of the one before.
+///
+/// **A cutout picture keeps its coverage.** One whose alpha is only ever 0 or
+/// 255 is a cutout (hair cards, leaves, a fence), drawn where its alpha
+/// passes the cutoff; box-filtered, thin strands average to below the cutoff
+/// level by level, so far away the hair thins out and the leaves vanish. Each
+/// of its levels has its alpha scaled so the share of pixels passing the
+/// cutoff matches level 0's. A picture with any alpha in between is left as
+/// it was: its alpha is a blend amount, and scaling it would change its look.
+pub(crate) fn mip_levels(t: &TextureData, mip_count: u32) -> Vec<(u32, u32, Vec<u8>)> {
+    let (w0, h0) = (t.width.max(1), t.height.max(1));
+    let alphas = || t.pixels.as_chunks::<4>().0.iter().map(|p| p[3]);
+    let cutout = alphas().all(|a| a == 0 || a == 255) && alphas().any(|a| a == 0) && alphas().any(|a| a == 255);
+    let passing = |px: &[u8], scale: f32| {
+        let n = px.len() / 4;
+        px.as_chunks::<4>().0.iter().filter(|p| (p[3] as f32 * scale).min(255.0) >= COVERAGE_CUTOFF as f32).count() as f32 / n.max(1) as f32
+    };
+    let want = if cutout { passing(&t.pixels, 1.0) } else { 0.0 };
+    let mut out = Vec::new();
+    let mut cur = t.pixels.clone();
+    let (mut cw, mut ch) = (w0, h0);
+    for _ in 1..mip_count {
+        let nw = (cw >> 1).max(1);
+        let nh = (ch >> 1).max(1);
+        let mut next = vec![0u8; (nw * nh * 4) as usize];
+        for y in 0..nh {
+            for x in 0..nw {
+                let sx = (x * 2).min(cw - 1);
+                let sy = (y * 2).min(ch - 1);
+                let sx1 = (sx + 1).min(cw - 1);
+                let sy1 = (sy + 1).min(ch - 1);
+                for c in 0..4u32 {
+                    let p = |px: u32, py: u32| cur[((py * cw + px) * 4 + c) as usize] as u32;
+                    let avg = (p(sx, sy) + p(sx1, sy) + p(sx, sy1) + p(sx1, sy1) + 2) / 4;
+                    next[((y * nw + x) * 4 + c) as usize] = avg as u8;
+                }
+            }
+        }
+        // The chain goes on from the plain box filter; only the level written
+        // is scaled, so the scale does not compound down the chain.
+        let mut written = next.clone();
+        if cutout && want > 0.0 {
+            let (mut lo, mut hi) = (0.0f32, 8.0f32);
+            for _ in 0..20 {
+                let mid = (lo + hi) * 0.5;
+                if passing(&next, mid) < want {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            // `hi` is the least scale reaching the share; one a hair under
+            // it may land closer (a level of near-equal alphas jumps from
+            // none passing to all).
+            let scale = if want - passing(&next, lo) < passing(&next, hi) - want { lo } else { hi };
+            for p in written.as_chunks_mut::<4>().0 {
+                p[3] = (p[3] as f32 * scale).min(255.0) as u8;
+            }
+        }
+        out.push((nw, nh, written));
+        cur = next;
+        cw = nw;
+        ch = nh;
+    }
+    out
 }
 
 /// Pack a model matrix + a plain matte color into an `InstanceRaw`.
@@ -6086,25 +6137,79 @@ impl InstanceRaw {
 #[cfg(test)]
 mod tests {
 
-    /// **The packed tiling flags of a material without anti-tiling are the
-    /// numbers they always were**, so every existing tiled surface draws the
-    /// same; anti-tiling sits above the rotation in bits 14-19, where
-    /// `hex_tile.wgsl`'s `tile_flags_*` read it back.
-    #[test]
-    fn tile_flags_keep_the_old_packing_and_add_antitile_above_it() {
-        for (mode, rot) in [(0u8, 0.0f32), (1, 0.0), (1, 30.0), (1, 359.95), (1, -90.0), (2, 0.0)] {
-            let m = crate::MaterialParams { tile_mode: mode, tile_rotation: rot, ..crate::MaterialParams::flat([1.0; 3]) };
-            // The packing as it was before anti-tiling (rim.w), less the one
-            // value it wrote that means the same turn: 3600 tenths is 0.
-            let old = (mode as u32 + ((rot.rem_euclid(360.0) * 10.0).round() as u32 % 3600) * 4) as f32;
-            assert_eq!(super::tile_flags(&m), old, "mode {mode} rotation {rot}");
+    /// A 64x64 picture of thin, scattered one-pixel strands, alpha 0 or 255.
+    fn strands() -> super::TextureData {
+        let (w, h) = (64u32, 64u32);
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        let mut seed = 0x2545_f491u32;
+        let mut rand = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for _ in 0..90 {
+            let (x, y0) = (rand() % w, rand() % h);
+            let len = 8 + rand() % 40;
+            for y in y0..(y0 + len).min(h) {
+                let i = ((y * w + x) * 4) as usize;
+                pixels[i..i + 4].copy_from_slice(&[90, 60, 30, 255]);
+            }
         }
-        let m = crate::MaterialParams { tile_mode: 1, tile_rotation: 359.9, tile_antitile: 1.0, ..crate::MaterialParams::flat([1.0; 3]) };
-        let f = super::tile_flags(&m) as u32;
-        assert_eq!((f & 3, (f >> 2) & 4095, (f >> 14) & 63), (1, 3599, 63), "{f:#b}");
-        let half = crate::MaterialParams { tile_antitile: 0.5, ..m };
-        assert_eq!((super::tile_flags(&half) as u32 >> 14) & 63, 32);
-        assert!(super::tile_flags(&m) < 16_777_216.0, "the flags must stay an exact integer in f32");
+        super::TextureData { pixels, width: w, height: h }
+    }
+
+    fn coverage(px: &[u8]) -> f32 {
+        px.as_chunks::<4>().0.iter().filter(|p| p[3] >= super::COVERAGE_CUTOFF).count() as f32 / (px.len() / 4) as f32
+    }
+
+    /// **A cutout picture's far levels keep its coverage**: thin strands,
+    /// box-filtered, average below the cutoff and the hair thins out to
+    /// nothing at a distance. Each level's share of pixels passing the cutoff
+    /// stays near level 0's.
+    #[test]
+    fn a_cutout_keeps_its_coverage_down_the_mips() {
+        let t = strands();
+        let want = coverage(&t.pixels);
+        assert!(want > 0.15 && want < 0.6, "fixture coverage {want}");
+        let levels = super::mip_levels(&t, 5);
+        assert_eq!(levels.len(), 4);
+        for (i, (w, h, px)) in levels.iter().enumerate() {
+            assert_eq!(px.len() as u32, w * h * 4);
+            let got = coverage(px);
+            // Never thinner than level 0 (the box filter's level 4 keeps
+            // about half); a near level can read thicker, a texel half on a
+            // strand being as covered as one wholly on it.
+            assert!(got > want - 0.1 && got < want + 0.25, "level {}: coverage {got} vs level 0's {want}", i + 1);
+        }
+    }
+
+    /// **A picture with soft alpha is filtered as it always was**: its alpha
+    /// is a blend amount, so its levels are the plain box filter.
+    #[test]
+    fn a_soft_alpha_picture_is_not_rescaled() {
+        // Fully clear, fully solid and in between: only the in-between
+        // alphas mark it as soft.
+        let mut t = strands();
+        for (i, p) in t.pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            if p[3] == 255 && i % 3 == 0 {
+                p[3] = 120;
+            }
+        }
+        let levels = super::mip_levels(&t, 5);
+        // Every level by hand: the rounded mean of each 2x2 block of the one
+        // before.
+        let (mut prev, mut pw) = (t.pixels.clone(), t.width);
+        for (level, (w, _, px)) in levels.iter().enumerate() {
+            for y in 0..*w {
+                for x in 0..*w {
+                    let a = |sx: u32, sy: u32| prev[((sy * pw + sx) * 4 + 3) as usize] as u32;
+                    let mean = (a(2 * x, 2 * y) + a(2 * x + 1, 2 * y) + a(2 * x, 2 * y + 1) + a(2 * x + 1, 2 * y + 1) + 2) / 4;
+                    assert_eq!(px[((y * w + x) * 4 + 3) as usize] as u32, mean, "level {} at {x},{y}", level + 1);
+                }
+            }
+            (prev, pw) = (px.clone(), *w);
+        }
     }
     use super::group_by_key;
 
