@@ -126,6 +126,32 @@ Material(
 > - Raster surfaces only (meshes, primitives, map geometry) — blobs/SDF matter
 >   have no UVs to window.
 
+### Cutout mips
+
+A cutout material (`alpha_cutoff`) draws a pixel where its picture's alpha
+passes the cutoff. Averaged down a mip chain, thin strands fall below the
+cutoff level by level, so hair cards thin out, leaves vanish and fences
+dissolve at a distance. A mipmapped picture's smaller levels can keep the
+same share of pixels above the cutoff as the full picture has. The Assets
+panel's **cutout mips** row, or `alpha_coverage` in `.floptle/textures.ron`,
+sets it per picture:
+
+```ron
+"textures/hair.png": (filter: SmoothMipmaps, alpha_coverage: Cutoff(0.35)),
+```
+
+- `Auto` (the default, left out of the file): kept at 0.5 for a picture whose
+  alpha is only ever 0 or 255, which is a cutout whatever draws it. A picture
+  with any alpha in between is filtered plainly, its alpha read as a blend
+  amount.
+- `Cutoff(x)`: kept at `x` for any picture, soft alpha included. Set it to
+  the cutoff of the material that draws the picture.
+- `Off`: plain mips.
+
+The full-size picture is never changed, only its smaller levels. Pictures
+that differ only in this setting still share a texture array, so a merged
+model whose parts set it differently draws as one instance.
+
 ## 3. Tiling without a shader
 
 Tiling is a `Tiling` value on each `TexBinding`. Two projection modes cover the

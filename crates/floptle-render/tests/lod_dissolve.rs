@@ -32,7 +32,7 @@ fn band(gpu: &Gpu, raster: &mut Raster, color: &wgpu::Texture, share: f32, inver
     let tex = raster.register_texture(
         gpu,
         &TextureData { pixels, width: 8, height: 8 },
-        TexSampling { filter: TexFilter::Pixelated, wrap: TexWrap::Clamp },
+        TexSampling { filter: TexFilter::Pixelated, wrap: TexWrap::Clamp, ..Default::default() },
     );
     let mesh = raster.register(gpu, &plane(1.0), None);
     let ext = raster.push_surface_extras(SurfaceExtras::from_material(&Material {

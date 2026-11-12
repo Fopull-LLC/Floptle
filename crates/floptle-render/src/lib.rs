@@ -78,7 +78,7 @@ pub use ui::{BuiltUiShader, Ui, UiBatch, UiBindingId, UiInstance, UiPlane, UiSha
 pub use raster::{
     ext_index_of, instance_of, instance_of_slots, is_slotted, is_terrain, instance_of_mat, merge_parts, pass_prelude, MAX_SLOTS, SLOT_MARK, raster_custom_source, set_ext_index,
     BuiltFlsl, FlslBindingId, FlslBlend, FlslBuilder, FlslDraw, FlslShaderId, Globals, InstanceRaw, MaterialParams, Raster,
-    SkinDraw, SurfaceExtras, TexFilter, TexId, TexSampling, TexWrap, sun_map_size_for, sun_shadow_matrix, FLSL_ENGINE_SAMPLERS, FLSL_ENGINE_TEXTURES, SUN_MAP_SIZE, flsl_fits_within, flsl_slots_within,
+    AlphaCoverage, SkinDraw, SurfaceExtras, TexFilter, TexId, TexSampling, TexWrap, sun_map_size_for, sun_shadow_matrix, FLSL_ENGINE_SAMPLERS, FLSL_ENGINE_TEXTURES, SUN_MAP_SIZE, flsl_fits_within, flsl_slots_within,
 };
 pub use terrain_palette::{terrain_layer_size, SlotPictures, TerrainPalette, TERRAIN_LAYER_SIZE, TERRAIN_LAYER_SIZES};
 pub use raymarch::{

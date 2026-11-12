@@ -902,7 +902,7 @@ impl<'a> EditorTabViewer<'a> {
 
     /// Editable properties for a selected material preset, with a Save back to its
     /// `.ron`. Edits mutate the live preview material, so the sphere updates as you go.
-    /// Per-texture sampling controls (filter + wrap), shown when a texture asset is
+    /// Per-texture sampling controls (filter, wrap, cutout mips), shown when a texture asset is
     /// selected. Changes are recorded on `cmd` and applied (persist + re-register)
     /// after the frame.
     pub(crate) fn texture_settings_ui(&mut self, ui: &mut egui::Ui, path: &str) {
@@ -937,8 +937,40 @@ impl<'a> EditorTabViewer<'a> {
                     ui.selectable_value(&mut s.wrap, WrapMode::Mirror, "Mirror");
                 });
             ui.end_row();
+            // Only a mip chain has smaller levels to keep coverage in: shown
+            // always, so the grid keeps its shape, and live with mipmaps.
+            use crate::assets::CoverageMode;
+            ui.label("cutout mips");
+            ui.add_enabled_ui(s.filter == FilterMode::SmoothMipmaps, |ui| {
+                ui.horizontal(|ui| {
+                    let cutoff = match s.alpha_coverage {
+                        CoverageMode::Cutoff(c) => c,
+                        _ => 0.5,
+                    };
+                    egui::ComboBox::from_id_salt("tex-coverage")
+                        .selected_text(match s.alpha_coverage {
+                            CoverageMode::Auto => "Auto",
+                            CoverageMode::Off => "Off",
+                            CoverageMode::Cutoff(_) => "Cutoff",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut s.alpha_coverage, CoverageMode::Auto, "Auto")
+                                .on_hover_text("keep the coverage of a picture whose alpha is only 0 or 255, at the cutoff 0.5");
+                            ui.selectable_value(&mut s.alpha_coverage, CoverageMode::Off, "Off")
+                                .on_hover_text("plain mips: alpha averages down as it always did");
+                            ui.selectable_value(&mut s.alpha_coverage, CoverageMode::Cutoff(cutoff), "Cutoff")
+                                .on_hover_text("keep any picture's coverage, soft alpha included, at the cutoff of the material that draws it");
+                        });
+                    if let CoverageMode::Cutoff(c) = &mut s.alpha_coverage {
+                        ui.add(egui::DragValue::new(c).range(0.01..=1.0).speed(0.01).max_decimals(2))
+                            .on_hover_text("the material's alpha cutoff: the far mips keep as many pixels above it as the full picture has");
+                    }
+                });
+            });
+            ui.end_row();
         });
         ui.small("Pixelated = crisp · Smooth = bilinear · +Mipmaps = no shimmer at distance.");
+        ui.small("Cutout mips keep hair, leaves and fences from thinning out at a distance.");
 
         // ---- Spritesheet slicing -------------------------------------------
         ui.separator();

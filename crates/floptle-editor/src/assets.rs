@@ -679,8 +679,23 @@ pub(crate) enum WrapMode {
     Mirror,
 }
 
+/// How a mipmapped picture's smaller levels keep a cutout's coverage —
+/// serde mirror of [`floptle_render::AlphaCoverage`], the cutoff written as
+/// a material's `alpha_cutoff` is (0..1).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Default, Debug)]
+pub(crate) enum CoverageMode {
+    /// Kept for a picture whose alpha is only 0 or 255, at the cutoff 0.5.
+    #[default]
+    Auto,
+    /// Never kept.
+    Off,
+    /// Kept at this cutoff for any picture, soft alpha included: the cutoff
+    /// of the material that draws it.
+    Cutoff(f32),
+}
+
 /// A texture's sampling settings, persisted per project. Default = crisp tiling.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Default, Debug)]
 pub(crate) struct TexSetting {
     #[serde(default)]
     pub(crate) filter: FilterMode,
@@ -693,6 +708,24 @@ pub(crate) struct TexSetting {
     pub(crate) sheet_cols: u32,
     #[serde(default)]
     pub(crate) sheet_rows: u32,
+    /// How the picture's mips keep a cutout's coverage (with SmoothMipmaps;
+    /// see [`CoverageMode`]). Left out of the file while it is `Auto`.
+    #[serde(default, skip_serializing_if = "CoverageMode::is_auto")]
+    pub(crate) alpha_coverage: CoverageMode,
+}
+
+impl CoverageMode {
+    fn is_auto(&self) -> bool {
+        matches!(self, CoverageMode::Auto)
+    }
+
+    pub(crate) fn to_render(self) -> floptle_render::AlphaCoverage {
+        match self {
+            CoverageMode::Auto => floptle_render::AlphaCoverage::Auto,
+            CoverageMode::Off => floptle_render::AlphaCoverage::Off,
+            CoverageMode::Cutoff(c) => floptle_render::AlphaCoverage::Cutoff((c.clamp(0.0, 1.0) * 255.0).round().max(1.0) as u8),
+        }
+    }
 }
 
 impl TexSetting {
@@ -716,6 +749,7 @@ impl TexSetting {
                 WrapMode::Clamp => TexWrap::Clamp,
                 WrapMode::Mirror => TexWrap::Mirror,
             },
+            coverage: self.alpha_coverage.to_render(),
         }
     }
 }
@@ -769,6 +803,27 @@ pub(crate) fn sanitize_asset_name(input: &str) -> String {
         }
     }
     if out.is_empty() { "untitled".to_string() } else { out }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::{CoverageMode, TexSetting};
+
+    /// **textures.ron names a picture's cutout coverage, and a file that
+    /// never did reads and writes as before.** `Cutoff(0.35)` reaches the
+    /// renderer as alpha 89; `Auto` is left out of the saved file.
+    #[test]
+    fn textures_ron_carries_alpha_coverage() {
+        let s: TexSetting = ron::from_str("(filter: SmoothMipmaps, alpha_coverage: Cutoff(0.35))").unwrap();
+        assert_eq!(s.alpha_coverage, CoverageMode::Cutoff(0.35));
+        assert_eq!(s.to_sampling().coverage, floptle_render::AlphaCoverage::Cutoff(89));
+        let off: TexSetting = ron::from_str("(filter: SmoothMipmaps, alpha_coverage: Off)").unwrap();
+        assert_eq!(off.to_sampling().coverage, floptle_render::AlphaCoverage::Off);
+        let old: TexSetting = ron::from_str("(filter: SmoothMipmaps, wrap: Clamp)").unwrap();
+        assert_eq!(old.alpha_coverage, CoverageMode::Auto);
+        let written = ron::to_string(&old).unwrap();
+        assert!(!written.contains("alpha_coverage"), "an Auto setting was written out: {written}");
+    }
 }
 
 #[cfg(test)]

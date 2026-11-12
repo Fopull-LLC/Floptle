@@ -55,7 +55,7 @@ use crate::Editor;
 
 /// Paint textures sample nearest + clamp: crisp retro pixels, and (with the atlas padding)
 /// no filtering bleed across the packed triangle patches.
-pub(crate) const PAINT_SAMPLING: TexSampling = TexSampling { filter: TexFilter::Pixelated, wrap: TexWrap::Clamp };
+pub(crate) const PAINT_SAMPLING: TexSampling = TexSampling { filter: TexFilter::Pixelated, wrap: TexWrap::Clamp, coverage: floptle_render::AlphaCoverage::Auto };
 
 /// A fresh canvas texel: fully transparent (the overlay shows nothing), with white rgb so
 /// the Multiply/Darken blend modes see the identity when paint first lands on a texel.

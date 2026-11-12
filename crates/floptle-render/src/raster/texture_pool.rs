@@ -158,7 +158,7 @@ impl Raster {
             return Some(at);
         }
         let mips = matches!(sampling.filter, TexFilter::SmoothMipmaps);
-        let key = (super::picture_key(data, mips), sampling);
+        let key = (super::picture_key(data, mips, sampling.coverage), sampling);
         if let Some(&at) = self.pools.layers.get(&key) {
             self.pools.of_tex.insert(id.0, at);
             return Some(at);
@@ -168,9 +168,9 @@ impl Raster {
         let t = smaller.as_ref().unwrap_or(data);
         let (w, h) = (t.width.max(1), t.height.max(1));
         let mip_count = if mips { 1 + (w.max(h) as f32).log2().floor() as u32 } else { 1 };
-        let pool = self.pool_for(gpu, PoolKey { width: w, height: h, mip_count, sampling, drop })?;
+        let pool = self.pool_for(gpu, PoolKey { width: w, height: h, mip_count, sampling: sampling.sampler_part(), drop })?;
         let layer = self.pool_reserve(gpu, pool)?;
-        super::write_mip_chain(gpu, &self.pools.pools[pool as usize].texture, layer, t, mip_count);
+        super::write_mip_chain(gpu, &self.pools.pools[pool as usize].texture, layer, t, mip_count, sampling.coverage);
         let at = PoolLayer { pool, layer };
         self.pools.layers.insert(key, at);
         self.pools.of_tex.insert(id.0, at);
@@ -192,7 +192,8 @@ impl Raster {
         let smaller = if key.mip_count > 1 && key.drop > 0 { super::drop_top_mips(data, key.drop) } else { None };
         let t = smaller.as_ref().unwrap_or(data);
         if (t.width.max(1), t.height.max(1)) == (key.width, key.height) {
-            super::write_mip_chain(gpu, &self.pools.pools[at.pool as usize].texture, at.layer, t, key.mip_count);
+            let coverage = self.textures.get(id.0 as usize).map_or(super::AlphaCoverage::Auto, |b| b.sampling.coverage);
+            super::write_mip_chain(gpu, &self.pools.pools[at.pool as usize].texture, at.layer, t, key.mip_count, coverage);
         } else {
             self.pools.of_tex.remove(&id.0);
         }
@@ -220,7 +221,7 @@ impl Raster {
         {
             return None;
         }
-        let key = PoolKey { width: src.width(), height: src.height(), mip_count: src.mip_level_count(), sampling, drop: self.texture_drop };
+        let key = PoolKey { width: src.width(), height: src.height(), mip_count: src.mip_level_count(), sampling: sampling.sampler_part(), drop: self.texture_drop };
         let pool = self.pool_for(gpu, key)?;
         let layer = self.pool_reserve(gpu, pool)?;
         let dst = &self.pools.pools[pool as usize].texture;
@@ -594,7 +595,7 @@ impl Raster {
         let texel: [u8; 4] = if flat { [128, 128, 255, 255] } else { [255; 4] };
         let data = TextureData { width: w, height: h, pixels: texel.repeat((w * h) as usize) };
         let layer = self.pool_reserve(gpu, pool)?;
-        super::write_mip_chain(gpu, &self.pools.pools[pool as usize].texture, layer, &data, mips);
+        super::write_mip_chain(gpu, &self.pools.pools[pool as usize].texture, layer, &data, mips, super::AlphaCoverage::Auto);
         let p = &mut self.pools.pools[pool as usize];
         if flat {
             p.neutral_flat = Some(layer);
@@ -908,6 +909,27 @@ mod tests {
         r.pool_texture(&gpu, ta, &a, mipped()).unwrap();
         r.pool_texture(&gpu, tb, &b, TexSampling::default()).unwrap();
         assert!(r.array_set_for(&gpu, &[Some(ta), Some(tb)]).is_none(), "pictures of two samplings shared an array");
+    }
+
+    /// **Coverage is part of a picture's bytes, not its sampler**: the same
+    /// pixels with two coverage settings are two uploads (their mips differ)
+    /// but share one array, so a merged model whose parts set it differently
+    /// still binds one set.
+    #[test]
+    fn coverage_makes_two_pictures_that_share_an_array() {
+        let Some((gpu, mut r)) = raster() else { return };
+        let auto = mipped();
+        let cut = TexSampling { coverage: crate::AlphaCoverage::Cutoff(89), ..mipped() };
+        let p = picture(32, 32, 7);
+        let (ta, tc) = (r.register_texture_shared(&gpu, &p, auto), r.register_texture_shared(&gpu, &p, cut));
+        assert_ne!(ta, tc, "two coverage settings answered one texture");
+        // Their GPU copies differ too: the upload is shared by the picture
+        // key, which has to tell the two mip chains apart.
+        assert!(r.textures[ta.0 as usize]._texture != r.textures[tc.0 as usize]._texture, "two coverage settings shared one upload");
+        let (la, lc) = (r.pool_texture(&gpu, ta, &p, auto).unwrap(), r.pool_texture(&gpu, tc, &p, cut).unwrap());
+        assert_eq!(la.pool, lc.pool, "two coverage settings went to two arrays");
+        assert_ne!(la.layer, lc.layer, "two coverage settings shared a layer");
+        assert!(r.array_set_for(&gpu, &[Some(ta), Some(tc)]).is_some());
     }
 
     #[test]

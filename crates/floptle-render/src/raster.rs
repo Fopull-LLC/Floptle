@@ -44,12 +44,43 @@ pub enum TexWrap {
 pub struct TexSampling {
     pub filter: TexFilter,
     pub wrap: TexWrap,
+    /// How a mipmapped picture's smaller levels keep a cutout's coverage.
+    /// Part of the picture's bytes on the GPU, not of its sampler: two
+    /// pictures that differ only here share samplers and texture arrays.
+    pub coverage: AlphaCoverage,
 }
 
 impl Default for TexSampling {
     fn default() -> Self {
-        Self { filter: TexFilter::Pixelated, wrap: TexWrap::Repeat }
+        Self { filter: TexFilter::Pixelated, wrap: TexWrap::Repeat, coverage: AlphaCoverage::Auto }
     }
+}
+
+impl TexSampling {
+    /// This sampling as a sampler sees it: the coverage is in the bytes.
+    pub(crate) fn sampler_part(self) -> Self {
+        Self { coverage: AlphaCoverage::Auto, ..self }
+    }
+}
+
+/// How the smaller mip levels of a picture drawn as a cutout keep its
+/// coverage. A cutout draws a pixel where the picture's alpha passes its
+/// cutoff; box-filtered, thin strands average below it level by level, so
+/// far away hair thins out and leaves vanish. Keeping coverage scales each
+/// level's alpha so the share of pixels passing the cutoff matches the
+/// full-size picture's ([`mip_levels`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum AlphaCoverage {
+    /// Kept for a picture whose alpha is only ever 0 or 255, at the cutoff
+    /// 0.5; a picture with any alpha in between is filtered plainly, its
+    /// alpha read as a blend amount.
+    #[default]
+    Auto,
+    /// Never kept: every level the plain filter.
+    Off,
+    /// Kept at this cutoff (alpha 0-255, the material's cutoff × 255), for
+    /// any picture, soft alpha included.
+    Cutoff(u8),
 }
 
 /// Frame-global uniform: camera view·projection and the directional light.
@@ -2788,6 +2819,7 @@ impl Raster {
 
     /// A sampler for the given settings, created on first use and cached.
     fn sampler_for(&mut self, gpu: &Gpu, s: TexSampling) -> wgpu::Sampler {
+        let s = s.sampler_part();
         if let Some(samp) = self.samplers.get(&s) {
             return samp.clone();
         }
@@ -3377,12 +3409,13 @@ impl Raster {
     /// pointing at one texture library cost what one does.
     pub fn register_texture_shared(&mut self, gpu: &Gpu, data: &TextureData, sampling: TexSampling) -> TexId {
         let mips = matches!(sampling.filter, TexFilter::SmoothMipmaps);
-        let key = (picture_key(data, mips), sampling);
+        let key = (picture_key(data, mips, sampling.coverage), sampling);
         if let Some(&id) = self.shared_textures.get(&key) {
             return id;
         }
         let drop = self.texture_drop;
-        let texture = self.mesh_textures.entry(key.0).or_insert_with(|| upload_texture_mips(gpu, data, mips, drop)).clone();
+        let coverage = sampling.coverage;
+        let texture = self.mesh_textures.entry(key.0).or_insert_with(|| upload_texture_mips(gpu, data, mips, drop, coverage)).clone();
         let id = TexId(self.textures.len() as u32);
         let bind = self.tex_bind_from(gpu, texture, sampling);
         self.textures.push(bind);
@@ -3391,7 +3424,7 @@ impl Raster {
     }
 
     fn tex_bind(&mut self, gpu: &Gpu, data: &TextureData, sampling: TexSampling) -> TexBind {
-        let texture = upload_texture_mips(gpu, data, matches!(sampling.filter, TexFilter::SmoothMipmaps), self.texture_drop);
+        let texture = upload_texture_mips(gpu, data, matches!(sampling.filter, TexFilter::SmoothMipmaps), self.texture_drop, sampling.coverage);
         self.tex_bind_from(gpu, texture, sampling)
     }
 
@@ -3494,7 +3527,7 @@ impl Raster {
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
         // Smooth + clamp: a live feed reads like video, and a screen quad must
         // never tile its edges.
-        let sampling = TexSampling { filter: TexFilter::Smooth, wrap: TexWrap::Clamp };
+        let sampling = TexSampling { filter: TexFilter::Smooth, wrap: TexWrap::Clamp, ..Default::default() };
         let sampler = self.sampler_for(gpu, sampling);
         let bind = self.plain_surface_bind(gpu, "raster-render-target", &view, &sampler);
         let id = TexId(self.textures.len() as u32);
@@ -4299,7 +4332,7 @@ impl Raster {
         };
 
         let mips = matches!(sampling.filter, TexFilter::SmoothMipmaps);
-        let owned = texture.map(|t| self.mesh_texture(gpu, t, mips));
+        let owned = texture.map(|t| self.mesh_texture(gpu, t, mips, sampling.coverage));
         let view = owned
             .as_ref()
             .unwrap_or(&self.default_tex)
@@ -4323,9 +4356,9 @@ impl Raster {
     /// The GPU copy of a model's picture: the one already there when another
     /// mesh brought the same pixels, otherwise a new one. With and without a
     /// mip chain are two copies: the same pixels sampled two ways.
-    fn mesh_texture(&mut self, gpu: &Gpu, t: &TextureData, mips: bool) -> wgpu::Texture {
+    fn mesh_texture(&mut self, gpu: &Gpu, t: &TextureData, mips: bool, coverage: AlphaCoverage) -> wgpu::Texture {
         let drop = self.texture_drop;
-        self.mesh_textures.entry(picture_key(t, mips)).or_insert_with(|| upload_texture_mips(gpu, t, mips, drop)).clone()
+        self.mesh_textures.entry(picture_key(t, mips, coverage)).or_insert_with(|| upload_texture_mips(gpu, t, mips, drop, coverage)).clone()
     }
 
     /// Texture quality, a settings screen's "texture quality": 0 keeps every
@@ -5714,12 +5747,16 @@ pub const FLSL_ENGINE_SAMPLERS: u32 = 13;
 
 /// A picture's identity on the GPU: its shape, its pixels, and whether it
 /// carries a mip chain (the same pixels with and without are two uploads).
-fn picture_key(t: &TextureData, mips: bool) -> u64 {
-    use std::hash::Hasher;
+fn picture_key(t: &TextureData, mips: bool, coverage: AlphaCoverage) -> u64 {
+    use std::hash::{Hash, Hasher};
     let mut h = rustc_hash::FxHasher::default();
     h.write_u32(t.width);
     h.write_u32(t.height);
     h.write_u8(mips as u8);
+    // Without mips there are no smaller levels for the coverage to change.
+    if mips && coverage != AlphaCoverage::Auto {
+        coverage.hash(&mut h);
+    }
     h.write(&t.pixels);
     h.finish()
 }
@@ -5741,7 +5778,7 @@ fn linear_view_of(tex: &wgpu::Texture) -> wgpu::TextureView {
 }
 
 fn upload_texture(gpu: &Gpu, t: &TextureData) -> wgpu::Texture {
-    upload_texture_mips(gpu, t, false, 0)
+    upload_texture_mips(gpu, t, false, 0, AlphaCoverage::Auto)
 }
 
 /// The bytes texture `t` holds on the GPU, every mip level counted.
@@ -5786,7 +5823,7 @@ fn drop_top_mips(t: &TextureData, drop: u32) -> Option<TextureData> {
 /// (box-filtered on the CPU) so it can be sampled trilinearly without shimmering when
 /// minified into the distance. A mipmapped picture loses its top `drop`
 /// levels first ([`drop_top_mips`]).
-fn upload_texture_mips(gpu: &Gpu, t: &TextureData, gen_mips: bool, drop: u32) -> wgpu::Texture {
+fn upload_texture_mips(gpu: &Gpu, t: &TextureData, gen_mips: bool, drop: u32, coverage: AlphaCoverage) -> wgpu::Texture {
     let smaller = if gen_mips && drop > 0 { drop_top_mips(t, drop) } else { None };
     let t = smaller.as_ref().unwrap_or(t);
     let w0 = t.width.max(1);
@@ -5806,14 +5843,14 @@ fn upload_texture_mips(gpu: &Gpu, t: &TextureData, gen_mips: bool, drop: u32) ->
         // data rather than colour. See `TexBind::linear_view`.
         view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
     });
-    write_mip_chain(gpu, &texture, 0, t, mip_count);
+    write_mip_chain(gpu, &texture, 0, t, mip_count, coverage);
     texture
 }
 
 /// Write `t` and, past level 0, its box-filtered mips into layer `layer` of
 /// `texture`, `mip_count` levels in all. One writer for a standalone picture
 /// and a layer of a pooled array, so the two hold the same bytes.
-pub(crate) fn write_mip_chain(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, t: &TextureData, mip_count: u32) {
+pub(crate) fn write_mip_chain(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, t: &TextureData, mip_count: u32, coverage: AlphaCoverage) {
     let (w0, h0) = (t.width.max(1), t.height.max(1));
     let gen_mips = mip_count > 1;
     let write = |level: u32, w: u32, h: u32, pixels: &[u8]| {
@@ -5831,33 +5868,39 @@ pub(crate) fn write_mip_chain(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, t:
     };
     write(0, w0, h0, &t.pixels);
     if gen_mips {
-        for (level, (w, h, pixels)) in mip_levels(t, mip_count).into_iter().enumerate() {
+        for (level, (w, h, pixels)) in mip_levels(t, mip_count, coverage).into_iter().enumerate() {
             write(level as u32 + 1, w, h, &pixels);
         }
     }
 }
 
 /// The alpha a cutout surface keeps a pixel at or above (the default cutoff,
-/// 0.5), for [`mip_levels`]' coverage.
+/// 0.5), for [`mip_levels`]' coverage under [`AlphaCoverage::Auto`].
 const COVERAGE_CUTOFF: u8 = 128;
 
 /// Levels 1.. of `t`'s mip chain, `mip_count` levels in all counting level 0:
 /// each a box filter of the one before.
 ///
-/// **A cutout picture keeps its coverage.** One whose alpha is only ever 0 or
-/// 255 is a cutout (hair cards, leaves, a fence), drawn where its alpha
-/// passes the cutoff; box-filtered, thin strands average to below the cutoff
-/// level by level, so far away the hair thins out and the leaves vanish. Each
-/// of its levels has its alpha scaled so the share of pixels passing the
-/// cutoff matches level 0's. A picture with any alpha in between is left as
-/// it was: its alpha is a blend amount, and scaling it would change its look.
-pub(crate) fn mip_levels(t: &TextureData, mip_count: u32) -> Vec<(u32, u32, Vec<u8>)> {
+/// **A cutout picture keeps its coverage** ([`AlphaCoverage`]). Under
+/// `Auto` one whose alpha is only ever 0 or 255 is a cutout (hair cards,
+/// leaves, a fence), drawn where its alpha passes the cutoff; box-filtered,
+/// thin strands average to below the cutoff level by level, so far away the
+/// hair thins out and the leaves vanish. Each of its levels has its alpha
+/// scaled so the share of pixels passing the cutoff matches level 0's. A
+/// picture with any alpha in between is left as it was: its alpha is a blend
+/// amount, and scaling it would change its look. `Cutoff` keeps any
+/// picture's coverage at its own cutoff, soft alpha included; `Off` none.
+pub(crate) fn mip_levels(t: &TextureData, mip_count: u32, coverage: AlphaCoverage) -> Vec<(u32, u32, Vec<u8>)> {
     let (w0, h0) = (t.width.max(1), t.height.max(1));
     let alphas = || t.pixels.as_chunks::<4>().0.iter().map(|p| p[3]);
-    let cutout = alphas().all(|a| a == 0 || a == 255) && alphas().any(|a| a == 0) && alphas().any(|a| a == 255);
+    let (cutout, cutoff) = match coverage {
+        AlphaCoverage::Auto => (alphas().all(|a| a == 0 || a == 255) && alphas().any(|a| a == 0) && alphas().any(|a| a == 255), COVERAGE_CUTOFF),
+        AlphaCoverage::Off => (false, COVERAGE_CUTOFF),
+        AlphaCoverage::Cutoff(c) => (true, c.max(1)),
+    };
     let passing = |px: &[u8], scale: f32| {
         let n = px.len() / 4;
-        px.as_chunks::<4>().0.iter().filter(|p| (p[3] as f32 * scale).min(255.0) >= COVERAGE_CUTOFF as f32).count() as f32 / n.max(1) as f32
+        px.as_chunks::<4>().0.iter().filter(|p| (p[3] as f32 * scale).min(255.0) >= cutoff as f32).count() as f32 / n.max(1) as f32
     };
     let want = if cutout { passing(&t.pixels, 1.0) } else { 0.0 };
     let mut out = Vec::new();
@@ -6172,7 +6215,7 @@ mod tests {
         let t = strands();
         let want = coverage(&t.pixels);
         assert!(want > 0.15 && want < 0.6, "fixture coverage {want}");
-        let levels = super::mip_levels(&t, 5);
+        let levels = super::mip_levels(&t, 5, super::AlphaCoverage::Auto);
         assert_eq!(levels.len(), 4);
         for (i, (w, h, px)) in levels.iter().enumerate() {
             assert_eq!(px.len() as u32, w * h * 4);
@@ -6182,6 +6225,38 @@ mod tests {
             // strand being as covered as one wholly on it.
             assert!(got > want - 0.1 && got < want + 0.25, "level {}: coverage {got} vs level 0's {want}", i + 1);
         }
+    }
+
+    /// **A picture told its cutoff keeps its coverage at that cutoff, soft
+    /// alpha and all; one told Off is filtered plainly.** Soft strands (alpha
+    /// 150 on 0, so `Auto` leaves them) keep their share above a 0.35 cutoff
+    /// down the chain; the 0/255 strands under `Off` match `Auto`'s plain
+    /// filter nowhere they were rescaled.
+    #[test]
+    fn a_cutoff_keeps_soft_alpha_coverage_and_off_keeps_none() {
+        use super::AlphaCoverage;
+        let mut soft = strands();
+        for p in soft.pixels.as_chunks_mut::<4>().0.iter_mut() {
+            if p[3] == 255 {
+                p[3] = 150;
+            }
+        }
+        let cutoff = 89u8; // 0.35
+        let above = |px: &[u8]| px.as_chunks::<4>().0.iter().filter(|p| p[3] >= cutoff).count() as f32 / (px.len() / 4) as f32;
+        let want = above(&soft.pixels);
+        for (i, (_, _, px)) in super::mip_levels(&soft, 5, AlphaCoverage::Cutoff(cutoff)).iter().enumerate() {
+            let got = above(px);
+            assert!(got > want - 0.1 && got < want + 0.25, "level {}: coverage {got} above the cutoff vs level 0's {want}", i + 1);
+        }
+        // The plain filter, for contrast: the far levels lose it.
+        let plain = super::mip_levels(&soft, 5, AlphaCoverage::Auto);
+        assert!(above(&plain[3].2) < want - 0.1, "the fixture: plain mips kept the soft strands' coverage anyway");
+
+        let t = strands();
+        let off = super::mip_levels(&t, 5, AlphaCoverage::Off);
+        let auto = super::mip_levels(&t, 5, AlphaCoverage::Auto);
+        assert!(off[3].2 != auto[3].2, "the fixture: Auto rescaled nothing");
+        assert!(coverage(&off[3].2) < coverage(&t.pixels) - 0.1, "Off kept the coverage");
     }
 
     /// **A picture with soft alpha is filtered as it always was**: its alpha
@@ -6196,7 +6271,7 @@ mod tests {
                 p[3] = 120;
             }
         }
-        let levels = super::mip_levels(&t, 5);
+        let levels = super::mip_levels(&t, 5, super::AlphaCoverage::Auto);
         // Every level by hand: the rounded mean of each 2x2 block of the one
         // before.
         let (mut prev, mut pw) = (t.pixels.clone(), t.width);

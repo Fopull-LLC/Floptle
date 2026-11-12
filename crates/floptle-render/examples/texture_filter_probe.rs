@@ -53,13 +53,13 @@ fn main() {
     // The same image registered with three different samplings.
     let tex = checker();
     let pixelated =
-        raster.register_texture(&gpu, &tex, TexSampling { filter: TexFilter::Pixelated, wrap: TexWrap::Repeat });
+        raster.register_texture(&gpu, &tex, TexSampling { filter: TexFilter::Pixelated, wrap: TexWrap::Repeat, ..Default::default() });
     let smooth =
-        raster.register_texture(&gpu, &tex, TexSampling { filter: TexFilter::Smooth, wrap: TexWrap::Repeat });
+        raster.register_texture(&gpu, &tex, TexSampling { filter: TexFilter::Smooth, wrap: TexWrap::Repeat, ..Default::default() });
     let mipped = raster.register_texture(
         &gpu,
         &tex,
-        TexSampling { filter: TexFilter::SmoothMipmaps, wrap: TexWrap::Repeat },
+        TexSampling { filter: TexFilter::SmoothMipmaps, wrap: TexWrap::Repeat, ..Default::default() },
     );
 
     let cam = RenderCamera::new(
