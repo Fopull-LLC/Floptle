@@ -18,6 +18,12 @@ fn hand_after_a_second(tag: &str, springs: &str) -> [f64; 3] {
 /// [`hand_after_a_second`], the script running `each` (Lua, with `a` the
 /// animator) every frame before it looks.
 fn hair_after_a_second(tag: &str, springs: &str, each: &str) -> [f64; 3] {
+    hair_with_files(tag, springs, each, &[])
+}
+
+/// [`hair_after_a_second`] with `files` (project-relative path, text)
+/// written into the project first.
+fn hair_with_files(tag: &str, springs: &str, each: &str, files: &[(&str, &str)]) -> [f64; 3] {
     let d = std::env::temp_dir().join(format!("flspring-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("scenes")).unwrap();
@@ -25,6 +31,9 @@ fn hair_after_a_second(tag: &str, springs: &str, each: &str) -> [f64; 3] {
     let sae = concat!(env!("CARGO_MANIFEST_DIR"), "/../floptle-assets/tests/fixtures/Sae.mirrored.rigged.glb");
     std::fs::copy(sae, d.join("Sae.glb")).unwrap();
     std::fs::write(d.join("project.ron"), "(title: Some(\"b\"), entry_scene: Some(\"scenes/first.ron\"))").unwrap();
+    for (path, text) in files {
+        std::fs::write(d.join(path), text).unwrap();
+    }
     std::fs::write(
         d.join("scripts/ask.lua"),
         format!("local frames = 0\n\
@@ -135,4 +144,24 @@ fn a_shot_draws_the_swung_hair() {
     assert!(lit > 2000, "the model is not in the picture: {lit} lit pixels");
     let differ = swung.pixels().zip(still.pixels()).filter(|(a, b)| a != b).count();
     assert!(differ > 200, "the swung hair drew the same picture as the still one ({differ} pixels differ)");
+}
+
+/// **A model's own default spring bones, and a spec a script swaps in**
+/// (card 0700). With `Sae.springs.ron` beside the model and nothing on the
+/// node, the hair swings by the model's default; a script that sets a spec
+/// with the chain disabled (`anim:setSpringBones`) holds it still; and one
+/// that sets nil goes back to the model's default.
+#[test]
+fn a_models_default_springs_and_a_swapped_spec() {
+    let swing = "(chains: [(name: \"Hair\", root: \"Hair_root\", stiffness: 0.0, drag: 0.3, max_angle: 170.0)], gravity: (40.0, 0.0, 0.0))";
+    let still_spec = "(chains: [(name: \"Hair\", root: \"Hair_root\", enabled: false)])";
+    let files = [("Sae.springs.ron", swing), ("still.springs.ron", still_spec)];
+    let clip = hand_after_a_second("d-none", "");
+    let by_default = hair_with_files("d-default", "", "", &files);
+    let swapped = hair_with_files("d-swap", "", "if frames == 0 then a:setSpringBones('still.springs.ron') end", &files);
+    let back = hair_with_files("d-back", ", spring_bones: Some((chains: [(name: \"Hair\", root: \"Hair_root\", enabled: false)]))", "if frames == 0 then a:setSpringBones(nil) end", &files);
+    let dist = |a: [f64; 3], b: [f64; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+    assert!(by_default[0] > clip[0] + 0.05, "the model's default spring bones did not swing the hair: clip {clip:?}, default {by_default:?}");
+    assert!(dist(clip, swapped) < 1e-4, "a swapped-in spec with the chain off still moved the hair {:.5}", dist(clip, swapped));
+    assert!(back[0] > clip[0] + 0.05, "setSpringBones(nil) did not go back to the model's default: {back:?}");
 }

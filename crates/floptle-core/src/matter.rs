@@ -638,6 +638,12 @@ impl Default for SpringBones {
 
 /// One chain: from `root` down to `end`, or `length` bones down through
 /// each bone's first child when `end` is `None` (0 is as far as it goes).
+///
+/// A `root` with `*` or `?` in it names every bone it matches, one chain
+/// each, called by its root bone's name (`S*` for strands `S00` to `S23`).
+/// A later chain whose root matches a chain already made sets that chain's
+/// numbers instead of making another, so one spec gives a braid or a fringe
+/// numbers of its own.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpringChainSpec {
     /// What scripts call it (`spring:setEnabled("Ponytail", false)`).
@@ -655,6 +661,10 @@ pub struct SpringChainSpec {
     pub max_angle: f32,
     /// The chain's thickness against colliders, metres.
     pub hit_radius: f32,
+    /// Where its pull back to the pose is measured from, 0..1: 0 from each
+    /// bone's swung parent (a long chain's bend adds up), 1 from the chain's
+    /// root (it keeps its shape), or a blend.
+    pub root_stiffness: f32,
     pub enabled: bool,
 }
 
@@ -670,6 +680,7 @@ impl Default for SpringChainSpec {
             drag: 0.2,
             max_angle: 60.0,
             hit_radius: 0.02,
+            root_stiffness: 0.0,
             enabled: true,
         }
     }

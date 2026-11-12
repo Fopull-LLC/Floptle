@@ -41,11 +41,18 @@ pub struct SpringParams {
     pub max_angle: f32,
     /// The chain's own thickness, for colliders: metres.
     pub hit_radius: f32,
+    /// Where the pull back to the pose is measured from, 0..1. At 0 (the
+    /// default) each segment springs toward its animated direction from its
+    /// parent's swung position, so a long chain's bend adds up down its
+    /// length; at 1 each tip springs toward its own animated place, measured
+    /// from the chain's root, so a long chain keeps its shape. Between, a
+    /// blend.
+    pub root_stiffness: f32,
 }
 
 impl Default for SpringParams {
     fn default() -> Self {
-        Self { stiffness: 1.5, gravity: 1.0, drag: 0.2, max_angle: 60f32.to_radians(), hit_radius: 0.02 }
+        Self { stiffness: 1.5, gravity: 1.0, drag: 0.2, max_angle: 60f32.to_radians(), hit_radius: 0.02, root_stiffness: 0.0 }
     }
 }
 
@@ -119,6 +126,11 @@ impl SpringSet {
             c.def.enabled = on;
             c.fresh = true;
         }
+    }
+
+    /// Chain `i`'s bones and numbers, as bound.
+    pub fn chain(&self, i: usize) -> Option<&SpringChain> {
+        self.chains.get(i).map(|c| &c.def)
     }
 
     pub fn is_enabled(&self, i: usize) -> bool {
@@ -271,11 +283,29 @@ fn integrate(c: &mut ChainState, skel: &Skeleton, pose: &[TransformTRS], world: 
         let (target, a) = animated_direction(pose, c, i, parent);
         let len = c.len[i];
         let (tip, prev) = (c.tips[i], c.prev[i]);
-        let pull = (head + a * len - tip) * k + gravity * p.gravity;
+        // Where the pose wants this tip: along its animated direction from
+        // where its parent swung to, or, measured from the root, its own
+        // animated place (at this segment's length from the head), or a blend.
+        let mut aim = head + a * len;
+        if p.root_stiffness > 0.0 {
+            let own = world[c.def.bones[i + 1]].w_axis.truncate();
+            let from_root = head + (own - head).normalize_or(a) * len;
+            aim = aim.lerp(from_root, p.root_stiffness.clamp(0.0, 1.0));
+        }
+        let pull = (aim - tip) * k + gravity * p.gravity;
         let mut next = tip + (tip - prev) * keep + pull * h * h;
         next = constrain(head, next, a, len, p.max_angle);
         for &(ca, cb, r) in colliders {
-            next = push_out(next, ca, cb, r + p.hit_radius);
+            let r = r + p.hit_radius;
+            next = slide_out(next, ca, cb, r, aim);
+            // The segment, not only its end: a midpoint inside the collider
+            // means the segment crosses it, and the tip goes twice as far as
+            // the midpoint must so the whole segment clears.
+            let mid = (head + next) * 0.5;
+            let cleared = push_out(mid, ca, cb, r);
+            if cleared != mid {
+                next += (cleared - mid) * 2.0;
+            }
         }
         next = constrain(head, next, a, len, p.max_angle);
         c.prev[i] = tip;
@@ -294,6 +324,32 @@ fn constrain(head: Vec3, next: Vec3, a: Vec3, len: f32, max: f32) -> Vec3 {
         dir = Quat::from_axis_angle(axis, max) * a;
     }
     head + dir * len
+}
+
+/// `p` pushed out of the capsule from `a` to `b` of radius `r`, then slid a
+/// little round it toward `aim`, the place the pull wants it. Pushed straight
+/// out alone, a chain swung past a shoulder stayed on the far side for good,
+/// its pull going straight through the shoulder; sliding, it works its way
+/// back round.
+fn slide_out(p: Vec3, a: Vec3, b: Vec3, r: f32, aim: Vec3) -> Vec3 {
+    let out = push_out(p, a, b, r);
+    if out == p {
+        return out;
+    }
+    let q = closest_on(out, a, b);
+    let n = (out - q).normalize_or(Vec3::Y);
+    let toward = aim - out;
+    let along = toward - n * toward.dot(n);
+    // A small step a solver tick, so the slide reads as motion, not a jump.
+    let slid = out + along.clamp_length_max(r * 0.25);
+    push_out(slid, a, b, r)
+}
+
+/// The point of the segment from `a` to `b` nearest `p`.
+fn closest_on(p: Vec3, a: Vec3, b: Vec3) -> Vec3 {
+    let ab = b - a;
+    let t = if ab.length_squared() > 1e-12 { ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+    a + ab * t
 }
 
 /// `p` pushed out of the capsule from `a` to `b` of radius `r` (a sphere
@@ -502,6 +558,47 @@ mod tests {
         let z = held.tip(0).unwrap().z;
         let want = (Quat::from_rotation_y(-0.3) * Vec3::X).z;
         assert!(z * want > 0.0 && z.abs() > 0.05, "a turn did not swing the tip: z {z}");
+    }
+
+    /// **Measured from the root, a long chain keeps its shape under gravity**
+    /// (card 0700). An eight-segment chain held out level by its pose sags
+    /// under gravity; springing each tip toward its own animated place
+    /// (`root_stiffness` 1) it sags far less than springing each segment from
+    /// its parent's swung position, where the bend adds up down the chain.
+    #[test]
+    fn root_relative_stiffness_keeps_a_long_chain_from_sagging() {
+        let skel = chain(8, 0.1, Vec3::ZERO, Vec3::X);
+        let sag = |root: f32| {
+            let mut set = set_for(&skel, SpringParams { stiffness: 2.0, root_stiffness: root, max_angle: std::f32::consts::PI, ..Default::default() }, vec![]);
+            for _ in 0..240 {
+                frame(&skel, &mut set, Quat::IDENTITY, 1.0 / 60.0);
+            }
+            -set.tip(0).unwrap().y
+        };
+        let (parent, root) = (sag(0.0), sag(1.0));
+        assert!(parent > 0.05, "the fixture: the chain hardly sagged at all ({parent:.3} m)");
+        assert!(root < parent * 0.6, "measured from the root it sagged {root:.3} m against {parent:.3} m");
+    }
+
+    /// **A collider slides a particle round toward where it is pulled, not
+    /// only straight out** (card 0700). A particle pressed into a sphere with
+    /// its aim on the far side and off to one side: pushed straight out it
+    /// lands on the near surface and stays there, its pull going through the
+    /// sphere; slid, it moves round the surface toward the aim, closer to it
+    /// and still outside, a step each solver tick: the way out for a chain
+    /// pinned behind a shoulder by its own pull.
+    #[test]
+    fn a_collider_slides_a_particle_round_toward_its_aim() {
+        let (c, r) = (Vec3::ZERO, 0.1);
+        let pressed = Vec3::new(-0.09, 0.0, 0.0);
+        let aim = Vec3::new(0.2, 0.05, 0.0);
+        let straight = push_out(pressed, c, c, r);
+        let slid = slide_out(pressed, c, c, r, aim);
+        assert!(straight.length() >= r - 1e-5 && slid.length() >= r - 1e-5, "both must end outside the sphere: {straight} {slid}");
+        assert!(slid.distance(aim) < straight.distance(aim) - 0.001, "sliding did not move it toward its aim: {slid} vs {straight}");
+        // Pushed straight out again from where it landed, it makes no
+        // progress at all: its pull is straight into the sphere.
+        assert_eq!(push_out(straight, c, c, r), straight);
     }
 
     /// **A chain switched off follows its pose exactly.**

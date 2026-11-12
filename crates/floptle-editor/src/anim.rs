@@ -1662,6 +1662,83 @@ pub fn apply_instance(
     }
 }
 
+/// A `.springs.ron` file's spring bones: a `SpringBonesDoc`, as a scene
+/// node's `spring_bones` is written.
+pub(crate) fn load_spring_doc(path: &std::path::Path) -> Result<floptle_core::SpringBones, String> {
+    let text = floptle_vfs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    ron::from_str::<floptle_scene::SpringBonesDoc>(&text)
+        .map(|d| d.to_component())
+        .map_err(|e| format!("{} is not spring bones: {e}", path.display()))
+}
+
+/// Does `name` match `pattern`, where `*` is any run of characters and `?`
+/// any one?
+fn glob_match(pattern: &str, name: &str) -> bool {
+    fn go(p: &[char], n: &[char]) -> bool {
+        match p.split_first() {
+            None => n.is_empty(),
+            Some(('*', rest)) => (0..=n.len()).any(|k| go(rest, &n[k..])),
+            Some(('?', rest)) => !n.is_empty() && go(rest, &n[1..]),
+            Some((c, rest)) => n.first() == Some(c) && go(rest, &n[1..]),
+        }
+    }
+    let (p, n): (Vec<char>, Vec<char>) = (pattern.chars().collect(), name.chars().collect());
+    go(&p, &n)
+}
+
+/// The bones of chain `c` from `root`: up from its end bone, or down
+/// through each bone's first child, `length` bones (0: to the end).
+fn spring_chain_bones(
+    skel: &floptle_anim::Skeleton,
+    root: usize,
+    c: &floptle_core::SpringChainSpec,
+    first_child: &dyn Fn(usize) -> Option<usize>,
+    warn: &mut Vec<(String, String)>,
+) -> Vec<usize> {
+    match &c.end {
+        Some(end) => match skel.index_of(end) {
+            Some(mut at) => {
+                let mut up = vec![at];
+                while at != root {
+                    match skel.nodes[at].parent {
+                        Some(p) => {
+                            at = p;
+                            up.push(p);
+                        }
+                        None => {
+                            warn.push((
+                                format!("spring:{}:{end}", c.name),
+                                format!("spring bones: chain \"{}\" ends at \"{end}\", which is not below its root \"{}\"", c.name, c.root),
+                            ));
+                            return Vec::new();
+                        }
+                    }
+                }
+                up.reverse();
+                up
+            }
+            None => {
+                warn.push((format!("spring:{}:{end}", c.name), format!("spring bones: chain \"{}\" names an end bone \"{end}\" this model does not have", c.name)));
+                Vec::new()
+            }
+        },
+        None => {
+            let mut bones = vec![root];
+            let mut at = root;
+            while c.length == 0 || bones.len() <= c.length as usize {
+                match first_child(at) {
+                    Some(ch) => {
+                        bones.push(ch);
+                        at = ch;
+                    }
+                    None => break,
+                }
+            }
+            bones
+        }
+    }
+}
+
 /// Bind `spec` to `skel`: chain and collider bones by name, warnings for
 /// the names it lacks (that chain is left out).
 fn bind_springs(spec: &floptle_core::SpringBones, skel: &floptle_anim::Skeleton, warn: &mut Vec<(String, String)>) -> SpringRuntime {
@@ -1669,48 +1746,22 @@ fn bind_springs(spec: &floptle_core::SpringBones, skel: &floptle_anim::Skeleton,
     let first_child = |i: usize| skel.nodes.iter().enumerate().skip(i + 1).find(|(_, n)| n.parent == Some(i)).map(|(j, _)| j);
     let mut chains = Vec::new();
     let mut names = Vec::new();
+    // Each spec chain names one root bone, or with `*` / `?` every bone its
+    // pattern matches; a later chain on a root already made sets that
+    // chain's numbers instead of making another.
+    let mut by_root: HashMap<usize, usize> = HashMap::new();
     for c in &spec.chains {
-        let mut bones = Vec::new();
-        match skel.index_of(&c.root) {
-            None => warn.push((format!("spring:{}:{}", c.name, c.root), format!("spring bones: chain \"{}\" names a root bone \"{}\" this model does not have, so it does not move", c.name, c.root))),
-            Some(root) => match &c.end {
-                Some(end) => match skel.index_of(end) {
-                    Some(mut at) => {
-                        let mut up = vec![at];
-                        while at != root {
-                            match skel.nodes[at].parent {
-                                Some(p) => {
-                                    at = p;
-                                    up.push(p);
-                                }
-                                None => {
-                                    up.clear();
-                                    break;
-                                }
-                            }
-                        }
-                        if up.is_empty() {
-                            warn.push((format!("spring:{}:{end}", c.name), format!("spring bones: chain \"{}\" ends at \"{end}\", which is not below its root \"{}\"", c.name, c.root)));
-                        }
-                        up.reverse();
-                        bones = up;
-                    }
-                    None => warn.push((format!("spring:{}:{end}", c.name), format!("spring bones: chain \"{}\" names an end bone \"{end}\" this model does not have", c.name))),
-                },
-                None => {
-                    bones.push(root);
-                    let mut at = root;
-                    while c.length == 0 || bones.len() <= c.length as usize {
-                        match first_child(at) {
-                            Some(ch) => {
-                                bones.push(ch);
-                                at = ch;
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            },
+        let pattern = c.root.contains(['*', '?']);
+        let roots: Vec<usize> = if pattern {
+            skel.nodes.iter().enumerate().filter(|(_, n)| glob_match(&c.root, &n.name)).map(|(i, _)| i).collect()
+        } else {
+            skel.index_of(&c.root).into_iter().collect()
+        };
+        if roots.is_empty() {
+            warn.push((
+                format!("spring:{}:{}", c.name, c.root),
+                format!("spring bones: chain \"{}\" names a root bone \"{}\" this model does not have, so it does not move", c.name, c.root),
+            ));
         }
         let params = SpringParams {
             stiffness: c.stiffness,
@@ -1718,9 +1769,20 @@ fn bind_springs(spec: &floptle_core::SpringBones, skel: &floptle_anim::Skeleton,
             drag: c.drag,
             max_angle: c.max_angle.to_radians(),
             hit_radius: c.hit_radius,
+            root_stiffness: c.root_stiffness,
         };
-        chains.push(SpringChain { bones, params, enabled: c.enabled });
-        names.push(c.name.clone());
+        for root in roots {
+            if let Some(&k) = by_root.get(&root) {
+                let ch: &mut SpringChain = &mut chains[k];
+                ch.params = params;
+                ch.enabled = c.enabled;
+                continue;
+            }
+            let bones = spring_chain_bones(skel, root, c, &first_child, warn);
+            by_root.insert(root, chains.len());
+            chains.push(SpringChain { bones, params, enabled: c.enabled });
+            names.push(if pattern || c.name.is_empty() { skel.nodes[root].name.clone() } else { c.name.clone() });
+        }
     }
     let colliders = spec
         .colliders
@@ -1754,6 +1816,7 @@ pub fn advance_springs(
     system: &mut AnimSystem,
     world: &World,
     mesh_registry: &HashMap<String, MeshAsset>,
+    defaults: &HashMap<String, floptle_core::SpringBones>,
     dt: f32,
     carry: &HashMap<u32, [f64; 3]>,
 ) {
@@ -1761,14 +1824,16 @@ pub fn advance_springs(
     let AnimSystem { instances, poses, overrides, .. } = system;
     for (&e, inst) in instances.iter_mut() {
         let posed = std::mem::take(&mut inst.posed);
-        let Some(spec) = world.get::<floptle_core::SpringBones>(e) else {
-            inst.springs = None;
-            continue;
-        };
         if !matches!(inst.binding, AnimBinding::Rig) {
             continue;
         }
         let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(e) else { continue };
+        // The node's own spring bones, else its model's default
+        // (`<model>.springs.ron` beside it).
+        let Some(spec) = world.get::<floptle_core::SpringBones>(e).or_else(|| defaults.get(asset_path)) else {
+            inst.springs = None;
+            continue;
+        };
         let Some(rig) = mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref()) else { continue };
         if inst.springs.as_ref().is_none_or(|r| r.spec != *spec) {
             inst.springs = Some(bind_springs(spec, &rig.skeleton, &mut warn));
@@ -2406,7 +2471,8 @@ fn apply_commands_keeping_pose_ops(
             | AnimCmd::HoldPose(_)
             | AnimCmd::SpringEnabled { .. }
             | AnimCmd::SpringReset(_)
-            | AnimCmd::SpringGravity(_) => {}
+            | AnimCmd::SpringGravity(_)
+            | AnimCmd::SpringSpec(_) => {}
         }
     }
     for (key, msg) in warn {
@@ -4289,5 +4355,46 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod spring_binding_tests {
+    use super::*;
+    use floptle_anim::{SkelNode, Skeleton, TransformTRS};
+
+    /// **A chain root with `*` makes one chain per bone it matches, and a
+    /// later chain on one of those roots sets its numbers** (card 0700). A
+    /// head with three strands of three bones: `S*` makes three chains named
+    /// for their roots, a following `S01` entry gives that strand its own
+    /// stiffness without making a fourth, and the patterns match as written.
+    #[test]
+    fn a_pattern_root_makes_a_chain_per_bone_and_later_entries_override() {
+        let mut nodes = vec![SkelNode { name: "Head".into(), parent: None, rest: TransformTRS::IDENTITY, pivot: Vec3::ZERO }];
+        for s in 0..3 {
+            for b in 0..3 {
+                let parent = if b == 0 { 0 } else { nodes.len() - 1 };
+                let name = if b == 0 { format!("S0{s}") } else { format!("S0{s}_{b}") };
+                nodes.push(SkelNode { name, parent: Some(parent), rest: TransformTRS { t: Vec3::new(0.0, -0.1, 0.0), ..TransformTRS::IDENTITY }, pivot: Vec3::ZERO });
+            }
+        }
+        let skel = Skeleton::new(nodes);
+        let spec = floptle_core::SpringBones {
+            chains: vec![
+                floptle_core::SpringChainSpec { name: "strands".into(), root: "S0?".into(), stiffness: 1.0, ..Default::default() },
+                floptle_core::SpringChainSpec { name: "fringe".into(), root: "S01".into(), stiffness: 5.0, root_stiffness: 0.5, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let mut warn = Vec::new();
+        let rt = bind_springs(&spec, &skel, &mut warn);
+        assert!(warn.is_empty(), "{warn:?}");
+        assert_eq!(rt.names, vec!["S00", "S01", "S02"], "the pattern made the wrong chains");
+        assert_eq!(rt.set.chain_count(), 3, "the override made a chain of its own");
+        let s01 = rt.set.chain(1).unwrap();
+        assert_eq!((s01.params.stiffness, s01.params.root_stiffness), (5.0, 0.5), "the later entry did not set S01's numbers");
+        assert_eq!(s01.bones.len(), 3, "S01's chain lost its bones");
+        assert_eq!(rt.set.chain(0).unwrap().params.stiffness, 1.0);
+        assert!(glob_match("S*", "S00_2") && glob_match("S0?", "S01") && !glob_match("S0?", "S01_1") && !glob_match("S*", "Head"));
     }
 }

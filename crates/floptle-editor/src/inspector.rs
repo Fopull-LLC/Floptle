@@ -6251,6 +6251,10 @@ impl EditorTabViewer<'_> {
                     });
                     ui.horizontal(|ui| pick(ui, (i, "root"), "Root bone", &mut c.root, &mut changed));
                     ui.horizontal(|ui| {
+                        ui.label("…or pattern").on_hover_text("A root with * or ? makes one chain for every bone it matches (S* for strands S00 to S23); a later chain on one of those bones sets its numbers");
+                        changed |= ui.text_edit_singleline(&mut c.root).changed();
+                    });
+                    ui.horizontal(|ui| {
                         let mut to_end = c.end.is_some();
                         if crate::responsive::check(ui, &mut to_end, "Down to a bone").on_hover_text("Off: this many bones down from the root, through each bone's first child (0: to the end)").changed() {
                             c.end = to_end.then(String::new);
@@ -6275,6 +6279,7 @@ impl EditorTabViewer<'_> {
                     num(ui, "Drag", &mut c.drag, 0.0..=1.0, 0.01, "The share of its speed lost each sixtieth of a second: 0.2 settles a free chain in about a second");
                     num(ui, "Max angle", &mut c.max_angle, 0.0..=180.0, 1.0, "Furthest a segment turns from its animated direction, degrees");
                     num(ui, "Thickness", &mut c.hit_radius, 0.0..=1.0, 0.005, "The chain's radius against colliders, metres");
+                    num(ui, "From root", &mut c.root_stiffness, 0.0..=1.0, 0.01, "Where the pull back to the pose is measured from: 0 from each bone's swung parent (a long chain's bend adds up), 1 from the chain's root (it keeps its shape)");
                     ui.horizontal(|ui| {
                         changed |= crate::responsive::check(ui, &mut c.enabled, "Enabled").changed();
                         if ui.small_button("🗑 Remove chain").clicked() {

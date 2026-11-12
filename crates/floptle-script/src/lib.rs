@@ -1487,6 +1487,10 @@ pub enum AnimCmd {
     /// `anim:setSpringGravity(x, y, z)`: the gravity the chains feel, m/s²,
     /// over the one the component names (a world's own).
     SpringGravity([f32; 3]),
+    /// `anim:setSpringBones(path)`: this node's spring bones from a
+    /// `.springs.ron` file, over its own and its model's; `None` takes them
+    /// away, back to the model's default.
+    SpringSpec(Option<String>),
 }
 
 /// What a script asks of a rig's pose after the animator made it. Positions

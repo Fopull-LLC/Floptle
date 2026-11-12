@@ -609,6 +609,7 @@ impl Editor {
     /// can ask where a bone is. A model with no rig is remembered as one and
     /// never read again. True when the rig is registered.
     fn import_rig_headless(&mut self, path: &str, file: &Path) -> bool {
+        load_spring_default(&mut self.spring_defaults, &mut self.console, path, file);
         if self.model_failed.contains(path) {
             return false;
         }
@@ -669,6 +670,7 @@ impl Editor {
             // Rigged: any glTF with animations keeps its node tree + clips
             // (parts stay node-local and get posed each frame).
             Ok(floptle_assets::Model::Rigged(model)) => {
+                load_spring_default(&mut self.spring_defaults, &mut self.console, path, std::path::Path::new(file));
                 let parts: Vec<MeshId> = model
                     .parts
                     .iter()
@@ -4192,5 +4194,27 @@ mod texture_quality_tests {
         ed.set_texture_quality(0);
         assert_eq!(bytes(&ed), whole, "High did not bring the texture back whole");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Spring bones every node using model `path` swings by unless it has its
+/// own: `<model>.springs.ron` beside its file, if there is one. Free of the
+/// editor, so an import holding the renderer can call it.
+fn load_spring_default(
+    defaults: &mut std::collections::HashMap<String, floptle_core::SpringBones>,
+    console: &mut crate::ConsoleState,
+    path: &str,
+    file: &Path,
+) {
+    let sidecar = file.with_extension("springs.ron");
+    if !floptle_vfs::is_file(&sidecar) {
+        defaults.remove(path);
+        return;
+    }
+    match crate::anim::load_spring_doc(&sidecar) {
+        Ok(spec) => {
+            defaults.insert(path.to_string(), spec);
+        }
+        Err(why) => console.push(floptle_script::LogLevel::Warn, format!("{path}: {why}"), None),
     }
 }

@@ -406,6 +406,7 @@ pub struct SpringChainDoc {
     pub drag: f32,
     pub max_angle: f32,
     pub hit_radius: f32,
+    pub root_stiffness: f32,
     pub enabled: bool,
 }
 
@@ -427,6 +428,7 @@ impl SpringChainDoc {
             drag: c.drag,
             max_angle: c.max_angle,
             hit_radius: c.hit_radius,
+            root_stiffness: c.root_stiffness,
             enabled: c.enabled,
         }
     }
@@ -459,6 +461,7 @@ impl SpringBonesDoc {
                     drag: c.drag,
                     max_angle: c.max_angle,
                     hit_radius: c.hit_radius,
+                    root_stiffness: c.root_stiffness,
                     enabled: c.enabled,
                 })
                 .collect(),

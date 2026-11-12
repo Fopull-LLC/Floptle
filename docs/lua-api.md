@@ -43,7 +43,7 @@ each group, and meant to be searched.
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
 - [components — getcomponent](#components--getcomponent) — 120
-- [animation — node:animator](#animation--nodeanimator) — 32
+- [animation — node:animator](#animation--nodeanimator) — 33
 - [particles — effects from script](#particles--effects-from-script) — 16
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 36
 - [assets](#assets) — 19
@@ -4543,6 +4543,10 @@ anim:setParam("speed", 3.2) — set a number the controller's blend states read.
 ### `anim:setSpeed`
 
 anim:setSpeed(2 [, layer]) — playback speed: with no layer, the whole animator's; with a layer, that layer's own rate on top of it, so a punch keeps its speed while the run under it is sped up to match the ground.
+
+### `anim:setSpringBones`
+
+anim:setSpringBones("hair/long.springs.ron") — this model's spring bones from a .springs.ron file (a SpringBones spec, written as a scene node's spring_bones is: chains, colliders, gravity), over the node's own: a different hairstyle's chains swapped in at runtime. anim:setSpringBones(nil) takes them away, back to the model's own default, a <model>.springs.ron beside the model file, which every node using the model swings by unless it has its own. A chain's root may be a pattern (S* makes one chain per bone it matches), a later chain on one of those bones sets its numbers, and rootStiffness (0..1) measures the pull back to the pose from the chain's root, so a long chain keeps its shape. A file it cannot read is a Console line.
 
 ### `anim:setSpringEnabled`
 

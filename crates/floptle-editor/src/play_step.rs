@@ -770,7 +770,7 @@ impl Editor {
         // Animation: bind + apply queued Lua animator commands + advance every
         // controller (ordering: scripts → animation → physics), then dispatch
         // fired clip events back into the node's scripts.
-        let anim_cmds = self.script_host.take_anim_commands();
+        let anim_cmds = self.take_spring_specs(self.script_host.take_anim_commands());
         // A frame-step advances animation by exactly the ticks it is about to
         // release (the tick loop consumes `tick_steps` further down), so the pose
         // you are looking at belongs to the gameplay frame you stopped on. Paused
@@ -1652,6 +1652,30 @@ impl Editor {
             .collect()
     }
 
+    /// `anim:setSpringBones(path | nil)` asks, carried out here: they need
+    /// the project's files and the world, which the animation system has
+    /// neither of. The rest of the commands go on.
+    fn take_spring_specs(&mut self, cmds: Vec<(u32, floptle_script::AnimCmd)>) -> Vec<(u32, floptle_script::AnimCmd)> {
+        let mut rest = Vec::with_capacity(cmds.len());
+        for (eid, cmd) in cmds {
+            let floptle_script::AnimCmd::SpringSpec(path) = cmd else {
+                rest.push((eid, cmd));
+                continue;
+            };
+            let Some(e) = self.world.entity_at(eid) else { continue };
+            match path {
+                None => {
+                    self.world.remove::<floptle_core::SpringBones>(e);
+                }
+                Some(p) => match crate::anim::load_spring_doc(&self.project_root.join(&p)) {
+                    Ok(spec) => self.world.insert(e, spec),
+                    Err(why) => self.console.push(floptle_script::LogLevel::Warn, format!("anim:setSpringBones(\"{p}\"): {why}"), None),
+                },
+            }
+        }
+        rest
+    }
+
     /// The terrain meshing queries paid for this frame, into the profile:
     /// `perf.counts()`' queryMeshed / queryMeshMs / queryDeferred and the
     /// `terrainQueryMeshing` part. Totals live on each terrain collider; this
@@ -1700,7 +1724,7 @@ impl Editor {
         {
             // Named, so the chains' cost is not lost in `untimed`.
             let span = floptle_core::profile::Span::new();
-            anim::advance_springs(&mut self.anim, &self.world, &self.mesh_registry, sdt, &self.frame_carry);
+            anim::advance_springs(&mut self.anim, &self.world, &self.mesh_registry, &self.spring_defaults, sdt, &self.frame_carry);
             let ms = span.ms();
             let mut p = self.script_host.profile().borrow_mut();
             p.record(floptle_core::profile::Bucket::Animation, ms);

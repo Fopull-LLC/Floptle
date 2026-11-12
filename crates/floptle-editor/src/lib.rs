@@ -3291,6 +3291,9 @@ struct Editor {
     query_meshing_totals: (u64, f64, u64),
     /// Models whose refused texture-array merge the Console has named.
     merge_refusals_said: std::collections::HashSet<String>,
+    /// Each rigged model's default spring bones, from a `.springs.ron` beside
+    /// it, by asset path: what a node with none of its own swings by.
+    spring_defaults: HashMap<String, floptle_core::SpringBones>,
     /// Kinematic bodies on a moving world as the last tick left their nodes,
     /// with that tick's carry: a node found elsewhere when the next tick
     /// starts was moved outside `fixedUpdate`. See `warn_kinematic_moved_between_ticks`.

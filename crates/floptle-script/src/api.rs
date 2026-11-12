@@ -7872,6 +7872,20 @@ fn install_anim_pose_methods(
         )?;
     }
     {
+        // anim:setSpringBones(path | nil) — this node's spring bones from a
+        // .springs.ron file (a hairstyle's chains and colliders), swapped in
+        // the next frame; nil goes back to the model's own default.
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "setSpringBones",
+            lua.create_function(move |_, (this, path): (Table, Option<String>)| {
+                let e: u32 = this.raw_get("__id")?;
+                queue(&cmds, e, AnimCmd::SpringSpec(path));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
         // anim:setSpringGravity(x, y, z) — the gravity its spring bones feel,
         // m/s², over the component's: a world's own.
         let cmds = shared.anim_commands.clone();
