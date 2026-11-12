@@ -760,9 +760,10 @@ impl Editor {
                 // can draw as one instance, a material per slot (card 0685):
                 // their mesh laid end to end is registered beside them. Parts
                 // whose pictures differ can too, when each kind of picture
-                // (base, normal, metal-rough, occlusion, emissive) is one size
-                // and sampling across the parts that have it: those pictures
-                // are written into texture arrays here (card 0690). Whether
+                // (base, normal, metal-rough, occlusion, emissive) is one
+                // sampling across the parts that have it, and one shape at
+                // sizes a power of two apart: those pictures are written into
+                // texture arrays here (cards 0690, 0692). Whether
                 // a node's parts really do merge is decided each frame, against
                 // what its overrides make of them; this only says they can.
                 let merged = {
@@ -772,15 +773,16 @@ impl Editor {
                     let kinds = |p: &floptle_assets::gltf_import::ImportedPart| [p.texture, p.maps.normal, p.maps.metallic_roughness, p.maps.occlusion, p.maps.emissive];
                     let same = model.parts.iter().all(|p| kinds(p) == kinds(first));
                     let sampling_of = |i: usize| embedded_sampling(chosen, &model.texture_filters, Some(i));
-                    // Each kind: one size and one sampling across the parts that
-                    // have a picture of it.
+                    // Each kind: one sampling across the parts that have a
+                    // picture of it, each size able to share the biggest's array.
                     let fits = (0..5).all(|k| {
-                        let mut seen: Option<((u32, u32), floptle_render::TexSampling)> = None;
-                        model.parts.iter().filter_map(|p| kinds(p)[k]).all(|i| {
-                            let Some(t) = model.textures.get(i) else { return false };
-                            let this = ((t.width, t.height), sampling_of(i));
-                            *seen.get_or_insert(this) == this
-                        })
+                        let pics: Vec<usize> = model.parts.iter().filter_map(|p| kinds(p)[k]).collect();
+                        let Some(sizes) = pics.iter().map(|&i| model.textures.get(i).map(|t| (t.width, t.height))).collect::<Option<Vec<_>>>() else {
+                            return false;
+                        };
+                        let big = sizes.iter().copied().max_by_key(|s| s.0).unwrap_or_default();
+                        pics.iter().all(|&i| sampling_of(i) == sampling_of(pics[0]))
+                            && sizes.iter().all(|&s| floptle_render::raster::sizes_share_an_array(s, big))
                     });
                     let arrays = opaque && !same && fits && crate::mesh_instances::merge_arrays_on();
                     (opaque && (same || arrays))

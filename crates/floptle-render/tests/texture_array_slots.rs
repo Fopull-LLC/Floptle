@@ -31,9 +31,16 @@ fn square(x: f32) -> MeshData {
 /// A 32² picture of stripes and a gradient in `tint`; with `holes`, a
 /// checker of fully transparent texels.
 fn picture(tint: [u8; 3], holes: bool) -> TextureData {
+    picture_of(tint, holes, 32)
+}
+
+/// [`picture`] at `n`² (the same pattern, its bands a texel apart at 16²
+/// where they are two apart at 32²).
+fn picture_of(tint: [u8; 3], holes: bool, n: u32) -> TextureData {
+    let k = 32 / n;
     let mut pixels = Vec::new();
-    for y in 0..32u32 {
-        for x in 0..32u32 {
+    for y in (0..32u32).step_by(k as usize) {
+        for x in (0..32u32).step_by(k as usize) {
             let band = if (x / 4 + y / 8) % 2 == 0 { 255 } else { 120 };
             let a = if holes && (x / 8 + y / 8) % 2 == 1 { 0 } else { 255 };
             pixels.extend_from_slice(&[
@@ -44,7 +51,7 @@ fn picture(tint: [u8; 3], holes: bool) -> TextureData {
             ]);
         }
     }
-    TextureData { width: 32, height: 32, pixels }
+    TextureData { width: n, height: n, pixels }
 }
 
 /// A 32² normal map of ridges along `axis`.
@@ -84,13 +91,16 @@ enum Mode {
 
 /// One picture, the renderer shared between pictures.
 fn draw(gpu: &Gpu, raster: &mut Raster, light: &Raymarch, color: &wgpu::Texture, merged: bool, mode: Mode) -> Vec<[u8; 4]> {
-    draw_with(gpu, raster, light, color, merged, mode, true)
+    draw_with(gpu, raster, light, color, merged, mode, true, 32)
 }
 
-fn draw_with(gpu: &Gpu, raster: &mut Raster, light: &Raymarch, color: &wgpu::Texture, merged: bool, mode: Mode, maps: bool) -> Vec<[u8; 4]> {
+/// `trim`: the middle square's base picture's size, 32² like the others or
+/// smaller.
+#[allow(clippy::too_many_arguments)]
+fn draw_with(gpu: &Gpu, raster: &mut Raster, light: &Raymarch, color: &wgpu::Texture, merged: bool, mode: Mode, maps: bool, trim: u32) -> Vec<[u8; 4]> {
     let parts = [square(-0.66), square(0.0), square(0.66)];
     let s = TexSampling { filter: TexFilter::SmoothMipmaps, ..Default::default() };
-    let bases = [picture([230, 60, 40], false), picture([40, 200, 90], false), picture([60, 80, 240], true)];
+    let bases = [picture([230, 60, 40], false), picture_of([40, 200, 90], false, trim), picture([60, 80, 240], true)];
     let normals = if maps { [Some(ridges(0)), Some(ridges(1)), None] } else { [None, None, None] };
     let mut sets: Vec<TexId> = Vec::new();
     for (b, n) in bases.iter().zip(&normals) {
@@ -185,7 +195,7 @@ fn three_textured_parts_and_their_array_merge_draw_the_same_pixels() {
     );
     // The fixture: the normal maps change the picture, or a slot reading the
     // wrong map could not show.
-    let flat = draw_with(&gpu, &mut raster, &light, &color, false, Mode::Plain, false);
+    let flat = draw_with(&gpu, &mut raster, &light, &color, false, Mode::Plain, false, 32);
     let mapped = draw(&gpu, &mut raster, &light, &color, false, Mode::Plain);
     let bumps = flat.iter().zip(&mapped).filter(|(a, b)| a != b).count();
     assert!(bumps > 200, "the normal maps changed only {bumps} pixels");
@@ -204,6 +214,50 @@ fn three_textured_parts_and_their_array_merge_draw_the_same_pixels() {
         let differ = parts.iter().zip(&merged).filter(|(a, b)| a != b).count();
         assert_eq!(differ, 0, "{mode:?}: the array-merged model differs from its parts in {differ} pixels");
     }
+}
+
+/// **A part whose picture is smaller still merges, and looks the same.**
+/// The middle square's base is 16², the others 32²: the base array is the
+/// 32² one, the small picture upsampled into a layer of it
+/// (`Raster::resample_into`). Merged, the model is one instance and draws
+/// as its parts do, within a few levels where the magnified picture is read
+/// from the upsampled layer rather than filtered from the small one.
+#[test]
+fn a_smaller_picture_merges_and_draws_like_its_part() {
+    let gpu = Gpu::headless(SIZE, SIZE);
+    if !gpu.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
+        eprintln!("skipped — this device cannot build the raster pass, so nothing can be drawn");
+        return;
+    }
+    let color = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("texture-array-slots-resample"),
+        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: gpu.config.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let mut raster = Raster::new(&gpu);
+    let light = Raymarch::new(&gpu);
+    let k = glam::Vec3::new(0.5, 0.4, 0.75).normalize();
+    light.upload_globals(
+        &gpu,
+        RaymarchGlobals { light_dir: [k.x, k.y, k.z, 0.0], light_color: [0.8, 0.8, 0.8, 0.0], ambient: [0.15, 0.15, 0.15, 0.0], ..Default::default() },
+    );
+    let parts = draw_with(&gpu, &mut raster, &light, &color, false, Mode::Plain, true, 16);
+    let merged = draw_with(&gpu, &mut raster, &light, &color, true, Mode::Plain, true, 16);
+    // The fixture: the 16² picture draws differently from the 32² one, so a
+    // merge that read the wrong one would show.
+    let full = draw_with(&gpu, &mut raster, &light, &color, false, Mode::Plain, true, 32);
+    let changed = parts.iter().zip(&full).filter(|(a, b)| a != b).count();
+    assert!(changed > 100, "the 16² trim changed only {changed} pixels");
+    let worst = parts.iter().zip(&merged).map(|(a, b)| (0..3).map(|c| (a[c] as i32 - b[c] as i32).abs()).max().unwrap()).max().unwrap();
+    let off = parts.iter().zip(&merged).filter(|(a, b)| (0..3).any(|c| (a[c] as i32 - b[c] as i32).abs() > 4)).count();
+    // Measured: no pixel more than 4 levels off, the worst 4; with the top
+    // levels left unwritten, 1444 pixels and the worst 203.
+    assert!(worst <= 8 && off <= 10, "the merged model differs from its parts: {off} pixels by more than 4, the worst by {worst}");
 }
 
 /// **The array pipelines can be built off the frame, and a draw that has to

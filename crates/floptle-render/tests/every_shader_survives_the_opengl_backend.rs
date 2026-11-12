@@ -43,6 +43,7 @@ fn modules() -> Vec<(&'static str, String)> {
         ("grid.wgsl", one("grid.wgsl")),
         ("light2d.wgsl + hex_tile.wgsl", floptle_render::light2d::source().to_string()),
         ("outline.wgsl", one("outline.wgsl")),
+        ("pool_upsample.wgsl", one("pool_upsample.wgsl")),
         ("palette.wgsl", one("palette.wgsl")),
         ("particles.wgsl", one("particles.wgsl")),
         ("post.wgsl", one("post.wgsl")),

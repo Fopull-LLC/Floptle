@@ -318,16 +318,44 @@ fn a_wall_of_three_pictures_under(tag: &str, rules: Option<floptle_scene::Import
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// **Pictures of different sizes do not share an array, so that wall draws
-/// part by part.**
+/// **Pictures whose sizes are not a power of two apart do not share an
+/// array, so that wall draws part by part.**
 #[test]
 fn a_wall_whose_pictures_differ_in_size_draws_as_its_parts() {
-    let Some((mut ed, wall, root)) = editor_with_glb("sizes", textured_wall_glb(16)) else { return };
+    let Some((mut ed, wall, root)) = editor_with_glb("sizes", textured_wall_glb(24)) else { return };
     assert!(
         ed.mesh_registry.get("models/wall.glb").is_some_and(|a| a.merged.is_none()),
-        "a wall whose base pictures differ in size was merged"
+        "a wall with a 24² base beside 32² ones was merged"
     );
     assert_eq!(instances_of(&mut ed, wall), 3);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A wall with one picture a power of two smaller is still one instance,
+/// and looks as its parts do** (card 0692): a 16² base beside 32² ones is
+/// upsampled into a layer of the 32² array. Within a few levels, not byte
+/// for byte: magnified, the picture is read from the upsampled layer rather
+/// than filtered from the small one.
+#[test]
+fn a_wall_with_a_smaller_picture_is_one_instance_and_draws_as_its_parts() {
+    let Some((mut ed, wall, root)) = editor_with_glb("smaller", textured_wall_glb(16)) else { return };
+    assert!(
+        ed.mesh_registry.get("models/wall.glb").and_then(|a| a.merged.as_ref()).is_some_and(|m| m.arrays),
+        "the wall with a 16² base beside 32² ones was not marked for texture arrays"
+    );
+    assert_eq!(instances_of(&mut ed, wall), 1, "the wall with a smaller picture draws as more than one instance");
+    crate::mesh_instances::merge_parts_off_here(true);
+    let parts = picture(&mut ed);
+    crate::mesh_instances::merge_parts_off_here(false);
+    let merged = picture(&mut ed);
+    let lit = parts.chunks(4).filter(|p| p[0] > 10 || p[1] > 10 || p[2] > 10).count();
+    assert!(lit > 160 * 90 / 10, "the wall is not in the picture: {lit} lit pixels");
+    let diff = |a: &[u8], b: &[u8]| (0..3).map(|c| (a[c] as i32 - b[c] as i32).abs()).max().unwrap();
+    let worst = parts.chunks(4).zip(merged.chunks(4)).map(|(a, b)| diff(a, b)).max().unwrap();
+    let off = parts.chunks(4).zip(merged.chunks(4)).filter(|(a, b)| diff(a, b) > 4).count();
+    // Measured: identical; with the top levels left unwritten, 840 pixels
+    // off and the worst 137.
+    assert!(worst <= 8 && off <= 10, "the merged wall differs from its parts: {off} pixels by more than 4, the worst by {worst}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -393,7 +421,8 @@ fn a_refused_merge_is_counted_and_says_why() {
     };
     img("a.png", 32, [200, 90, 60]);
     img("b.png", 32, [60, 200, 90]);
-    img("small.png", 16, [90, 60, 200]);
+    // 24²: not a power of two from 32², so it cannot share their array.
+    img("small.png", 24, [90, 60, 200]);
     let mut om = floptle_core::ObjectMaterials::default();
     let look = |tex: &str| floptle_core::Material { shading: floptle_core::Shading::Physical, texture: Some(format!("textures/{tex}")), ..Default::default() };
     om.0.insert("Outside".into(), look("a.png"));
@@ -406,6 +435,6 @@ fn a_refused_merge_is_counted_and_says_why() {
     let (n, why) = ed.raster.as_ref().unwrap().take_merge_refusals();
     assert!(n >= 1, "the refused merge was not counted");
     let reason = &why[0].1;
-    assert!(reason.contains("base") && reason.contains("32x32") && reason.contains("16x16"), "the reason does not say what clashed: {reason}");
+    assert!(reason.contains("base") && reason.contains("32x32") && reason.contains("24x24"), "the reason does not say what clashed: {reason}");
     let _ = std::fs::remove_dir_all(&root);
 }

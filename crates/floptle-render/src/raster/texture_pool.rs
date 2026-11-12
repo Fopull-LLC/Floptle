@@ -14,7 +14,16 @@
 //! written by the same mip writer (`write_mip_chain`), so a layer and its
 //! texture sample the same.
 //!
-//! See `.internal/docs/texture-array-slots-plan.md` (card 0690).
+//! **A smaller picture joins a bigger array.** Modular kits mix sizes: a
+//! 1024² wall beside 512² trim. When one kind's pictures are in arrays of
+//! one shape and sampling but sizes a power of two apart, the smaller also
+//! gets a layer of the biggest array ([`Raster::resample_into`]): its own mip
+//! levels copied in at the matching lower levels, so from a distance it
+//! reads exactly as it did, and the top levels upsampled from it with the
+//! array's own sampler, as the GPU would magnify it. Once per picture and
+//! array, at the first merge that asks.
+//!
+//! See `.internal/docs/texture-array-slots-plan.md` (cards 0690, 0692).
 
 use std::collections::{HashMap, HashSet};
 
@@ -69,6 +78,12 @@ pub(crate) struct Pools {
     layers: HashMap<(u64, TexSampling), PoolLayer>,
     /// Which layer each registered texture is in.
     of_tex: HashMap<u32, PoolLayer>,
+    /// A smaller picture's layer in a bigger array, by where it is in its
+    /// own array and the bigger array ([`Raster::resample_into`]).
+    resampled: HashMap<(PoolLayer, u32), u32>,
+    /// The pipeline that upsamples a smaller picture into a bigger array's
+    /// top levels, made the first time one is.
+    upsample: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
     /// A material set's six pictures, by the set's id (`Raster::material_set`).
     set_keys: HashMap<u32, [u32; SURFACE_SLOTS]>,
     /// Array sets made, by the array each kind binds (u32::MAX: none) and
@@ -90,6 +105,8 @@ impl Pools {
             by_key: HashMap::new(),
             layers: HashMap::new(),
             of_tex: HashMap::new(),
+            resampled: HashMap::new(),
+            upsample: None,
             set_keys: HashMap::new(),
             array_sets: HashMap::new(),
             array_ids: HashSet::new(),
@@ -110,6 +127,7 @@ impl Pools {
     pub fn forget_layers(&mut self) {
         self.layers.clear();
         self.of_tex.clear();
+        self.resampled.clear();
     }
 
     /// The six pictures a bound texture draws with: a material set's, or a
@@ -167,6 +185,9 @@ impl Raster {
     pub(crate) fn repool_replaced(&mut self, gpu: &Gpu, id: TexId, data: &TextureData) {
         let Some(at) = self.pools.of_tex.get(&id.0).copied() else { return };
         self.pools.layers.retain(|_, l| *l != at);
+        // A copy of the old pixels in a bigger array is upsampled again from
+        // the new ones the next time a merge asks.
+        self.pools.resampled.retain(|(from, _), _| *from != at);
         let key = self.pools.pools[at.pool as usize].key;
         let smaller = if key.mip_count > 1 && key.drop > 0 { super::drop_top_mips(data, key.drop) } else { None };
         let t = smaller.as_ref().unwrap_or(data);
@@ -252,9 +273,13 @@ impl Raster {
     /// where another slot has one reads that array's white layer (its flat
     /// normal for a normal map); a kind no slot has binds the neutral default.
     ///
+    /// Pictures of one kind in arrays of one shape and sampling, sizes a
+    /// power of two apart, are read from the biggest of them, each smaller
+    /// one resampled into a layer of it ([`Self::resample_into`]).
+    ///
     /// `None` when a slot's picture is not in the pools ([`Self::pool_texture`])
-    /// or two slots' pictures of one kind are in different arrays (another
-    /// size or sampling): those slots draw as instances of their own.
+    /// or two slots' pictures of one kind cannot share an array (another
+    /// shape or sampling): those slots draw as instances of their own.
     pub fn array_set_for(&mut self, gpu: &Gpu, slots: &[Option<TexId>]) -> Option<(TexId, Vec<[u8; SURFACE_SLOTS]>)> {
         let pictures: Vec<[u32; SURFACE_SLOTS]> = slots.iter().map(|&t| self.pools.pictures_of(t)).collect();
         // A picture not in the pools yet (an override's) is copied in now.
@@ -264,17 +289,10 @@ impl Raster {
             }
         }
         let mut pool_of_kind = [u32::MAX; SURFACE_SLOTS];
-        for k in 0..SURFACE_SLOTS {
-            for p in &pictures {
-                if p[k] == u32::MAX {
-                    continue;
-                }
-                let at = self.pools.of_tex.get(&p[k])?;
-                match pool_of_kind[k] {
-                    u32::MAX => pool_of_kind[k] = at.pool,
-                    pool if pool != at.pool => return None,
-                    _ => {}
-                }
+        for (k, pool) in pool_of_kind.iter_mut().enumerate() {
+            let pools = self.pools_of_kind(&pictures, k)?;
+            if !pools.is_empty() {
+                *pool = self.shared_array(&pools)?;
             }
         }
         let mut layers = vec![[0u8; SURFACE_SLOTS]; slots.len()];
@@ -286,7 +304,14 @@ impl Raster {
             for (i, p) in pictures.iter().enumerate() {
                 let layer = match p[k] {
                     u32::MAX => self.pool_neutral(gpu, pool, k == 1)?,
-                    t => self.pools.of_tex[&t].layer,
+                    t => {
+                        let at = self.pools.of_tex[&t];
+                        if at.pool == pool {
+                            at.layer
+                        } else {
+                            self.resample_into(gpu, at, pool)?
+                        }
+                    }
                 };
                 layers[i][k] = u8::try_from(layer).ok()?;
             }
@@ -329,9 +354,10 @@ impl Raster {
                 };
                 match first {
                     None => first = Some((t, at)),
-                    Some((t0, a0)) if a0.pool != at.pool => {
+                    Some((t0, a0)) if self.shared_array(&[a0.pool, at.pool]).is_none() => {
                         return Some(format!(
-                            "its {kind}s differ: {} beside {} (pictures of one kind share an array only at the same size and sampling)",
+                            "its {kind}s differ: {} beside {} (pictures of one kind share an array only with the same sampling, \
+                             at the same size or a power of two smaller in both directions)",
                             describe(t0),
                             describe(t)
                         ));
@@ -354,6 +380,157 @@ impl Raster {
     /// This frame's merges refused, and the reasons noted, since the last call.
     pub fn take_merge_refusals(&self) -> (u32, Vec<(String, String)>) {
         (self.pools.refused.replace(0), std::mem::take(&mut *self.pools.refusals.borrow_mut()))
+    }
+
+    /// The arrays the pictures of kind `k` across `pictures` are in, each
+    /// once. `None` when one of them is not in the pools.
+    fn pools_of_kind(&self, pictures: &[[u32; SURFACE_SLOTS]], k: usize) -> Option<Vec<u32>> {
+        let mut pools = Vec::new();
+        for p in pictures.iter().filter(|p| p[k] != u32::MAX) {
+            let pool = self.pools.of_tex.get(&p[k])?.pool;
+            if !pools.contains(&pool) {
+                pools.push(pool);
+            }
+        }
+        Some(pools)
+    }
+
+    /// The one array pictures in `pools` can all be read from: the biggest,
+    /// when every other is of its shape and sampling and a power of two
+    /// smaller (see [`resample_steps`]). `None` when they cannot share.
+    fn shared_array(&self, pools: &[u32]) -> Option<u32> {
+        let key = |p: u32| self.pools.pools[p as usize].key;
+        let big = pools.iter().copied().max_by_key(|&p| key(p).width)?;
+        pools.iter().all(|&p| resample_steps(&key(p), &key(big)).is_some()).then_some(big)
+    }
+
+    /// A layer of the array `to` holding the picture at `from`, a smaller
+    /// array of its shape and sampling: made the first time, then the same
+    /// layer. Its mip levels are copied in at the matching lower levels of
+    /// the layer, byte for byte, so the GPU reads the very picture once it
+    /// is far enough away to pick those levels; the levels above are drawn
+    /// from it with `to`'s own sampler (smooth or pixelated, wrapped or
+    /// clamped), as the GPU would magnify the picture itself.
+    pub(crate) fn resample_into(&mut self, gpu: &Gpu, from: PoolLayer, to: u32) -> Option<u32> {
+        if let Some(&layer) = self.pools.resampled.get(&(from, to)) {
+            return Some(layer);
+        }
+        let (small, big) = (self.pools.pools[from.pool as usize].key, self.pools.pools[to as usize].key);
+        let steps = resample_steps(&small, &big)?;
+        let layer = self.pool_reserve(gpu, to)?;
+        let sampler = self.sampler_for(gpu, big.sampling);
+        let (pipeline, bind_layout) = self.upsample_pipeline(gpu);
+        let src = self.pools.pools[from.pool as usize].texture.clone();
+        let dst = self.pools.pools[to as usize].texture.clone();
+        let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-pool-resample") });
+        // Without mips (a pixelated pair) the one level is all drawn.
+        for level in (0..small.mip_count).filter(|l| l + steps < big.mip_count) {
+            let (w, h) = ((small.width >> level).max(1), (small.height >> level).max(1));
+            enc.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo { texture: &src, mip_level: level, origin: wgpu::Origin3d { x: 0, y: 0, z: from.layer }, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyTextureInfo { texture: &dst, mip_level: level + steps, origin: wgpu::Origin3d { x: 0, y: 0, z: layer }, aspect: wgpu::TextureAspect::All },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+        }
+        // Raw bytes in, raw bytes out, as the mip writer filters them: a
+        // normal map's numbers are not colours.
+        let view = |tex: &wgpu::Texture, level: u32, layer: u32| {
+            tex.create_view(&wgpu::TextureViewDescriptor {
+                format: Some(wgpu::TextureFormat::Rgba8Unorm),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        };
+        let source = view(&src, 0, from.layer);
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raster-pool-resample"),
+            layout: &bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&source) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
+        });
+        for level in 0..steps.min(big.mip_count) {
+            let target = view(&dst, level, layer);
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raster-pool-resample"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        gpu.queue.submit([enc.finish()]);
+        self.pools.resampled.insert((from, to), layer);
+        Some(layer)
+    }
+
+    /// The pipeline [`Self::resample_into`] draws a bigger array's top levels
+    /// with: one triangle over the level, each texel the source sampled at
+    /// its centre.
+    fn upsample_pipeline(&mut self, gpu: &Gpu) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+        if let Some(made) = &self.pools.upsample {
+            return made.clone();
+        }
+        let device = &gpu.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raster-pool-upsample"),
+            source: wgpu::ShaderSource::Wgsl(UPSAMPLE_WGSL.into()),
+        });
+        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raster-pool-upsample"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("raster-pool-upsample"),
+            bind_group_layouts: &[Some(&bind_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raster-pool-upsample"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), buffers: &[], compilation_options: Default::default() },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        self.pools.upsample = Some((pipeline.clone(), bind_layout.clone()));
+        (pipeline, bind_layout)
     }
 
     /// The array that takes pictures of `key`, made if there is none.
@@ -483,8 +660,43 @@ impl Raster {
     }
 }
 
+/// [`Raster::resample_into`]'s shader: one triangle over the target level,
+/// the source sampled at each texel's centre.
+pub(crate) const UPSAMPLE_WGSL: &str = include_str!("../pool_upsample.wgsl");
+
+/// How many mip levels down a bigger array `big` holds a picture of `small`'s
+/// array at its own size: `Some(0)` for the same array, `Some(n)` when `big`
+/// is `small` 2ⁿ times over in both directions, with the same sampling and
+/// texture quality and a mip chain `n` levels longer (or neither has mips).
+/// `None` when the smaller cannot be read from the bigger.
+pub(crate) fn resample_steps(small: &PoolKey, big: &PoolKey) -> Option<u32> {
+    if small == big {
+        return Some(0);
+    }
+    if small.sampling != big.sampling || small.drop != big.drop || small.width == 0 || small.width >= big.width {
+        return None;
+    }
+    let steps = (big.width / small.width).trailing_zeros();
+    let shape = sizes_share_an_array((small.width, small.height), (big.width, big.height));
+    let chain = (small.mip_count == 1 && big.mip_count == 1) || small.mip_count + steps == big.mip_count;
+    (shape && chain).then_some(steps)
+}
+
+/// Whether pictures of sizes `a` and `b` (width, height) can share a texture
+/// array, given one sampling: the same size, or one a power of two times the
+/// other in both directions (512² beside 1024², 128x64 beside 512x256).
+pub fn sizes_share_an_array(a: (u32, u32), b: (u32, u32)) -> bool {
+    let (small, big) = if a.0 <= b.0 { (a, b) } else { (b, a) };
+    if small.0 == 0 || small.1 == 0 {
+        return small == big;
+    }
+    let steps = (big.0 / small.0).trailing_zeros();
+    small.0 << steps == big.0 && small.1 << steps == big.1
+}
+
 /// An array of `capacity` layers for pictures of `key`, in the format every
-/// engine picture is uploaded in, readable raw as well as sRGB.
+/// engine picture is uploaded in, readable raw as well as sRGB, and drawn
+/// into raw when a smaller picture is upsampled into it.
 fn pool_texture_of(gpu: &Gpu, key: &PoolKey, capacity: u32) -> wgpu::Texture {
     gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("raster-texture-pool"),
@@ -493,7 +705,10 @@ fn pool_texture_of(gpu: &Gpu, key: &PoolKey, capacity: u32) -> wgpu::Texture {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
     })
 }
@@ -620,10 +835,11 @@ mod tests {
         assert_eq!((again, &layers2), (set, &layers), "the same slots made a second set");
         assert_eq!(r.pools.pools[0].used, used, "the flat-normal layer was written twice");
 
-        let odd = picture(16, 16, 4);
+        let odd = picture(16, 32, 4);
         let to = r.register_texture(&gpu, &odd, s);
         r.pool_texture(&gpu, to, &odd, s).unwrap();
-        assert!(r.array_set_for(&gpu, &[Some(tw), Some(to)]).is_none(), "a 16² base shared a set with a 32² one");
+        assert!(r.array_set_for(&gpu, &[Some(tw), Some(to)]).is_none(), "a 16x32 base shared a set with a 32² one");
+        assert!(r.array_refusal(&[Some(tw), Some(to)]).is_some_and(|w| w.contains("16x32")), "the refusal did not name the odd picture");
         // A picture registered but never pooled (an override's) is copied in
         // on the GPU the first time a set asks for it.
         let loose = r.register_texture(&gpu, &picture(32, 32, 5), s);
@@ -632,6 +848,85 @@ mod tests {
         let at = r.pooled_layer(loose).expect("the override's picture was not pooled");
         assert_eq!(l[1][0] as u32, at.layer);
         assert!(crate::probe::readback_layer(&gpu, &r.pools.pools[at.pool as usize].texture, at.layer, 0) == picture(32, 32, 5).pixels, "the copied layer is not the picture");
+    }
+
+    /// **A smaller picture of a kind joins the bigger array, reading as
+    /// itself.** A 32² base beside an 8² one binds one set, both in the 32²
+    /// array. The 8² picture's own mip levels sit byte for byte at levels 2..
+    /// of its new layer, so a far view reads the very picture; level 0 is it
+    /// magnified: each 4x4 block averages back to its texel. Asked again,
+    /// the same layer; with a pixelated sampler level 0 is each texel 4x4
+    /// times over, exactly.
+    #[test]
+    fn a_smaller_picture_joins_the_bigger_array() {
+        let Some((gpu, mut r)) = raster() else { return };
+        for s in [mipped(), TexSampling::default()] {
+            let (wall, trim) = (picture(32, 32, 1), picture(8, 8, 2));
+            let tw = r.register_texture(&gpu, &wall, s);
+            let tt = r.register_texture(&gpu, &trim, s);
+            let lw = r.pool_texture(&gpu, tw, &wall, s).unwrap();
+            let lt = r.pool_texture(&gpu, tt, &trim, s).unwrap();
+            assert_ne!(lw.pool, lt.pool);
+            let (_, layers) = r.array_set_for(&gpu, &[Some(tw), Some(tt)]).expect("an 8² base beside a 32² one was refused");
+            assert!(r.array_refusal(&[Some(tw), Some(tt)]).is_none());
+            assert_eq!(layers[0][0] as u32, lw.layer);
+            let layer = layers[1][0] as u32;
+            assert_ne!(layer, lw.layer);
+            let big = r.pools.pools[lw.pool as usize].texture.clone();
+            let small = r.pools.pools[lt.pool as usize].texture.clone();
+            let key = r.pools.pools[lt.pool as usize].key;
+            for level in (0..key.mip_count).filter(|l| l + 2 < r.pools.pools[lw.pool as usize].key.mip_count) {
+                let want = crate::probe::readback_layer(&gpu, &small, lt.layer, level);
+                assert!(crate::probe::readback_layer(&gpu, &big, layer, level + 2) == want, "{:?}: level {} is not the picture's level {level}", s.filter, level + 2);
+            }
+            let top = crate::probe::readback_layer(&gpu, &big, layer, 0);
+            assert_eq!(top.len(), 32 * 32 * 4);
+            for y in 0..8usize {
+                for x in 0..8usize {
+                    for c in 0..4usize {
+                        let texel = trim.pixels[(y * 8 + x) * 4 + c] as i32;
+                        let block: Vec<i32> = (0..16).map(|i| top[((y * 4 + i / 4) * 32 + x * 4 + i % 4) * 4 + c] as i32).collect();
+                        if matches!(s.filter, TexFilter::SmoothMipmaps) {
+                            // Smooth: magnified between neighbours, so the
+                            // block's middle holds near the texel.
+                            let mid = (block[5] + block[6] + block[9] + block[10]) / 4;
+                            assert!((mid - texel).abs() <= 48, "texel {x},{y} channel {c}: block middle {mid} vs {texel}");
+                        } else {
+                            assert!(block.iter().all(|&v| v == texel), "pixelated texel {x},{y} channel {c} is not its 4x4 block");
+                        }
+                    }
+                }
+            }
+            let used = r.pools.pools[lw.pool as usize].used;
+            assert_eq!(r.array_set_for(&gpu, &[Some(tw), Some(tt)]).unwrap().1, layers);
+            assert_eq!(r.pools.pools[lw.pool as usize].used, used, "the picture was resampled twice");
+        }
+        // Another sampling still cannot share.
+        let (a, b) = (picture(32, 32, 3), picture(16, 16, 4));
+        let ta = r.register_texture(&gpu, &a, mipped());
+        let tb = r.register_texture(&gpu, &b, TexSampling::default());
+        r.pool_texture(&gpu, ta, &a, mipped()).unwrap();
+        r.pool_texture(&gpu, tb, &b, TexSampling::default()).unwrap();
+        assert!(r.array_set_for(&gpu, &[Some(ta), Some(tb)]).is_none(), "pictures of two samplings shared an array");
+    }
+
+    #[test]
+    fn resample_steps_reads_shape_sampling_and_chain() {
+        let s = mipped();
+        let k = |w: u32, h: u32, mips: u32| PoolKey { width: w, height: h, mip_count: mips, sampling: s, drop: 0 };
+        assert_eq!(resample_steps(&k(512, 512, 10), &k(1024, 1024, 11)), Some(1));
+        assert_eq!(resample_steps(&k(128, 64, 8), &k(512, 256, 10)), Some(2));
+        assert_eq!(resample_steps(&k(64, 64, 7), &k(64, 64, 7)), Some(0));
+        assert_eq!(resample_steps(&k(128, 128, 8), &k(512, 256, 10)), None, "another shape");
+        assert_eq!(resample_steps(&k(96, 96, 7), &k(256, 256, 9)), None, "not a power of two apart");
+        assert_eq!(resample_steps(&k(1024, 1024, 11), &k(512, 512, 10)), None, "bigger into smaller");
+        assert_eq!(resample_steps(&k(64, 64, 1), &k(256, 256, 9)), None, "one with mips, one without");
+        let other = PoolKey { sampling: TexSampling::default(), ..k(64, 64, 7) };
+        assert_eq!(resample_steps(&other, &k(128, 128, 8)), None, "another sampling");
+        let dropped = PoolKey { drop: 1, ..k(64, 64, 7) };
+        assert_eq!(resample_steps(&dropped, &k(128, 128, 8)), None, "another texture quality");
+        assert!(sizes_share_an_array((1024, 1024), (512, 512)) && sizes_share_an_array((128, 64), (512, 256)));
+        assert!(!sizes_share_an_array((96, 96), (256, 256)) && !sizes_share_an_array((128, 128), (512, 256)));
     }
 
     /// **New pixels under a pooled picture reach its layer when they are the

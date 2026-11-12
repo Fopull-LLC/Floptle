@@ -16,7 +16,7 @@ use crate::device::Gpu;
 use crate::mesh::{GpuMesh, MeshData, MeshId, TextureData, Vertex};
 
 mod texture_pool;
-pub use texture_pool::PoolLayer;
+pub use texture_pool::{sizes_share_an_array, PoolLayer};
 
 /// How a texture is filtered (and, for `SmoothMipmaps`, minified). The default
 /// `Pixelated` is crisp nearest-neighbor — the engine's pixel-art look.

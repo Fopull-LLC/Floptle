@@ -170,7 +170,8 @@ impl Editor {
                     floptle_script::LogLevel::Warn,
                     format!(
                         "{path} (on \"{name}\") draws one instance per part instead of one for the whole model: {reason}. \
-                         Give its pictures the same size and sampling (textures.ron) to merge it."
+                         Give its pictures one sampling (textures.ron) and one shape, each size the same or a power of two \
+                         smaller (512² beside 1024²), to merge it."
                     ),
                     None,
                 );
