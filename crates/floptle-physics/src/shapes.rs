@@ -1336,6 +1336,8 @@ impl ChunkTerrain {
     /// cross it a little before `t0`, and the walk starts back from there.
     /// `None` when it meets nothing.
     fn hit_drawn_box(&self, o: Vec3, d: Vec3, t0: f32, tmax: f32) -> Option<(f32, Vec3)> {
+        #[cfg(test)]
+        DRAWN_BOX_CASTS.with(|n| n.set(n.get() + 1));
         const CELLS: i32 = 8;
         // A triangle near a point is meshed in a box when the point is this far
         // inside it: the edge it is built round has its low corner in the box.
@@ -1608,6 +1610,12 @@ impl ChunkTerrain {
 /// a meshed chunk does, so a chunk asked about this often is worth meshing.
 const RAYS_BEFORE_MESHING: u8 = 4;
 
+#[cfg(test)]
+thread_local! {
+    /// Rays that meshed a few cells of drawn surface for themselves.
+    static DRAWN_BOX_CASTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 thread_local! {
     /// See [`defer_query_meshing`].
     static DEFER_QUERY_MESHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1718,7 +1726,11 @@ impl CollisionShape for ChunkTerrain {
         // again is cached: the first rays anywhere are cheap, and so are all
         // the ones after them.
         let at = local + ld * near;
+        // Deferred (a script asking), nothing is meshed for the ray at all,
+        // not even these few cells: the march below answers from the field
+        // and the ground is handed to the worker by the distance it asks.
         if self.mesh_accurate
+            && !query_meshing_deferred()
             && !self.meshed_near(at)
             && self.field.grad(at).normalize_or_zero().dot(-ld) > 0.8
         {
@@ -3113,9 +3125,23 @@ mod drawn_surface_tests {
         let p = (0..40)
             .map(|i| Vec3::new(i as f32 * 0.31 - 3.0, 0.0, 0.7))
             .map(|q| q + Vec3::Y * (0.6 - t.field.d(q)))
-            .find(|q| t.field.d(*q) > 0.3 && t.field.d(*q) < t.field.band())
-            .expect("a point a little above the ground");
+            // Above ground facing up, so a ray straight down meets it square
+            // enough to take the cells-for-itself path when not deferred.
+            .find(|q| {
+                let foot = *q - Vec3::Y * t.field.d(*q);
+                t.field.d(*q) > 0.3 && t.field.d(*q) < t.field.band() && t.field.grad(foot).normalize_or_zero().y > 0.9
+            })
+            .expect("a point a little above level ground");
         let was = defer_query_meshing(true);
+        // A ray straight down onto that ground, deferred: no cells meshed
+        // for it either (they cost 10 to 18 ms a camera ray), and it does
+        // not miss the ground.
+        DRAWN_BOX_CASTS.with(|n| n.set(0));
+        let hit = t.ray_cast(p, Vec3::NEG_Y, 10.0);
+        assert_eq!(DRAWN_BOX_CASTS.with(|n| n.get()), 0, "a deferred ray meshed cells for itself");
+        // A hit, or the rest left to the caller's sphere trace over the same
+        // (field) distance: either finds the ground. Never a miss.
+        assert!(!matches!(hit, RayAnswer::Miss), "the deferred ray missed the ground: {hit:?}");
         let d = t.distance(p);
         assert_eq!(d, t.field.d(p), "deferred, the distance is not the field's");
         let (meshed, _, deferred) = t.query_meshing();
