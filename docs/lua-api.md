@@ -39,7 +39,7 @@ each group, and meant to be searched.
 - [physics controls — pause & step](#physics-controls--pause--step) — 5
 - [frame cost — perf.*](#frame-cost--perf) — 26
 - [accessibility — access.*](#accessibility--access) — 11
-- [persistence — save.*](#persistence--save) — 9
+- [persistence — save.*](#persistence--save) — 10
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
 - [components — getcomponent](#components--getcomponent) — 120
@@ -3806,7 +3806,11 @@ save.flush([{ wait = true }]) — hand the store to the writer NOW (checkpoints,
 
 ### `save.get`
 
-save.get("gold" [, default]) — the stored value, else the default, else nil. save.get("who").hp reads into stored tables.
+save.get("gold" [, default]) — the stored value, else the default, else nil. save.get("who").hp reads into stored tables. A table comes back as a fresh copy every call, yours to change; for reading a large one often, save.peek is free after the first call.
+
+### `save.peek`
+
+save.peek("base" [, default]) — the stored value as a read-only table shared between calls: save.get copies a stored table into fresh tables every call, a few milliseconds for a large one, and peek makes that copy once per change of the key and hands the same table back until the key is set again or deleted. Writing to it, at any depth, is an error: take save.get's copy to change one. A number, string or boolean comes back as itself, as from save.get.
 
 ### `save.set`
 

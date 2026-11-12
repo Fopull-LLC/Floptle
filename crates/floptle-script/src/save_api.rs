@@ -319,6 +319,22 @@ thread_local! {
     static ENCODED_HERE: Cell<usize> = const { Cell::new(0) };
 }
 
+/// `save.peek`'s shared tables, by key: each with the stored value it was
+/// made from, so a key set or deleted since is made again.
+type PeekCache = Rc<RefCell<HashMap<String, (Arc<NetValue>, mlua::RegistryKey)>>>;
+
+/// Make `v`, and every table under it, read-only: what `save.peek` shares.
+fn freeze(v: &Value) -> mlua::Result<()> {
+    if let Value::Table(t) = v {
+        for pair in t.clone().pairs::<Value, Value>() {
+            let (_, inner) = pair?;
+            freeze(&inner)?;
+        }
+        t.set_readonly(true);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) fn encoded_on_this_thread() -> usize {
     ENCODED_HERE.with(Cell::get)
@@ -607,6 +623,45 @@ pub(crate) fn install_save_api(
         }
     }
 
+    // save.peek(key [, default]) — the stored value as a read-only table
+    // shared between calls: no copy. save.get copies the stored value into
+    // fresh tables on every call, a few milliseconds for a large one; peek
+    // makes that copy once per change of the key, freezes it, and hands the
+    // same table back until the key changes. A write to it is an error that
+    // says to take save.get's copy instead.
+    {
+        let state = state.clone();
+        let paths = paths.clone();
+        let logs = logs.clone();
+        let cache: PeekCache = Default::default();
+        if let Ok(f) = lua.create_function(move |lua, (key, default): (String, Option<Value>)| {
+            let mut s = state.borrow_mut();
+            ensure_loaded(&mut s, &paths.runtime_base(), &logs);
+            let Some(e) = s.store.get(&key) else {
+                if let Some((_, old)) = cache.borrow_mut().remove(&key) {
+                    let _ = lua.remove_registry_value(old);
+                }
+                return Ok(default.unwrap_or(Value::Nil));
+            };
+            let value = e.value.clone();
+            drop(s);
+            if let Some((was, k)) = cache.borrow().get(&key)
+                && Arc::ptr_eq(was, &value)
+            {
+                return lua.registry_value::<Value>(k);
+            }
+            let v = crate::net_api::netvalue_to_lua(lua, &value)?;
+            freeze(&v)?;
+            let k = lua.create_registry_value(v.clone())?;
+            if let Some((_, old)) = cache.borrow_mut().insert(key, (value, k)) {
+                let _ = lua.remove_registry_value(old);
+            }
+            Ok(v)
+        }) {
+            let _ = t.set("peek", f);
+        }
+    }
+
     // save.delete(key) — true if something was removed.
     {
         let state = state.clone();
@@ -818,6 +873,47 @@ mod tests {
     /// state was refused. The deepest table allowed must also survive the
     /// write and a fresh read of the file, or a save would load as empty; one
     /// level deeper (or a cycle) is still refused, loudly.
+    /// **`save.peek` shares one read-only copy until the key changes.** Two
+    /// peeks of a large saved table are the same table, and writing to it (at
+    /// any depth) is an error; after `save.set` the next peek is a new table
+    /// with the new value; `save.get` still hands back a copy to change; a
+    /// key that is gone peeks as the default.
+    #[test]
+    fn peek_shares_a_frozen_copy_until_the_key_changes() {
+        let root = std::env::temp_dir().join(format!("floptle-savepeek-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (lua, _state) = lua_with_save(&root);
+        lua.load("local t = {} for i = 1, 2000 do t[i] = { id = i, name = 'part' .. i } end save.set('base', t)").exec().unwrap();
+        let (same, n, top, deep): (bool, i64, bool, bool) = lua
+            .load(
+                "local a, b = save.peek('base'), save.peek('base')\n\
+                 local top = pcall(function() a[1] = 0 end)\n\
+                 local deep = pcall(function() a[2].id = 0 end)\n\
+                 return rawequal(a, b), a[2000].id, top, deep",
+            )
+            .eval()
+            .unwrap();
+        assert!(same, "two peeks of an unchanged key made two tables");
+        assert_eq!(n, 2000);
+        assert!(!top && !deep, "a peeked table took a write (top {top}, nested {deep})");
+        let (fresh, v, copy_ok, gone): (bool, i64, bool, i64) = lua
+            .load(
+                "local a = save.peek('base')\n\
+                 save.set('base', { { id = 7 } })\n\
+                 local b = save.peek('base')\n\
+                 local c = save.get('base') c[1].id = 8\n\
+                 save.delete('base')\n\
+                 return not rawequal(a, b), b[1].id, c[1].id == 8, save.peek('base', 5)",
+            )
+            .eval()
+            .unwrap();
+        assert!(fresh, "after save.set the peek was the old table");
+        assert_eq!(v, 7, "after save.set the peek held the old value");
+        assert!(copy_ok, "save.get's copy could not be changed");
+        assert_eq!(gone, 5, "a deleted key did not peek as the default");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_deeply_nested_table_saves_and_loads_back_from_disk() {
         let root = std::env::temp_dir().join(format!("floptle-savedeep-{}", std::process::id()));

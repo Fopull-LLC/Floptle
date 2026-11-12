@@ -2384,6 +2384,13 @@ function save.set(key, value) end
 ---@param default? any
 ---@return any
 function save.get(key, default) end
+---The stored value as a read-only table shared between calls: no copy after
+---the first call until the key changes. Writing to it is an error; take
+---`save.get`'s copy to change one.
+---@param key string
+---@param default? any
+---@return any
+function save.peek(key, default) end
 ---Remove a key. Returns true if something was removed.
 ---@param key string
 ---@return boolean
