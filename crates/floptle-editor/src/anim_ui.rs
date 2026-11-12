@@ -3605,6 +3605,9 @@ fn sheet_rows(
             );
         }
     };
+    // By index: the lanes below edit `doc` (keys, menus, removals) while
+    // this walks it, which an iterator over the channels would hold borrowed.
+    #[allow(clippy::needless_range_loop)]
     for ci in 0..doc.channels.len() {
         if !row_shown(&doc.channels[ci].node) {
             continue;
@@ -3967,6 +3970,8 @@ fn sheet_rows(
             }
         }
         // --- property lanes, indented under the node ---
+        // By index, for the same reason as the channel loop above.
+        #[allow(clippy::needless_range_loop)]
         for ti in 0..doc.channels[ci].properties.len() {
             let y = rows_top + row_i as f32 * lane_h;
             stripe(painter, row_i, y, ui);

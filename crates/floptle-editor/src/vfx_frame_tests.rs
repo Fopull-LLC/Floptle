@@ -175,8 +175,8 @@ fn a_ring_fired_with_a_normal_lies_across_it() {
     let normal = Vec3::new(1.0, 1.0, 0.0).normalize();
     let p = d.inst.track_particles(0);
     assert!(p.count >= 4, "the ring should have particles");
-    for i in 0..p.count {
-        let off = p.pos_age[i].truncate() + (d.inst.anchor() - d.pos).as_vec3();
+    for pa in p.pos_age.iter().take(p.count) {
+        let off = pa.truncate() + (d.inst.anchor() - d.pos).as_vec3();
         assert!(off.length() > 2.5, "a ring particle sits {} m from the centre", off.length());
         assert!(off.normalize().dot(normal).abs() < 0.02, "a ring particle is out of the plane: {off}");
     }

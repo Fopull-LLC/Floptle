@@ -134,11 +134,11 @@ impl ActionRuntime {
         let just_released = falling | banked_release;
         self.prev_held = held;
 
-        for i in 0..map.actions.len() {
+        for (i, secs) in self.held_secs.iter_mut().enumerate().take(map.actions.len()) {
             if i < 64 && held & (1u64 << i) != 0 {
-                self.held_secs[i] += dt;
+                *secs += dt;
             } else {
-                self.held_secs[i] = 0.0;
+                *secs = 0.0;
             }
         }
 

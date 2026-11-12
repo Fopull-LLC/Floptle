@@ -1532,6 +1532,10 @@ impl<'a> SettingsCtx<'a> {
             }
             let mut edit: Option<SortEdit> = None;
             let n = project.sorting_layers.len();
+            // By index: each row's closure borrows `project` mutably for its
+            // text box, and the reorder and remove buttons need the index to
+            // queue an edit.
+            #[allow(clippy::needless_range_loop)]
             for i in 0..n {
                 ui.horizontal(|ui| {
                     ui.set_min_height(22.0);

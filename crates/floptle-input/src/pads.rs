@@ -206,8 +206,8 @@ impl Pads {
 
         // Levels.
         let Some(gilrs) = self.gilrs.as_ref() else { return };
-        for slot_idx in 0..self.slots.len() {
-            let live_id = self.slots[slot_idx]
+        for (slot_idx, slot) in self.slots.iter().enumerate() {
+            let live_id = slot
                 .and_then(|uuid| live.iter().find(|(_, u)| *u == uuid))
                 .map(|(id, _)| *id);
             let state = raw.pad_mut(slot_idx as u8);

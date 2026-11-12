@@ -274,8 +274,8 @@ impl PhysicsWorld {
         let inv_i = b.world_inv_inertia();
         let d = lin * inv_m;
         let mut lock = d;
-        for axis in 0..3 {
-            if b.lock_pos[axis] {
+        for (axis, locked) in b.lock_pos.into_iter().enumerate() {
+            if locked {
                 crate::body::set_axis(&mut lock, axis, 0.0);
             }
         }
@@ -348,8 +348,8 @@ impl PhysicsWorld {
         }
         let inv_m = 1.0 / b.mass.max(1e-4);
         let mut dv = j * inv_m;
-        for axis in 0..3 {
-            if b.lock_pos[axis] {
+        for (axis, locked) in b.lock_pos.into_iter().enumerate() {
+            if locked {
                 crate::body::set_axis(&mut dv, axis, 0.0);
             }
         }

@@ -410,12 +410,11 @@ impl crate::Editor {
     /// that only the editor's loop listened to set the flag in a build and
     /// went on running, so a player's Quit button did nothing.
     pub(crate) fn take_exit(&mut self) -> bool {
-        if !self.pending_exit {
-            return false;
-        }
         #[cfg(feature = "editor-ui")]
-        self.ext.save_prefs();
-        true
+        if self.pending_exit {
+            self.ext.save_prefs();
+        }
+        self.pending_exit
     }
 
     /// End the game — see the module docs for why this is three different things.

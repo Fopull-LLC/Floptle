@@ -2091,8 +2091,8 @@ impl EditorTabViewer<'_> {
                         })));
                     }
                 } else {
-                    for lane in 0..uni.ty.lanes() as usize {
-                        let mut v = uni.default[lane];
+                    for (lane, &d) in uni.default.iter().enumerate().take(uni.ty.lanes() as usize) {
+                        let mut v = d;
                         if ui
                             .add(egui::DragValue::new(&mut v).speed(0.01).max_decimals(3))
                             .changed()

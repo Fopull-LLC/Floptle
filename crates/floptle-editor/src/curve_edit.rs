@@ -642,9 +642,8 @@ impl Ease {
     /// Rewrite every key's interpolation and tangents. Values are untouched.
     fn apply(self, curve: &mut VfxCurveDoc) {
         let n = curve.keys.len();
-        for i in 0..n {
+        for (i, k) in curve.keys.iter_mut().enumerate() {
             let (first, last) = (i == 0, i + 1 == n);
-            let k = &mut curve.keys[i];
             match self {
                 Ease::Linear => {
                     k.interp = VfxInterpDoc::Linear;

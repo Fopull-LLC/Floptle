@@ -148,9 +148,9 @@ impl EditorTabViewer<'_> {
                      Stretch actually hold up",
                 );
             if RES_PRESETS[res].0 == "Custom" {
-                for a in 0..2 {
+                for side in &mut self.ui_design.custom_res {
                     ui.add(
-                        egui::DragValue::new(&mut self.ui_design.custom_res[a])
+                        egui::DragValue::new(side)
                             .speed(4.0)
                             .range(64.0..=8192.0),
                     );

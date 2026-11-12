@@ -329,9 +329,7 @@ impl FineMirror {
     }
 
     fn mark(&mut self, at: usize, n: usize) {
-        for g in at / GRANULE..(at + n).div_ceil(GRANULE) {
-            self.dirty[g] = true;
-        }
+        self.dirty[at / GRANULE..(at + n).div_ceil(GRANULE)].fill(true);
     }
 
     /// Whether the buffer must be made again at the mirror's size; asking

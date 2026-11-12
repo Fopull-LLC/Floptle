@@ -200,8 +200,8 @@ fn flood(grid: &WaterGrid, sea_level: f32) -> (Vec<f32>, Vec<u32>) {
         heap.push(Lowest(at, c as u32));
     };
     let mut any = false;
-    for c in 0..n {
-        if grid.ground[c] < sea_level {
+    for (c, &ground) in grid.ground.iter().enumerate().take(n) {
+        if ground < sea_level {
             seed(c, sea_level, &mut level, &mut heap);
             any = true;
         }
@@ -648,8 +648,7 @@ impl ShallowWater {
         for i in 0..self.list.len() {
             let c = self.list[i] as usize;
             if self.moved[c] {
-                for k in 0..4 {
-                    let o = grid.nbr[c][k];
+                for &o in &grid.nbr[c] {
                     if o != WALL && self.frozen[o as usize] {
                         self.wake(o as usize);
                     }

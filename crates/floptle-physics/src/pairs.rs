@@ -538,8 +538,8 @@ impl PhysicsWorld {
                 let inv_m = 1.0 / b.mass.max(1e-4);
                 let mut d = spend(shift * inv_m, &mut budget.0);
                 let mut dv = impulse * inv_m;
-                for axis in 0..3 {
-                    if b.lock_pos[axis] {
+                for (axis, locked) in b.lock_pos.into_iter().enumerate() {
+                    if locked {
                         crate::body::set_axis(&mut d, axis, 0.0);
                         crate::body::set_axis(&mut dv, axis, 0.0);
                     }
