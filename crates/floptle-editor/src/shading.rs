@@ -330,17 +330,42 @@ fn contribution(distance: f32, range: f32, color: [f32; 3], intensity: f32) -> f
     bright / (distance - range).max(1.0)
 }
 
+/// How far above the best light left out a kept light's score must be before
+/// it shines at full strength, as a fraction of that light's score. See
+/// [`fill`].
+const CAP_FADE_BAND: f32 = 0.35;
+
 /// Take the best sixteen, in a stable order, into the slots the shader reads.
 ///
 /// Ranking only happens when there are more than sixteen: under the cap every
 /// light gets in whatever order it was found, which is exactly what this did
 /// before and what nearly every scene sees.
+///
+/// **Over the cap, the lights at the edge fade rather than blink.** Each kept
+/// light is dimmed by how little its score clears the best light left out:
+/// at the same score it is dark, and [`CAP_FADE_BAND`] above it, it is full.
+/// The light about to lose its slot is therefore already at nothing when it
+/// loses it, and the light taking the slot arrives at nothing, so a swap is
+/// continuous however the camera moves. Driving past a base with more lamps
+/// than slots used to drop one for a frame and bring it back, over and over;
+/// without this, adding memory of last frame's sixteen would only move where
+/// the blink happens. It needs no memory, so every view (the game's, a mirror,
+/// a minimap) gets it for free.
 fn fill(mut lights: Vec<Candidate>) -> LightSlots {
     if lights.len() > 16 {
         lights.sort_by(|a, b| {
             b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then(a.order.cmp(&b.order))
         });
+        let edge = lights[16].score.max(0.0);
         lights.truncate(16);
+        let band = (edge * CAP_FADE_BAND).max(1e-12);
+        for l in &mut lights {
+            let t = ((l.score - edge) / band).clamp(0.0, 1.0);
+            let w = t * t * (3.0 - 2.0 * t);
+            for c in &mut l.color[..3] {
+                *c *= w;
+            }
+        }
     }
     let mut out = LightSlots { count: lights.len(), ..LightSlots::default() };
     for (i, l) in lights.iter().enumerate() {
@@ -1741,6 +1766,53 @@ mod light_split_tests {
         // …and it kept the ones nearest the camera, not the first it happened
         // to walk over.
         assert_eq!(near_first, (0..16).map(|i| i * 10).collect::<Vec<_>>());
+    }
+
+    /// A light crossing the edge of the sixteen must fade across it, not blink.
+    /// The camera walks past seventeen lamps in a row; at every step, every
+    /// lamp's brightness in the slots must move only a little, including the
+    /// steps where one lamp loses its slot to another.
+    #[test]
+    fn a_light_crossing_the_cap_fades_instead_of_blinking() {
+        let mut world = World::default();
+        for i in 0..17 {
+            light_at(&mut world, i as f64 * 6.0, None);
+        }
+        // A lamp's red channel in the slots, by its x, or 0 when it has none.
+        let shine = |cam: f64| -> Vec<f32> {
+            let s = split_point_lights(&world, DVec3::new(cam, 0.0, 0.0), &layers(), false);
+            (0..17)
+                .map(|k| {
+                    (0..s.three_d.count)
+                        .find(|&i| (s.three_d.pos[i][0] as f64 + cam - k as f64 * 6.0).abs() < 1e-3)
+                        .map_or(0.0, |i| s.three_d.color[i][0])
+                })
+                .collect()
+        };
+        let full = 2.0; // colour 1.0 × intensity 2.0
+        let mut prev = shine(-40.0);
+        let mut swaps = 0;
+        let mut cam = -40.0;
+        while cam < 140.0 {
+            cam += 0.25;
+            let now = shine(cam);
+            for k in 0..17 {
+                if (prev[k] == 0.0) != (now[k] == 0.0) {
+                    swaps += 1;
+                }
+                assert!(
+                    (now[k] - prev[k]).abs() < full * 0.2,
+                    "lamp {k} jumped from {:.3} to {:.3} as the camera moved 0.25 m to {cam}",
+                    prev[k],
+                    now[k]
+                );
+            }
+            prev = now;
+        }
+        assert!(swaps >= 2, "the walk never moved a lamp across the cap, so it proved nothing ({swaps} swaps)");
+        // …and a lamp well inside the sixteen still shines at full strength.
+        let s = shine(0.0);
+        assert!((s[0] - full).abs() < 1e-4, "the nearest lamp was dimmed: {}", s[0]);
     }
 
     /// Sixteen slots per side, and running out of one must not spill into the

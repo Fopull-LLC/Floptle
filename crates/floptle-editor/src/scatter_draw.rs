@@ -1521,6 +1521,9 @@ end
     #[test]
     fn a_multi_part_prototype_draws_each_part_at_its_own_place() {
         let s = src();
+        // Both builds settle everything at once (`settle_all`), as a shot
+        // does: this is about parts, and a time-budgeted settle placed a
+        // different number of props in each build on a slow CI runner.
         // Flat ground under everything, so props settle rather than being
         // dropped for having nothing to stand on.
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
@@ -1531,7 +1534,7 @@ end
         };
         let mut one = Vec::new();
         build_instances(
-            &mut ScatterCache::default(),
+            &mut ScatterCache { settle_all: true, ..Default::default() },
             std::slice::from_ref(&s),
             DVec3::ZERO,
             &mut |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]),
@@ -1543,7 +1546,7 @@ end
         );
         let mut two = Vec::new();
         build_instances(
-            &mut ScatterCache::default(),
+            &mut ScatterCache { settle_all: true, ..Default::default() },
             &[s],
             DVec3::ZERO,
             &mut mesh,
@@ -2320,6 +2323,11 @@ end
             );
             (out.len(), casts)
         };
+        // The field settles whole first (`settle_all`, as a shot does). Under
+        // the time budget a slow machine refuses every ray for a few frames,
+        // so "a frame that cast nothing" stopped this warm-up after one prop
+        // on CI. The edit below runs under the budget again.
+        cache.settle_all = true;
         let mut drawn = 0;
         for _ in 0..50 {
             let (n, casts) = frame(&mut cache, false);
@@ -2328,6 +2336,7 @@ end
                 break;
             }
         }
+        cache.settle_all = false;
         assert!(drawn > 50, "only {drawn} props settled");
         edit.set(cache.chunks.values().flat_map(|c| &c.instances).next().expect("a prop").pos);
         let edit = edit.get();
