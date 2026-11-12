@@ -42,7 +42,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 10
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
-- [components — getcomponent](#components--getcomponent) — 120
+- [components — getcomponent](#components--getcomponent) — 124
 - [animation — node:animator](#animation--nodeanimator) — 33
 - [particles — effects from script](#particles--effects-from-script) — 16
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 36
@@ -3967,7 +3967,7 @@ The nearest the camera draws, metres (read/write; 0.05 unless set, from 1 mm to 
 
 ### `env.ambient2d`
 
-find("Lighting"):getcomponent("Light") — the scene's Lighting node, read and written like any other component. THIS IS WHERE A 2D SCENE'S BRIGHTNESS LIVES: ambient2dR/G/B is the 2D base light, the whole light a flat scene has before a single 2D light is placed, so turning it down is how you get a dark room for a torch to carve a circle out of — and reading it back first is how you put it where it was. Also colorR/G/B + intensity + directionX/Y/Z (a day cycle), keyOverride (in stars mode, hold the sun: the brightest star lights from directionX/Y/Z until you turn it off, its distance, colour and strength its own, the other stars untouched) and keyOverrideColor (the held star shines with colorR/G/B × intensity instead), ambientR/G/B (the 3D fill, deliberately a different value), shadows/shadowSoftness/shadowStrength/shadowTintR/G/B/shadowQuantize/shadowDither/shadowDistance/contactShadows/contactLength/contactSteps/contactStrength, the screen-space reflections that make a shiny floor show the room standing on it rather than only the sky (reflections, reflectionDistance, reflectionSteps, reflectionThickness), reflectionClamp (the most one reflected bounce may carry — two mirrors facing each other re-reflect each other every frame and a polished metal loses almost nothing per pass, so without a ceiling the pair climbs into a white blob; 0 removes it), refractionLayers (how many depths of glass can be seen through at once — at 1 only the nearest pane shows what is behind it, so a fish tank has to be one box; raise it and a window can have a bottle standing behind it), and the whole fog set: fog, fogColorR/G/B, fogStart, fogEnd, fogDensity, fogHeight, fogFalloff, fogNoise, fogNoiseScale, fogVolumetric, fogDither, fogDitherStrength, fogSky, fogFollowsBody, and the volumetric light injection (fogLight, fogAnisotropy, fogSteps, fogShafts, fogShaftsMap). Every scene has exactly one Lighting node and the loader makes it, so find("Lighting") always finds it. Writes land the same frame.
+find("Lighting"):getcomponent("Light") — the scene's Lighting node, read and written like any other component. THIS IS WHERE A 2D SCENE'S BRIGHTNESS LIVES: ambient2dR/G/B is the 2D base light, the whole light a flat scene has before a single 2D light is placed, so turning it down is how you get a dark room for a torch to carve a circle out of — and reading it back first is how you put it where it was. Also colorR/G/B + intensity + directionX/Y/Z (a day cycle), keyOverride (in stars mode, hold the sun: the brightest star lights from directionX/Y/Z until you turn it off, its distance, colour and strength its own, the other stars untouched) and keyOverrideColor (the held star shines with colorR/G/B × intensity instead), ambientR/G/B (the 3D fill, deliberately a different value), shadows/shadowSoftness/shadowStrength/shadowTintR/G/B/shadowQuantize/shadowDither/shadowDistance/contactShadows/contactLength/contactSteps/contactStrength, the screen-space reflections that make a shiny floor show the room standing on it rather than only the sky (reflections, reflectionDistance, reflectionSteps, reflectionThickness), reflectionClamp (the most one reflected bounce may carry — two mirrors facing each other re-reflect each other every frame and a polished metal loses almost nothing per pass, so without a ceiling the pair climbs into a white blob; 0 removes it), refractionLayers (how many depths of glass can be seen through at once — at 1 only the nearest pane shows what is behind it, so a fish tank has to be one box; raise it and a window can have a bottle standing behind it), and the whole fog set: fog, fogColorR/G/B, fogStart, fogEnd, fogDensity, fogHeight, fogFalloff, fogNoise, fogNoiseScale, fogVolumetric, fogDither, fogDitherStrength, fogSky, fogFollowsBody, and the volumetric light injection (fogLight, fogAnisotropy, fogSteps, fogShafts, fogShaftsMap, and how strongly each kind of light scatters plus a ceiling on the result: fogSun, fogLamps, fogAmbient, fogClamp). Every scene has exactly one Lighting node and the loader makes it, so find("Lighting") always finds it. Writes land the same frame.
 
 ### `env.ambient2dB`
 
@@ -4037,9 +4037,17 @@ Key light direction Z.
 
 Depth fog on (1/0; assign true/false).
 
+### `env.fogAmbient`
+
+Volumetric: how much of the ambient and baked bounce lights the fog, on top of fogLight. 1 = as before; 0 leaves only the sun and lamps lighting the air, so unlit fog goes dark.
+
 ### `env.fogAnisotropy`
 
 Volumetric: which way the media throws light (-0.9..0.9). Positive blooms toward the sun, 0 is an even haze. Fog has no normal — this is what does that job.
+
+### `env.fogClamp`
+
+Volumetric: a ceiling on the light the fog scatters, on its brightest channel, in multiples of the fog colour (the hue is kept). Looking into a bright sun through forward-scattering fog can reach many times the fog colour; this keeps it from washing out to white. 0 = no ceiling.
 
 ### `env.fogColorB`
 
@@ -4081,6 +4089,10 @@ Fog on a round world (1/0). On, fogHeight is an altitude over the nearest celest
 
 Volumetric: world height (y) of the fog layer's top.
 
+### `env.fogLamps`
+
+Volumetric: how strongly the placeable lamps scatter in the fog, on top of fogLight and each lamp's own fog. 1 = as before.
+
 ### `env.fogLight`
 
 Volumetric: how much of the scene's light scatters IN the fog. 0 = a flat colour; 1 = lit by the sun, the point lights and the baked bounce; past 1 exaggerates. Ramp it up as a storm rolls in and the air itself starts carrying the light.
@@ -4112,6 +4124,10 @@ World distance where fog begins (fully clear nearer than this).
 ### `env.fogSteps`
 
 Volumetric: samples along each pixel's fog ray (2..64). The quality/cost dial — drop it on a weak machine. With the project's Volumetric fog setting at "grid" (new projects), the fog is built once per frame in a grid of cells over the view instead, each cell lit once and read by every pixel: its cost no longer follows the screen's pixels, and fogSteps sets how many slices deep the grid is (8 → 32, 12 → 48, 16 or more → 64). Projects made before the setting keep "march", the fog marched along every pixel's ray as before.
+
+### `env.fogSun`
+
+Volumetric: how strongly the sun (or the stars) scatter in the fog, on top of fogLight. 1 = as before. Turn it down when the air glows white looking toward the sun and the lamps should still light it.
 
 ### `env.fogVolumetric`
 

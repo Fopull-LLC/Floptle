@@ -284,6 +284,14 @@ pub struct RaymarchGlobals {
     /// The froxel grid's nearest and farthest distance (its depth slices
     /// run between them exponentially). Stamped by the renderer.
     pub fog_range: [f32; 4],
+    /// The lit fog's strengths, each stored as **one minus** the multiplier
+    /// so that zero is "as before" (the value a globals block that never heard
+    /// of this lane already holds): x = the sun or stars, y = the placeable
+    /// lamps, z = the ambient and baked bounce; w = a ceiling on the brightest
+    /// channel of the light the media scatters, in multiples of the fog
+    /// colour (0 = none). Each lamp's own share rides `point_color[i].w`, the
+    /// same way round. Appended at the end.
+    pub vol_fog_d: [f32; 4],
 }
 
 impl RaymarchGlobals {
@@ -390,6 +398,7 @@ impl Default for RaymarchGlobals {
             fog_sun: [0.0; 4],
             fog_froxel: [0.0; 4],
             fog_range: [0.0; 4],
+            vol_fog_d: [0.0; 4],
             probe_pos: [[0.0; 4]; crate::reflect::MAX_PROBES],
             probe_half: [[1.0; 4]; crate::reflect::MAX_PROBES],
         }

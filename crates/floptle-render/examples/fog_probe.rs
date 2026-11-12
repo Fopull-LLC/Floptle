@@ -49,6 +49,8 @@ fn main() {
     the_phase_function_points_the_light(&gpu, &rm);
     an_occluder_carves_a_beam(&gpu, &rm, &dir);
     a_lamp_glows_where_it_stands(&gpu, &rm, &dir);
+    each_light_has_its_own_strength(&gpu, &rm);
+    the_ceiling_holds_the_glow_and_keeps_its_hue(&gpu, &rm, &dir);
 
     println!("fog probe OK");
 }
@@ -278,6 +280,112 @@ fn a_lamp_glows_where_it_stands(gpu: &Gpu, rm: &Raymarch, dir: &str) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// 6. The sun, the lamps and the ambient each have a strength of their own.
+//
+// Each strength at 0 must land on the frame with that light removed outright
+// (a control rendered without it), and the others must not move. Half must
+// land in between, or the knob is a switch.
+// ---------------------------------------------------------------------------
+fn each_light_has_its_own_strength(gpu: &Gpu, rm: &Raymarch) {
+    let sun = Vec3::new(0.0, 0.0, -1.0);
+    let sunlit = |strengths| Frame { sun, light: [0.2; 3], ambient: [0.05; 3], fog: (1.0, 0.6, false), strengths, ..Frame::default() };
+    let full = centre(&render(gpu, rm, sunlit([0.0; 4]), "fog-sun-1"));
+    let half = centre(&render(gpu, rm, sunlit([0.5, 0.0, 0.0, 0.0]), "fog-sun-half"));
+    let none = centre(&render(gpu, rm, sunlit([1.0, 0.0, 0.0, 0.0]), "fog-sun-0"));
+    let dark = centre(&render(
+        gpu,
+        rm,
+        Frame { sun, light: [0.0; 3], ambient: [0.05; 3], fog: (1.0, 0.6, false), ..Frame::default() },
+        "fog-sun-control",
+    ));
+    println!("sun strength: 1 → {full:.3?}  0.5 → {half:.3?}  0 → {none:.3?}  no sun → {dark:.3?}");
+    assert!(
+        (none[1] - dark[1]).abs() < 0.004,
+        "sun strength 0 must be the air with no sun in it — {:.4} vs {:.4}",
+        none[1],
+        dark[1]
+    );
+    assert!(
+        half[1] > none[1] + 0.01 && half[1] < full[1] - 0.01,
+        "half the sun must land between none and all — {:.3} in {:.3}..{:.3}",
+        half[1],
+        none[1],
+        full[1]
+    );
+    // The lamps' strength must leave the sun alone.
+    let lamps_off = centre(&render(gpu, rm, sunlit([0.0, 1.0, 0.0, 0.0]), "fog-sun-lamps-off"));
+    assert!(
+        (lamps_off[1] - full[1]).abs() < 0.004,
+        "turning the lamps down must not touch the sun's air — {:.4} vs {:.4}",
+        lamps_off[1],
+        full[1]
+    );
+
+    // A lamp, as check 5 lit it: its own share at 0, and the scene's lamps
+    // strength at 0, must each put out its glow.
+    let lamp = Some(([-3.0, 0.0, -8.0], 9.0, [0.9, 0.35, 0.15]));
+    let lamp_frame = |strengths, lamp_fog| Frame { lamp, light: [0.0; 3], fog: (1.0, 0.0, false), strengths, lamp_fog, ..Frame::default() };
+    let side = |px: &[[u8; 4]]| (at(px, 0.22, 0.5)[0], at(px, 0.78, 0.5)[0]);
+    let (gl, gr) = side(&render(gpu, rm, lamp_frame([0.0; 4], 0.0), "fog-lamp-share-1"));
+    let (ol, or) = side(&render(gpu, rm, lamp_frame([0.0; 4], 1.0), "fog-lamp-share-0"));
+    let (sl, sr) = side(&render(gpu, rm, lamp_frame([0.0, 1.0, 0.0, 0.0], 0.0), "fog-lamps-0"));
+    println!("lamp glow: share 1 {gl:.3}/{gr:.3}  share 0 {ol:.3}/{or:.3}  lamps 0 {sl:.3}/{sr:.3}");
+    assert!(gl > gr * 1.6, "the control lamp must glow — {gl:.3} vs {gr:.3}");
+    assert!((ol - or).abs() < 0.01, "a lamp whose own fog share is 0 must not light the air — {ol:.4} vs {or:.4}");
+    assert!((sl - sr).abs() < 0.01, "lamps strength 0 must put every lamp's glow out — {sl:.4} vs {sr:.4}");
+
+    // The ambient: no sun, no lamp, only the fill. At 0 the air carries no
+    // light at all and goes dark; at 1 it is the fill.
+    let amb = |strengths| Frame { light: [0.0; 3], ambient: [0.3; 3], fog: (1.0, 0.0, false), strengths, ..Frame::default() };
+    let lit = centre(&render(gpu, rm, amb([0.0; 4]), "fog-ambient-1"));
+    let off = centre(&render(gpu, rm, amb([0.0, 0.0, 1.0, 0.0]), "fog-ambient-0"));
+    println!("ambient strength: 1 → {lit:.3?}  0 → {off:.3?}");
+    assert!(
+        lit[1] > off[1] * 1.5 + 0.02,
+        "ambient strength 0 must take the fill out of the air — {:.3} vs {:.3}",
+        lit[1],
+        off[1]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 7. The ceiling stops a white-out and keeps the fog's hue.
+//
+// A hot sun straight ahead through forward-scattering fog: many times the fog
+// colour without a ceiling. A ceiling of 1 fog colour must bring it down to the
+// unlit fog (amount 0, the closed form check 1 holds), and a blue sun must stay
+// blue under it, because the ceiling scales the channels together.
+// ---------------------------------------------------------------------------
+fn the_ceiling_holds_the_glow_and_keeps_its_hue(gpu: &Gpu, rm: &Raymarch, dir: &str) {
+    let sun = Vec3::new(0.0, 0.0, -1.0);
+    let hot = |light, amount, ceiling| Frame { sun, light, fog: (amount, 0.8, false), strengths: [0.0, 0.0, 0.0, ceiling], ..Frame::default() };
+    let flat = centre(&render(gpu, rm, hot([3.0; 3], 0.0, 0.0), "fog-hot-flat"));
+    let open = render(gpu, rm, hot([3.0; 3], 1.0, 0.0), "fog-hot-open");
+    let held = render(gpu, rm, hot([3.0; 3], 1.0, 1.0), "fog-hot-held");
+    save(&open, &format!("{dir}/fog_ceiling_off.png"));
+    save(&held, &format!("{dir}/fog_ceiling_1.png"));
+    let (open, held) = (centre(&open), centre(&held));
+    println!("hot sun: flat {flat:.3?}  no ceiling {open:.3?}  ceiling 1 {held:.3?}");
+    assert!(open[1] > flat[1] * 1.5, "the control must wash out — {:.3} vs flat {:.3}", open[1], flat[1]);
+    assert!(
+        held[1] <= flat[1] * 1.02 + 0.004,
+        "a ceiling of one fog colour must hold the air at the unlit fog — {:.3} vs {:.3}",
+        held[1],
+        flat[1]
+    );
+    let blue = centre(&render(gpu, rm, hot([0.6, 1.0, 3.0], 1.0, 1.0), "fog-hot-blue"));
+    println!("hot blue sun under a ceiling of 1: {blue:.3?}");
+    // Every channel of that sun is past the ceiling, so clamping them one at a
+    // time lands on the fog colour itself (blue over red about 1.4 here, the
+    // fog's own tint). Scaling them together keeps the sun's 5:1 as well:
+    // about 7.
+    assert!(
+        blue[2] > blue[0] * 3.0,
+        "a ceiling must keep the light's hue, not grey it out to the fog colour — {blue:.3?}"
+    );
+}
+
 /// Henyey-Greenstein, normalised so isotropic reads 1 — the same convention the
 /// shader uses, and written out here so the two are independent statements of it.
 fn hg(cos_t: f32, g: f32) -> f32 {
@@ -297,6 +405,11 @@ struct Frame {
     roof: bool,
     /// (camera-relative position, range, colour)
     lamp: Option<([f32; 3], f32, [f32; 3])>,
+    /// `vol_fog_d` as packed: one minus each of the sun, lamp and ambient
+    /// strengths, then the ceiling.
+    strengths: [f32; 4],
+    /// The lamp's `point_color.w`: one minus its own fog share.
+    lamp_fog: f32,
 }
 
 impl Default for Frame {
@@ -309,6 +422,8 @@ impl Default for Frame {
             steps: 16.0,
             roof: false,
             lamp: None,
+            strengths: [0.0; 4],
+            lamp_fog: 0.0,
         }
     }
 }
@@ -330,7 +445,7 @@ fn render(gpu: &Gpu, rm: &Raymarch, f: Frame, label: &str) -> Vec<[u8; 4]> {
     let mut point_count = [0.0f32; 4];
     if let Some((p, range, c)) = f.lamp {
         point_pos[0] = [p[0], p[1], p[2], range];
-        point_color[0] = [c[0], c[1], c[2], 0.0];
+        point_color[0] = [c[0], c[1], c[2], f.lamp_fog];
         point_count[0] = 1.0;
     }
 
@@ -371,6 +486,7 @@ fn render(gpu: &Gpu, rm: &Raymarch, f: Frame, label: &str) -> Vec<[u8; 4]> {
         vol_fog_a: [DENSITY, 1000.0, 1.0, 0.0],
         vol_fog_b: [24.0, 0.0, 0.0, 1.0],
         vol_fog_c: [amount, g, f.steps, if shafts { 1.0 } else { 0.0 }],
+        vol_fog_d: f.strengths,
         ..Default::default()
     };
 

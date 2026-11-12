@@ -235,7 +235,8 @@ mod tests {
         w.insert(e, floptle_core::Name("Light".into()));
         w.insert(e, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0,
                                         shadows: Default::default(), shape: Default::default(),
-                                        spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25 });
+                                        spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25,
+                                        fog: 1.0, });
         let err = read_node(&w, e, std::path::Path::new("."), &Default::default()).unwrap_err();
         if cfg!(feature = "editor-ui") {
             assert!(err.contains("pointLight"), "the kind is named: {err}");

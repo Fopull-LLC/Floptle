@@ -262,6 +262,10 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field fogNoiseScale number Volumetric: noise feature size, world units per repeat.
 ---@field fogLight number Volumetric: how much of the scene's light scatters in the fog (0 = a flat colour, 1 = lit by the sun/points/bounce, past 1 exaggerates).
 ---@field fogAnisotropy number Volumetric: which way the media throws light (-0.9..0.9, positive blooms toward the sun).
+---@field fogSun number Volumetric: how strongly the sun/stars scatter in the fog, on top of fogLight (1 = as before).
+---@field fogLamps number Volumetric: how strongly the placeable lamps scatter in the fog, on top of fogLight (1 = as before).
+---@field fogAmbient number Volumetric: how much of the ambient and baked bounce lights the fog (1 = as before).
+---@field fogClamp number Volumetric: ceiling on the fog's scattered light, brightest channel, in multiples of the fog colour (0 = none).
 ---@field fogSteps number Volumetric: samples along each pixel's fog ray (2..64).
 ---@field fogShafts number Volumetric (1/0): march the sun shadow per fog step — the beams, and the cost.
 ---@field fogShaftsMap boolean Shafts from the sun shadow map instead of a march per step: many times cheaper.

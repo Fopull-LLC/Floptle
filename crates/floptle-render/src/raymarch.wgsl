@@ -978,7 +978,7 @@ fn fs_froxel_inject(in: VOut) -> @location(0) vec4<u32> {
     let gain = max(G.vol_fog_c.x, 1.0);
     if (sigma > 1e-5 && amt > 0.0 && G.gi_meta.y < 0.5) {
         let amb = gi_ambient(p, -rd, G.ambient.rgb);
-        radiance = G.fog_color.rgb * mix(vec3<f32>(1.0), fog_inscatter(p, rd, amb, pix) * gain, amt);
+        radiance = G.fog_color.rgb * mix(vec3<f32>(1.0), fog_light_in(p, rd, amb, pix, gain), amt);
     }
     let a = 1.0 - exp(-sigma * dt);
     let sc = radiance * a;

@@ -464,6 +464,7 @@ mod tests {
                 range: 5.0,
                 shape: floptle_core::LightShape::Point,
                 shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25,
+                fog: 1.0,
             },
         );
         w.insert(child, floptle_core::Transform::from_translation(DVec3::new(0.0, 2.0, 0.0)));

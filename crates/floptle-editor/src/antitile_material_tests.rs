@@ -269,6 +269,7 @@ fn photograph_2d(tag: &str, antitile: f32, lamp: bool) -> Option<Vec<u8>> {
             shape: Default::default(),
             spot_angle: floptle_core::OMNI_ANGLE,
             spot_softness: 0.25,
+            fog: 1.0,
         });
     }
     let cam = RenderCamera::new(DVec3::new(0.0, 0.0, 10.0), Quat::IDENTITY, Projection::of_camera(1.0, true, 24.0, 0.05, 1000.0));

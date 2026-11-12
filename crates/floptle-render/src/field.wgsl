@@ -192,6 +192,12 @@ struct Globals {
     // across, down and deep; and its nearest and farthest distance.
     fog_froxel: vec4<f32>,
     fog_range: vec4<f32>,
+    // The lit fog's strengths, each stored as ONE MINUS the multiplier so 0
+    // is as before: x = sun/stars, y = lamps, z = ambient and bounce; w = the
+    // ceiling on the scattered light's brightest channel, in multiples of the
+    // fog colour (0 = none). A lamp's own share is `point_color[i].w`, the
+    // same way round.
+    vol_fog_d: vec4<f32>,
 };
 
 // One terrain palette slot, as the slot store holds it (`terrain_slots`,
@@ -1233,20 +1239,38 @@ fn fog_emitter(shape: vec4<f32>, to: vec3<f32>) -> FogEmitter {
     return o;
 }
 
+// The light the media at `p` scatters toward the eye, as a multiple of the
+// fog colour, with the scene's fog strength (`gain`) and ceiling applied.
+// The ceiling scales all three channels together, so a white-out comes down
+// to the fog's own hue rather than to grey.
+fn fog_light_in(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>, gain: f32) -> vec3<f32> {
+    let lit = fog_inscatter(p, rd, amb, pix) * gain;
+    let ceiling = G.vol_fog_d.w;
+    let top = max(max(lit.r, lit.g), lit.b);
+    if (ceiling > 0.0 && top > ceiling) {
+        return lit * (ceiling / top);
+    }
+    return lit;
+}
+
 fn fog_inscatter(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     let g = G.vol_fog_c.y;
+    let sun_k = 1.0 - G.vol_fog_d.x;
+    let lamps_k = 1.0 - G.vol_fog_d.y;
     // Shafts cost one shadow march per step per pixel — the single most
     // expensive thing in the fog, and the only thing that draws the beam.
     let march = G.vol_fog_c.w > 0.5 && G.shadow_params.x > 0.5;
-    var lit = amb;
-    let ns = u32(G.star_meta.x);
+    var lit = amb * (1.0 - G.vol_fog_d.z);
+    // A strength of 0 skips the light outright: the shadow march it would
+    // pay for is the fog's largest cost.
+    let ns = select(0u, u32(G.star_meta.x), sun_k > 0.0);
     // A key light emitting nothing lights no air either — every interior turns
     // the sun down, so this is the common case rather than the odd one.
     //
     // **It skips the SUN, not the function.** Written as an early return it also
     // skipped the placeable lamps below, and an interior lit entirely by its own
     // ceiling panels — which is every interior — got no light in its air at all.
-    let sun_on = dot(G.light_color.rgb, G.light_color.rgb) > 1e-8;
+    let sun_on = dot(G.light_color.rgb, G.light_color.rgb) > 1e-8 && sun_k > 0.0;
     if (ns == 0u) {
         if (sun_on) {
             let l = sun_dir_at(p);
@@ -1267,7 +1291,7 @@ fn fog_inscatter(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>) ->
                 }
                 sh = shadow_post(v, pix);
             }
-            lit += G.light_color.rgb * sh * fog_phase(dot(rd, l), g);
+            lit += G.light_color.rgb * (sh * fog_phase(dot(rd, l), g) * sun_k);
         }
     } else {
         for (var i = 0u; i < min(ns, 4u); i++) {
@@ -1284,13 +1308,17 @@ fn fog_inscatter(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>) ->
                 }
                 sh = shadow_post(v, pix);
             }
-            lit += star_col_at(i, p) * sh * fog_phase(dot(rd, l), g);
+            lit += star_col_at(i, p) * (sh * fog_phase(dot(rd, l), g) * sun_k);
         }
     }
     // Placeable point lights: no march (they are unshadowed fill everywhere else
     // in the engine too), so a lamp costs a distance and a phase.
-    let pc = min(u32(G.point_count.x), 16u);
+    let pc = select(0u, min(u32(G.point_count.x), 16u), lamps_k > 0.0);
     for (var i = 0u; i < pc; i = i + 1u) {
+        let k = lamps_k * (1.0 - G.point_color[i].w);
+        if (k <= 0.0) {
+            continue;
+        }
         let range = max(G.point_pos[i].w, 1e-4);
         let to = G.point_pos[i].xyz - p;
         // Out of range before anything is computed. After the emitter
@@ -1307,7 +1335,7 @@ fn fog_inscatter(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>) ->
         if (x <= 0.0) {
             continue;
         }
-        lit += G.point_color[i].rgb * (x * x) * fog_phase(dot(rd, e.l), g);
+        lit += G.point_color[i].rgb * (x * x * fog_phase(dot(rd, e.l), g) * k);
     }
     return lit;
 }
@@ -1419,7 +1447,7 @@ fn fog_march_pair(rd: vec3<f32>, t_near: f32, t_max: f32, pix: vec2<u32>) -> Fog
         if (sigma > 1e-5 && lit_on) {
             // The fog colour is the media's ALBEDO once light is injected: what
             // it scatters is the light that reaches it, tinted by its own colour.
-            radiance = G.fog_color.rgb * mix(vec3<f32>(1.0), fog_inscatter(p, rd, amb, pix) * gain, amt);
+            radiance = G.fog_color.rgb * mix(vec3<f32>(1.0), fog_light_in(p, rd, amb, pix, gain), amt);
         }
         if (!near_taken && s0 + dt >= near_end) {
             pair.near = out;

@@ -5867,6 +5867,7 @@ mod tests {
                 shadows: false,
                 spot_angle: 180.0,
                 spot_softness: 0.0,
+                fog: 1.0,
             },
         );
 

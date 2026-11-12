@@ -1335,6 +1335,7 @@ impl Editor {
                 vol_fog_a,
                 vol_fog_b,
                 vol_fog_c,
+                vol_fog_d: crate::shading::fog_strengths(&light_node),
                 contact,
                 ssr,
                 ssr_prev_vp,

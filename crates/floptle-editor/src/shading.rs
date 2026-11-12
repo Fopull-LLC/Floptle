@@ -190,7 +190,7 @@ pub(crate) fn split_point_lights(
     let mut three: Vec<Candidate> = Vec::new();
     let mut two: Vec<Candidate> = Vec::new();
     for (e, m) in world.query::<Matter>() {
-        let Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness } =
+        let Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness, fog } =
             m
         else {
             continue;
@@ -222,7 +222,9 @@ pub(crate) fn split_point_lights(
             score: contribution(c.length(), *range, *color, *intensity),
             // A 2D sun has a direction and no position: a negative range says so.
             pos: [c.x, c.y, c.z, if is_2d && lit.sun { -1.0 } else { range.max(0.0001) }],
-            color: [color[0] * intensity, color[1] * intensity, color[2] * intensity, 0.0],
+            // w: the lamp's share of the fog, stored as one minus it so a
+            // zero there (any colour written without it) is "as before".
+            color: [color[0] * intensity, color[1] * intensity, color[2] * intensity, 1.0 - fog.max(0.0)],
             mask: layer_mask(&lit, sorting_names),
             falloff: lit.falloff_lane(*range),
             shape: emitter_lane(*shape, wt.scale, *shadows),
@@ -754,6 +756,14 @@ pub(crate) fn vol_fog_uniforms(l: &Light, time: f32, cam_y: f32) -> ([f32; 4], [
             },
         ],
     )
+}
+
+/// The lit fog's strengths lane (`vol_fog_d`): the sun, the lamps and the
+/// ambient each stored as one minus its multiplier, so a Lighting node at its
+/// defaults packs all zeros (exactly what a globals block that never heard of
+/// the lane holds), and the ceiling in `w` (0 = none).
+pub(crate) fn fog_strengths(l: &Light) -> [f32; 4] {
+    [1.0 - l.fog_sun.max(0.0), 1.0 - l.fog_lamps.max(0.0), 1.0 - l.fog_ambient.max(0.0), l.fog_clamp.max(0.0)]
 }
 
 /// The third lane carries what did not fit: `x` = how much of the flat ramp the
@@ -1563,7 +1573,7 @@ mod light_split_tests {
 
     fn light_at(world: &mut World, x: f64, mode: Option<Lighting2D>) -> floptle_core::Entity {
         let e = world.spawn();
-        world.insert(e, Matter::PointLight { color: [1.0, 0.5, 0.25], intensity: 2.0, range: 8.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25});
+        world.insert(e, Matter::PointLight { color: [1.0, 0.5, 0.25], intensity: 2.0, range: 8.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25, fog: 1.0});
         world.insert(
             e,
             floptle_core::transform::Transform {
@@ -1670,10 +1680,10 @@ mod light_split_tests {
         let dark = light_at(&mut world, 0.0, None);
         world.insert(
             dark,
-            Matter::PointLight { color: [1.0; 3], intensity: 0.0, range: 8.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25},
+            Matter::PointLight { color: [1.0; 3], intensity: 0.0, range: 8.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25, fog: 1.0},
         );
         let spent = light_at(&mut world, 1.0, None);
-        world.insert(spent, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 0.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25});
+        world.insert(spent, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 0.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25, fog: 1.0});
         light_at(&mut world, 2.0, None); // the only one actually lighting anything
 
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
@@ -1769,6 +1779,7 @@ mod light_split_tests {
                 shadows: false,
                 spot_angle: floptle_core::OMNI_ANGLE,
                 spot_softness: 0.25,
+                fog: 1.0,
             },
         );
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
@@ -1828,6 +1839,7 @@ mod light_split_tests {
                 shadows: true,
                 spot_angle: 45.0,
                 spot_softness: 0.25,
+                fog: 1.0,
             },
         );
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);

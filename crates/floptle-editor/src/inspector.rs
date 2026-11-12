@@ -2236,6 +2236,7 @@ fn point_light_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
         shadows,
         spot_angle,
         spot_softness,
+        fog,
     } = m else { return };
     let cmd = &mut *ctx.cmd;
     use floptle_core::LightShape as LS;
@@ -2276,6 +2277,16 @@ fn point_light_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
         crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=20.0), "intensity").changed();
     cmd.inspector_changed |=
         crate::responsive::slider(ui, egui::Slider::new(range, 0.1..=200.0), "range").changed();
+    // A 2D light lights no volumetric fog, so the row would change nothing.
+    if !ctx.light_2d {
+        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(fog, 0.0..=4.0), "lights the fog")
+            .on_hover_text(
+                "how much this lamp lights volumetric fog (1 = as lit). 0 lights the room but \
+                 leaves the air around the lamp dark. The Lighting node's \"lamps\" scales every \
+                 lamp's share together.",
+            )
+            .changed();
+    }
     // One shadow switch per light, the one that applies. A 2D light's shadows
     // are its 2D light row's, and a second box here that changed nothing
     // was the switch people reached for first.
@@ -5117,6 +5128,39 @@ impl EditorTabViewer<'_> {
                                  does the job a surface normal does everywhere else.",
                             )
                             .changed();
+                        // What each kind of light puts into the air, and a
+                        // ceiling on all of it together.
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("sun");
+                            cmd.inspector_changed |= ui
+                                .add(egui::DragValue::new(&mut l.fog_sun).speed(0.02).range(0.0..=10.0))
+                                .on_hover_text("how strongly the sun (or the stars) scatter in the fog. 1 = as lit; turn it down when the air glows white looking toward the sun")
+                                .changed();
+                            ui.label("lamps");
+                            cmd.inspector_changed |= ui
+                                .add(egui::DragValue::new(&mut l.fog_lamps).speed(0.02).range(0.0..=10.0))
+                                .on_hover_text("how strongly the placeable lamps scatter in the fog, on top of each lamp's own \"fog\"")
+                                .changed();
+                            ui.label("ambient");
+                            cmd.inspector_changed |= ui
+                                .add(egui::DragValue::new(&mut l.fog_ambient).speed(0.02).range(0.0..=10.0))
+                                .on_hover_text("how much of the ambient and baked bounce lights the fog. 0 leaves only the sun and the lamps, so unlit air goes dark")
+                                .changed();
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("brightest");
+                            cmd.inspector_changed |= ui
+                                .add(egui::DragValue::new(&mut l.fog_clamp).speed(0.05).range(0.0..=100.0).suffix("× fog colour"))
+                                .on_hover_text(
+                                    "a ceiling on the light the fog scatters, on its brightest channel, in multiples of the fog colour. \
+                                     The hue is kept. Forward-scattering fog looking into a bright sun can reach many times the fog \
+                                     colour and wash out to white; this stops it. 0 = no ceiling.",
+                                )
+                                .changed();
+                            if l.fog_clamp <= 0.0 {
+                                ui.weak("(none)");
+                            }
+                        });
                         cmd.inspector_changed |= crate::responsive::check(ui, &mut l.fog_shafts, "shafts (shadows in the fog)")
                             .on_hover_text(
                                 "march the sun shadow at every fog step, so shadowed air stays dark and beams appear through \
@@ -9250,7 +9294,7 @@ mod tests {
     fn auto_shows_what_it_inferred_and_why() {
         let layers = vec!["Default".to_string(), "Background".to_string()];
 
-        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25}, true);
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25, fog: 1.0}, true);
         let (painted, _) = run_lighting_2d(&world, e, &layers);
         assert!(painted.contains("2D light"), "no row at all:\n{painted}");
         assert!(painted.contains("auto"), "the flag is not shown:\n{painted}");
@@ -9258,7 +9302,7 @@ mod tests {
         assert!(painted.contains("orthographic"), "…nor why:\n{painted}");
 
         // The same light in a 3D scene decides the other way, and says so.
-        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25}, false);
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25, fog: 1.0}, false);
         let (painted, _) = run_lighting_2d(&world, e, &layers);
         assert!(painted.contains("→ 3D"), "a light in a perspective scene must read 3D:\n{painted}");
     }
@@ -9276,6 +9320,7 @@ mod tests {
             shadows: false,
             spot_angle: floptle_core::OMNI_ANGLE,
             spot_softness: 0.25,
+            fog: 1.0,
         };
         let painted_for = |ortho: bool| {
             let (mut world, e) = scene_with(lamp(), ortho);
@@ -9354,7 +9399,7 @@ mod tests {
     #[test]
     fn unticking_a_layer_keeps_the_rest() {
         let layers = vec!["Default".to_string(), "Terrain".to_string(), "Background".to_string()];
-        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25}, true);
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25, fog: 1.0}, true);
         let (painted, _) = run_lighting_2d(&world, e, &layers);
         assert!(painted.contains("every layer"), "an untouched light must say it reaches all:\n{painted}");
 

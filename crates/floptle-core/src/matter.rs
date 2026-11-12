@@ -1406,6 +1406,21 @@ pub struct Light {
     /// blooms toward the light and shafts read; 0 is an even glow. A mote of fog
     /// has no normal — this is the knob that does the job `N·L` does elsewhere.
     pub fog_anisotropy: f32,
+    /// Volumetric only — how strongly the sun (or the stars) scatter in the
+    /// media, on top of `fog_light`. 1 is as before.
+    pub fog_sun: f32,
+    /// Volumetric only — how strongly the placeable lamps scatter in the media,
+    /// on top of `fog_light` and each lamp's own `fog`. 1 is as before.
+    pub fog_lamps: f32,
+    /// Volumetric only — how much of the ambient and baked bounce lights the
+    /// media, on top of `fog_light`. 1 is as before.
+    pub fog_ambient: f32,
+    /// Volumetric only — a ceiling on the light the media scatters, on its
+    /// brightest channel, in multiples of the fog colour. The hue is kept.
+    /// Looking into a bright sun through forward-scattering fog can reach many
+    /// times the fog colour; this is what keeps it from washing out to white.
+    /// 0 is no ceiling (as before).
+    pub fog_clamp: f32,
     /// Steps the per-pixel fog march takes (quality against cost).
     pub fog_steps: u32,
     /// March the sun shadow at every fog step. This is what turns lit fog into
@@ -1495,6 +1510,10 @@ impl Default for Light {
             fog_noise_scale: 24.0,
             fog_light: 1.0,
             fog_anisotropy: 0.6,
+            fog_sun: 1.0,
+            fog_lamps: 1.0,
+            fog_ambient: 1.0,
+            fog_clamp: 0.0,
             fog_steps: 16,
             fog_shafts: true,
             fog_shafts_map: false,
@@ -1749,6 +1768,13 @@ pub enum Matter {
         /// widening a spot keeps the softness it was given instead of turning a
         /// soft edge hard.
         spot_softness: f32,
+        /// How much this lamp lights volumetric fog, as a multiple of what it
+        /// would (1 = as before). 0 lights surfaces but leaves the air around
+        /// it dark: a strip light under a counter does not need a glow, and
+        /// a lamp ten metres from the camera in thick fog can be calmed
+        /// without dimming the room. Scaled again by the Lighting node's
+        /// `fog_lamps`.
+        fog: f32,
     },
     /// A gravity source for the physics sim — `Down` for normal-style level gravity,
     /// `Radial` for a planet (Mario-Galaxy) gravity well centered on the node.

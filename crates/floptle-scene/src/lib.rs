@@ -1308,6 +1308,11 @@ pub enum MatterDoc {
         /// meant.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spot: Option<SpotDoc>,
+        /// How much the lamp lights volumetric fog (`Matter::PointLight::fog`).
+        /// Skipped at 1, so a lamp written before it existed round-trips
+        /// byte-identically.
+        #[serde(default = "one_f32", skip_serializing_if = "is_one")]
+        fog: f32,
     },
     /// A physics gravity source (Down = level gravity, Radial = planet).
     GravityVolume {
@@ -2234,8 +2239,9 @@ impl From<&Matter> for MatterDoc {
                 near: *near,
                 far: *far,
             },
-            Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness } => {
+            Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness, fog } => {
                 MatterDoc::PointLight {
+                    fog: fog.max(0.0),
                     color: *color,
                     intensity: *intensity,
                     range: *range,
@@ -2517,7 +2523,8 @@ impl MatterDoc {
                     far,
                 }
             }
-            MatterDoc::PointLight { color, intensity, range, shape, shadows, spot } => Matter::PointLight {
+            MatterDoc::PointLight { color, intensity, range, shape, shadows, spot, fog } => Matter::PointLight {
+                fog: fog.max(0.0),
                 spot_angle: spot.map(|s| s.angle).unwrap_or(floptle_core::OMNI_ANGLE),
                 spot_softness: spot.map(|s| s.softness).unwrap_or_else(default_spot_softness),
                 color: *color,
@@ -2897,6 +2904,17 @@ pub struct LightDoc {
     pub fog_light: f32,
     #[serde(default = "default_fog_anisotropy")]
     pub fog_anisotropy: f32,
+    /// How strongly each kind of light scatters in volumetric fog, and a
+    /// ceiling on the result (see `Light::fog_sun` and its siblings). Not
+    /// written at their defaults, so an old scene reads and saves as before.
+    #[serde(default = "one_f32", skip_serializing_if = "is_one")]
+    pub fog_sun: f32,
+    #[serde(default = "one_f32", skip_serializing_if = "is_one")]
+    pub fog_lamps: f32,
+    #[serde(default = "one_f32", skip_serializing_if = "is_one")]
+    pub fog_ambient: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub fog_clamp: f32,
     #[serde(default = "default_fog_steps")]
     pub fog_steps: u32,
     #[serde(default = "true_bool")]
@@ -3068,6 +3086,10 @@ impl From<&Light> for LightDoc {
             fog_noise_scale: l.fog_noise_scale,
             fog_light: l.fog_light,
             fog_anisotropy: l.fog_anisotropy,
+            fog_sun: l.fog_sun,
+            fog_lamps: l.fog_lamps,
+            fog_ambient: l.fog_ambient,
+            fog_clamp: l.fog_clamp,
             fog_steps: l.fog_steps,
             fog_shafts: l.fog_shafts,
             fog_shafts_map: l.fog_shafts_map,
@@ -3129,6 +3151,10 @@ impl LightDoc {
             fog_noise_scale: self.fog_noise_scale,
             fog_light: self.fog_light,
             fog_anisotropy: self.fog_anisotropy,
+            fog_sun: self.fog_sun.max(0.0),
+            fog_lamps: self.fog_lamps.max(0.0),
+            fog_ambient: self.fog_ambient.max(0.0),
+            fog_clamp: self.fog_clamp.max(0.0),
             fog_steps: self.fog_steps.clamp(2, 64),
             fog_shafts: self.fog_shafts,
             fog_shafts_map: self.fog_shafts_map,
@@ -6209,7 +6235,7 @@ mod tests {
                     terrain_fine_paint: None,
                     name: "lamp".into(),
                     transform: TransformDoc::default(),
-                    matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default(), shadows: false, spot: None },
+                    matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default(), shadows: false, spot: None, fog: 1.0 },
                     object_materials: Default::default(),
                     tint: None,
                     tint_rim: None,
@@ -6321,7 +6347,7 @@ mod tests {
         let mut world = World::new();
         let e = world.spawn();
         world.insert(e, floptle_core::transform::Transform::IDENTITY);
-        world.insert(e, Matter::PointLight { color: [1.0, 0.86, 0.62], intensity: 3.0, range: 8.0, shape: Default::default(), shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25 });
+        world.insert(e, Matter::PointLight { color: [1.0, 0.86, 0.62], intensity: 3.0, range: 8.0, shape: Default::default(), shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25, fog: 1.0 });
         world.insert(
             e,
             floptle_core::Lighting2D {
@@ -6351,7 +6377,7 @@ mod tests {
         let mut plain = World::new();
         let p = plain.spawn();
         plain.insert(p, floptle_core::transform::Transform::IDENTITY);
-        plain.insert(p, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape: Default::default(), shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25 });
+        plain.insert(p, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape: Default::default(), shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25, fog: 1.0 });
         plain.insert(p, floptle_core::Lighting2D { mode: floptle_core::Lit2D::Yes, ..Default::default() });
         let text = to_ron(&to_doc("plain", &plain)).unwrap();
         for key in ["light_inner", "light_falloff", "light_shadows", "light_shadow_strength", "light_height"] {
@@ -6423,7 +6449,7 @@ mod tests {
         let lamp = snap.nodes.iter().find(|n| n.name == "lamp").unwrap();
         assert_eq!(
             lamp.matter,
-            MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default(), shadows: false, spot: None }
+            MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default(), shadows: false, spot: None, fog: 1.0 }
         );
         // the camera's fov/active round-trip
         let eye = snap.nodes.iter().find(|n| n.name == "eye").unwrap();
@@ -6634,7 +6660,7 @@ mod tests {
             world.insert(e, Transform::IDENTITY);
             world.insert(
                 e,
-                Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape, shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25 },
+                Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape, shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25, fog: 1.0 },
             );
         }
         let ron = to_ron(&to_doc("lights", &world)).expect("serializes");
@@ -6673,6 +6699,7 @@ mod tests {
                 range: 10.0,
                 shape: LS::Point,
                 shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25,
+                fog: 1.0,
             });
             to_doc("one", &w)
         })
@@ -6873,6 +6900,59 @@ mod tests {
         // that means anything.
         let wild: RigidBodyDoc = ron::from_str("(slope_limit: 400)").expect("parses");
         assert_eq!(wild.to_rigidbody().slope_limit, 90.0);
+    }
+
+    #[test]
+    fn fog_strengths_round_trip_and_an_old_scene_keeps_its_look() {
+        let authored = Light {
+            fog: true,
+            fog_volumetric: true,
+            fog_sun: 0.35,
+            fog_lamps: 2.0,
+            fog_ambient: 0.0,
+            fog_clamp: 1.5,
+            ..Light::default()
+        };
+        let ron = ron::ser::to_string(&LightDoc::from(&authored)).expect("serializes");
+        let back: LightDoc = ron::from_str(&ron).expect("parses");
+        assert_eq!(back.to_light(), authored, "every strength and the ceiling round trip");
+
+        // A Lighting block written before the strengths existed keeps the look
+        // it had: every strength 1 and no ceiling.
+        let old: LightDoc = ron::from_str(
+            "(direction: (0.4, 0.9, 0.45), color: (1, 1, 1), ambient: (0.1, 0.1, 0.1), \
+             intensity: 1, fog: true, fog_volumetric: true)",
+        )
+        .expect("an old Lighting block still loads");
+        let l = old.to_light();
+        assert_eq!((l.fog_sun, l.fog_lamps, l.fog_ambient, l.fog_clamp), (1.0, 1.0, 1.0, 0.0));
+        // …and at its defaults writes none of them, so scenes do not all grow
+        // four lines the day this shipped.
+        let plain = ron::ser::to_string(&LightDoc::from(&Light::default())).expect("serializes");
+        for f in ["fog_sun", "fog_lamps", "fog_ambient", "fog_clamp"] {
+            assert!(!plain.contains(f), "{f} is written at its default: {plain}");
+        }
+    }
+
+    #[test]
+    fn a_lamp_s_fog_share_round_trips_and_an_old_lamp_lights_the_air() {
+        let lamp = |fog| Matter::PointLight {
+            color: [1.0, 0.8, 0.6],
+            intensity: 2.0,
+            range: 9.0,
+            shape: Default::default(),
+            shadows: false,
+            spot_angle: floptle_core::OMNI_ANGLE,
+            spot_softness: 0.25,
+            fog,
+        };
+        let doc = MatterDoc::from(&lamp(0.0));
+        let ron = ron::ser::to_string(&doc).expect("serializes");
+        assert_eq!(ron::from_str::<MatterDoc>(&ron).expect("parses").to_matter(), lamp(0.0), "a dark-air lamp stays one");
+        let plain = ron::ser::to_string(&MatterDoc::from(&lamp(1.0))).expect("serializes");
+        assert!(!plain.contains("fog"), "the default share is not written: {plain}");
+        let old: MatterDoc = ron::from_str("PointLight(color: (1, 0.8, 0.6), intensity: 2, range: 9)").expect("an old lamp loads");
+        assert_eq!(old.to_matter(), lamp(1.0), "a lamp from before the share lights the air as it did");
     }
 
     #[test]
@@ -7154,6 +7234,7 @@ mod tests {
                 spot_angle: 37.5,
                 // Hard edge, on purpose.
                 spot_softness: 0.0,
+                fog: 1.0,
             },
         );
         let text = to_ron(&to_doc("spot", &world)).unwrap();
@@ -7190,6 +7271,7 @@ mod tests {
                 shadows: false,
                 spot_angle: floptle_core::OMNI_ANGLE,
                 spot_softness: 0.25,
+                fog: 1.0,
             },
         );
         let text = to_ron(&to_doc("plain", &plain)).unwrap();

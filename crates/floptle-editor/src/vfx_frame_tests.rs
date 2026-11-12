@@ -297,6 +297,7 @@ fn a_lit_cloud_beside_a_lamp_takes_its_light() {
         shape: Default::default(),
         spot_angle: floptle_core::OMNI_ANGLE,
         spot_softness: 0.25,
+        fog: 1.0,
     });
     ed.toggle_play();
     for at in [near, far] {

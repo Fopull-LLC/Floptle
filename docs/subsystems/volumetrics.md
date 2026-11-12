@@ -179,12 +179,24 @@ The Lighting node, under **fog → volumetric**:
 - **lit by the scene** — 0 is the flat colour, 1 is the media lit by the sun, the
   point lights and the baked bounce, past 1 exaggerates.
 - **forward scatter** — the phase `g`.
+- **sun / lamps / ambient** — how strongly each kind of light scatters in the
+  media, on top of the amount. 1 is as lit. A strength of 0 skips that light
+  entirely, so turning the sun off in the air also skips its shadow march.
+- **brightest** — a ceiling on the light the media scatters, on its brightest
+  channel, in multiples of the fog colour. The ceiling scales all three channels
+  together, so the hue survives. Forward-scattering fog looking into a bright sun
+  can reach many times the fog colour and wash out to white; this stops it. 0 is
+  no ceiling.
+- Each lamp also has **lights the fog** (`fog` on its `PointLight`), its own share
+  of the air, 1 by default. 0 lights the room but leaves the air around the lamp
+  dark.
 - **shafts** — march the sun shadow per step.
 - **quality** — steps per ray.
 - **max distance** — the fence for a ray that hits nothing.
 
 From Lua, on the Lighting node's `Light` component: `fogLight`,
-`fogAnisotropy`, `fogSteps`, `fogShafts`, alongside the existing `fogDensity`,
+`fogAnisotropy`, `fogSteps`, `fogShafts`, `fogSun`, `fogLamps`, `fogAmbient`,
+`fogClamp` (and `fog` on each lamp's `PointLight`), alongside the existing `fogDensity`,
 `fogHeight`, `fogFalloff`, `fogNoise`, `fogNoiseScale`.
 
 ## Verified by

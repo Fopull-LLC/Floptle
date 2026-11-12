@@ -798,7 +798,7 @@ pub fn effective_cell(world: &World, e: Entity) -> u32 {
 /// more components / fields.
 pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<String, f64>> {
     let mut out: HashMap<String, HashMap<String, f64>> = HashMap::new();
-    if let Some(Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness }) =
+    if let Some(Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness, fog }) =
         world.get::<Matter>(e)
     {
         use floptle_core::LightShape as LS;
@@ -839,6 +839,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 // "is it a spot" it would have to keep in step.
                 ("spotAngle".to_string(), *spot_angle as f64),
                 ("spotSoftness".to_string(), *spot_softness as f64),
+                ("fog".to_string(), *fog as f64),
             ]),
         );
     }
@@ -919,6 +920,10 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("fogNoiseScale".to_string(), l.fog_noise_scale as f64),
                 ("fogLight".to_string(), l.fog_light as f64),
                 ("fogAnisotropy".to_string(), l.fog_anisotropy as f64),
+                ("fogSun".to_string(), l.fog_sun as f64),
+                ("fogLamps".to_string(), l.fog_lamps as f64),
+                ("fogAmbient".to_string(), l.fog_ambient as f64),
+                ("fogClamp".to_string(), l.fog_clamp as f64),
                 ("fogSteps".to_string(), l.fog_steps as f64),
                 ("fogShafts".to_string(), f64::from(l.fog_shafts)),
                 ("fogShaftsMap".to_string(), f64::from(l.fog_shafts_map)),
@@ -1975,6 +1980,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 shadows,
                 spot_angle,
                 spot_softness,
+                fog,
             }) = world.get_mut::<Matter>(ent)
             {
                 use floptle_core::LightShape as LS;
@@ -2002,6 +2008,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                         }
                     }
                     "spotSoftness" => *spot_softness = (val as f32).clamp(0.0, 1.0),
+                    "fog" => *fog = v,
                     // A dimension write lands only on a shape that has it. A
                     // zero would collapse the emitter into a degenerate polygon,
                     // so every one of these has a floor.
@@ -2244,6 +2251,10 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "fogNoiseScale" => l.fog_noise_scale = v.max(0.001),
                     "fogLight" => l.fog_light = v.max(0.0),
                     "fogAnisotropy" => l.fog_anisotropy = v.clamp(-0.95, 0.95),
+                    "fogSun" => l.fog_sun = v.max(0.0),
+                    "fogLamps" => l.fog_lamps = v.max(0.0),
+                    "fogAmbient" => l.fog_ambient = v.max(0.0),
+                    "fogClamp" => l.fog_clamp = v.max(0.0),
                     "fogSteps" => l.fog_steps = (val.max(2.0) as u32).min(64),
                     "fogShafts" => l.fog_shafts = val != 0.0,
                     "fogShaftsMap" => l.fog_shafts_map = val != 0.0,
@@ -3219,15 +3230,16 @@ pub(crate) fn apply_rich_sets(
                         shadows,
                         spot_angle,
                         spot_softness,
-                    }) => (*color, *intensity, *range, (*shape, *shadows, *spot_angle, *spot_softness)),
+                        fog,
+                    }) => (*color, *intensity, *range, (*shape, *shadows, *spot_angle, *spot_softness, *fog)),
                     _ => (
                         [1.0, 1.0, 1.0],
                         1.0,
                         10.0,
-                        (floptle_core::LightShape::default(), false, floptle_core::OMNI_ANGLE, 0.25),
+                        (floptle_core::LightShape::default(), false, floptle_core::OMNI_ANGLE, 0.25, 1.0),
                     ),
                 };
-                let (shape, shadows, spot_angle, spot_softness) = keep;
+                let (shape, shadows, spot_angle, spot_softness, fog) = keep;
                 if let Some(v) = color {
                     c = v;
                 }
@@ -3250,6 +3262,7 @@ pub(crate) fn apply_rich_sets(
                         shadows,
                         spot_angle,
                         spot_softness,
+                        fog,
                     },
                 );
             }

@@ -180,6 +180,7 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
             shadows: false,
             spot_angle: floptle_core::OMNI_ANGLE,
             spot_softness: 0.25,
+            fog: 1.0,
         }),
         // The same component, aimed. Two entries rather than two node types
         // because a spot is a point light with a cone — it takes the same
@@ -199,6 +200,7 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
             shadows: true,
             spot_angle: 45.0,
             spot_softness: 0.25,
+            fog: 1.0,
         }),
         ("⬇  Gravity Volume", Matter::GravityVolume { mode: GravityMode::Down, strength: 9.81, radius: 20.0 }),
         ("≈  Water Volume", Matter::default_water()),
@@ -527,6 +529,7 @@ fn new_point_light() -> MatterDoc {
         shape: Default::default(),
         shadows: false,
         spot: None,
+        fog: 1.0,
     }
 }
 fn new_spot_light() -> MatterDoc {
@@ -539,6 +542,7 @@ fn new_spot_light() -> MatterDoc {
         // where an omni lamp does not.
         shadows: true,
         spot: Some(floptle_scene::SpotDoc { angle: 45.0, softness: 0.25 }),
+        fog: 1.0,
     }
 }
 fn new_light_probes() -> MatterDoc {

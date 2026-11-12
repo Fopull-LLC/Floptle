@@ -663,6 +663,7 @@ end
             shadows: false,
             spot_angle: floptle_core::OMNI_ANGLE,
             spot_softness: 0.0,
+            fog: 1.0,
         },
     );
     let mut host = ScriptHost::new();

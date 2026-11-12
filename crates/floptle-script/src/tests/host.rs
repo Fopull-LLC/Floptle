@@ -284,6 +284,7 @@ fn script_reads_and_writes_a_component_field() {
         range: 10.0,
         shape: Default::default(),
         shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25,
+        fog: 1.0,
     });
     world.insert(
         e,
