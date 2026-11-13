@@ -660,7 +660,8 @@ impl Editor {
     /// velocity writes, assembly and terrain commands.
     fn run_frame_scripts(&mut self, sdt: f32, dir: &std::path::Path) {
         self.refresh_wind_frames();
-        self.timed_script_pass(|s| s.script_host.run(&mut s.world, dir, sdt, s.play_t));
+        let (sdt, t) = self.sim_clock_for(false, sdt, self.play_t);
+        self.timed_script_pass(|s| s.script_host.run(&mut s.world, dir, sdt, t));
         // UI hook events (clicked / hoverStart / …) fire against the run's
         // fresh scene mirror, with their own write flush.
         let ui_events = std::mem::take(&mut self.ui_events);
@@ -1138,8 +1139,13 @@ impl Editor {
                 // stays within a tick of the frame clock `update` reads. Ticks
                 // alone fell behind for good after a long load, and a deadline
                 // set in `update` and checked in `fixedUpdate` never came.
-                let tick_time = (self.game_tick_no as f64 * self.game_tick.step as f64
-                    + self.game_tick.dropped()) as f32;
+                let sim_time = self.sim_now();
+                self.script_host.set_sim_clock(sim_time, self.game_tick.step as f64);
+                let tick_time = if self.project.script_clock == floptle_scene::ScriptClockDoc::Simulation {
+                    sim_time as f32
+                } else {
+                    (sim_time + self.game_tick.dropped()) as f32
+                };
                 // Real hosting: each remote player's Predicted node runs
                 // with its owner's replayed input for this tick — the
                 // one-script model (§6), server side. Those nodes are
@@ -1437,6 +1443,29 @@ impl Editor {
     /// ticks a frame, or `None` to run every banked tick: off unless the
     /// project sets one, and off for a networked session, for the same
     /// reason as [`Self::overload_policy`].
+    /// Seconds the simulation has actually advanced this Play: the ticks run
+    /// times the step, with nothing the catch-up budget or slow motion dropped.
+    pub(crate) fn sim_now(&self) -> f64 {
+        self.game_tick_no as f64 * self.game_tick.step as f64
+    }
+
+    /// Set `simTime` and `simDt` for the frame pass (`late` false) or the late
+    /// pass, and return the `dt` and `time` that pass hands its scripts: the
+    /// frame's own, or the simulation's when the project's script clock says
+    /// so. `simDt` is what the simulation advanced since that pass last ran.
+    fn sim_clock_for(&mut self, late: bool, frame_dt: f32, frame_t: f32) -> (f32, f32) {
+        let now = self.sim_now();
+        let last = if late { &mut self.sim_t_late } else { &mut self.sim_t_update };
+        let sim_dt = (now - *last).max(0.0);
+        *last = now;
+        self.script_host.set_sim_clock(now, sim_dt);
+        if self.project.script_clock == floptle_scene::ScriptClockDoc::Simulation {
+            (sim_dt as f32, now as f32)
+        } else {
+            (frame_dt, frame_t)
+        }
+    }
+
     pub(crate) fn tick_budget_ms(&self) -> Option<f32> {
         if self.clock_is_shared() {
             return None;
@@ -1526,7 +1555,8 @@ impl Editor {
         if let Some(sim) = self.sim.as_ref() {
             self.script_host.set_hulls(sim.body_hulls(&self.world));
         }
-        self.timed_script_pass(|s| s.script_host.run_late(&mut s.world, sdt, s.play_t));
+        let (sdt, t) = self.sim_clock_for(true, sdt, self.play_t);
+        self.timed_script_pass(|s| s.script_host.run_late(&mut s.world, sdt, t));
         if let Some(sim) = self.sim.as_mut() {
             sim.world.set_colliders(self.script_host.take_colliders()); // reclaim
             // A velocity write from lateUpdate still lands (applied next

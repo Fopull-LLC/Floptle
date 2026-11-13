@@ -1246,6 +1246,8 @@ impl Editor {
             ));
             self.pending_scene.clear();
             self.play_t = 0.0;
+            self.sim_t_update = 0.0;
+            self.sim_t_late = 0.0;
             self.paused = false;
             self.terrain_mirror_warned = false; // fresh Play, fresh one-shot warning
             self.mirror_churn_warned = false;

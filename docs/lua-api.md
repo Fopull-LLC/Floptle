@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 231
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 233
 - [node — transform & body fields](#node--transform--body-fields) — 45
 - [node — methods & handles](#node--methods--handles) — 41
 - [vectors, directions & easing](#vectors-directions--easing) — 51
@@ -401,7 +401,7 @@ destroy(node) — remove a node AND its whole subtree (physics body included). Q
 
 ### `dt`
 
-Seconds since the last frame (number).
+Seconds since the last frame (number). With Script clock "simulation", the simulation seconds since the last frame instead (simDt).
 
 ### `filesDropped`
 
@@ -605,6 +605,14 @@ script.sleep() — stop calling this script's update, fixedUpdate and lateUpdate
 ### `script.wake`
 
 script.wake(node, kind) — wake that script on that node; script.wake(node) wakes every script on it. Harmless on one that is awake.
+
+### `simDt`
+
+Simulation seconds since this pass last ran (number): the step in fixedUpdate; in update and lateUpdate, the ticks the frame ran times the step, 0 on a frame that ran none. Equals dt, give or take a tick, while nothing is dropped.
+
+### `simTime`
+
+Seconds the simulation has actually advanced (number): fixed ticks run times the step, the same in every script and pass. Equals time until the catch-up budget or slow motion drops ticks; then time keeps the frame and simTime keeps the physics, so a timeout on something physical, a cooldown on a physical action or a controller's integral belongs on simTime.
 
 ### `spawn`
 
@@ -950,7 +958,7 @@ steam.uploadScore(boardId, score, opts, cb) — uploads a score for the local us
 
 ### `time`
 
-Seconds since play started (number). The pass's time in every script, set before any script runs, so a function of another script called through findScript reads the same value. update/lateUpdate see the frame clock and fixedUpdate the tick clock; after a hitch or a long load the two still agree to within one tick.
+Seconds since play started (number). The pass's time in every script, set before any script runs, so a function of another script called through findScript reads the same value. update/lateUpdate see the frame clock and fixedUpdate the tick clock; after a hitch or a long load the two still agree to within one tick. So when the catch-up budget or slow motion drops ticks, time runs ahead of the physics: a timeout on a flight or a controller measured in time runs fast. Measure those in simTime, or set Project Settings → Script clock to "simulation", which makes time and dt follow the simulation.
 
 ### `ui`
 

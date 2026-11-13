@@ -2139,6 +2139,7 @@ impl Editor {
             let new = floptle_scene::ProjectConfigDoc::for_new_project();
             self.project.script_vec3 = new.script_vec3;
             self.project.tick_budget_ms = new.tick_budget_ms;
+            self.project.script_clock = new.script_clock;
             self.apply_script_vec3_mode();
             // Stamped with the engine that made it, so the upgrade pass knows
             // it needs nothing yet, and its generated stubs stay out of git.

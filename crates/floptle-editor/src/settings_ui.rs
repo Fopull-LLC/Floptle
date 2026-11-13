@@ -92,7 +92,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Game => {
                 "title name entry scene boot build export ships tick overload slow motion \
-                 catch up budget physics fixed"
+                 catch up budget physics fixed clock time simTime simulation timer"
             }
             SettingsSection::Scripting => {
                 "vec3 vector script scripts lua luau fast exact precision allocation"
@@ -787,6 +787,35 @@ impl<'a> SettingsCtx<'a> {
                     .changed()
                 {
                     project.tick_budget_ms = (ms > 0.0).then_some(ms);
+                    out.save_project = true;
+                }
+            },
+        );
+        row(
+            ui,
+            "Script clock",
+            Some("which clock scripts read as time and dt. When the catch-up budget or slow \
+                  motion drops ticks, the frame clock keeps real time while the physics falls \
+                  behind, so a timer kept in time (a flight's timeout, a cooldown, a \
+                  controller) runs fast against what it is timing. Simulation makes time and \
+                  dt follow the physics, so those timers stay true and run slow against the \
+                  wall clock instead. New projects start on simulation; projects made before \
+                  it stay on frame. simTime and simDt are the simulation's clock either way"),
+            |ui| {
+                use floptle_scene::ScriptClockDoc as C;
+                let mut v = project.script_clock;
+                egui::ComboBox::from_id_salt("project-script-clock")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(match v {
+                        C::Frame => "frame",
+                        C::Simulation => "simulation",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut v, C::Frame, "frame");
+                        ui.selectable_value(&mut v, C::Simulation, "simulation");
+                    });
+                if v != project.script_clock {
+                    project.script_clock = v;
                     out.save_project = true;
                 }
             },

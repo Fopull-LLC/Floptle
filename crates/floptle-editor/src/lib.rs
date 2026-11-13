@@ -3684,6 +3684,11 @@ struct Editor {
     paused: bool,
     /// Accumulated play-mode seconds (advances only while playing and not paused).
     play_t: f32,
+    /// The simulation time (`simTime`) the frame pass and the late pass last
+    /// read, so each pass's `simDt` is what the simulation advanced since that
+    /// pass last ran. See `Self::sim_clock_for`.
+    sim_t_update: f64,
+    sim_t_late: f64,
     play_snapshot: Option<SceneDoc>,
     /// The open scene file as a project-root-relative path ("scenes/first.ron")
     /// — what multiplayer sessions name scenes by on the wire. Kept in lockstep

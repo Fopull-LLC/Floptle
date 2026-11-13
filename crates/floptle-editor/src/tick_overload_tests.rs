@@ -326,3 +326,106 @@ fn a_new_project_has_the_catch_up_budget_and_an_old_one_does_not() {
     assert_eq!(saved.tick_budget_ms, Some(12.0), "the budget was not written to project.ron");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// What one script logged each pass under `clock`, across a frame long enough
+/// that the step cap drops ticks: `U time dt simTime simDt` from `update`,
+/// `F time simTime simDt` from `fixedUpdate`, as numbers.
+fn clock_lines(clock: floptle_scene::ScriptClockDoc) -> Vec<(char, Vec<f64>)> {
+    let dir = std::env::temp_dir().join(format!("floptle_script_clock_{clock:?}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    std::fs::write(
+        dir.join("scripts/clock.lua"),
+        "function update(node, dt)\n\
+           log(string.format(\"U %.9f %.9f %.9f %.9f\", time, dt, simTime, simDt))\n\
+         end\n\
+         function fixedUpdate(node, dt)\n\
+           log(string.format(\"F %.9f %.9f %.9f\", time, simTime, simDt))\n\
+         end\n",
+    )
+    .unwrap();
+    let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+    ed.project.script_clock = clock;
+    let e = ed.world.spawn();
+    ed.world.insert(e, Transform::IDENTITY);
+    ed.world.insert(e, Name("Clock".into()));
+    ed.world.insert(e, Matter::Empty);
+    ed.world.insert(
+        e,
+        Scripts(vec![ScriptInst { kind: "clock".into(), enabled: true, params: Vec::new(), refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
+    );
+    ed.toggle_play();
+    assert!(ed.playing, "did not enter play");
+    // A quarter-second frame banks fifteen 60 Hz ticks; the step cap runs
+    // eight and drops the rest, which is what the budget and slow motion do.
+    for dt in [1.0 / 60.0; 6].into_iter().chain([0.25]).chain([1.0 / 60.0; 4]) {
+        ed.play_step(dt, true);
+        ed.drain_script_logs();
+    }
+    assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    let lines: Vec<(char, Vec<f64>)> = ed
+        .console
+        .entries
+        .iter()
+        .filter_map(|l| {
+            let mut w = l.msg.split_whitespace();
+            let kind = w.next()?.chars().next()?;
+            if kind != 'U' && kind != 'F' {
+                return None;
+            }
+            Some((kind, w.map(|n| n.parse::<f64>().unwrap()).collect()))
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    lines
+}
+
+/// **Scripts can read the simulation's clock when ticks are dropped.** A
+/// frame long enough to drop ticks leaves the frame clock `time` ahead of the
+/// physics, by design. `simTime` counts only the ticks that ran, a step apart
+/// in every `fixedUpdate`, and the `simDt` the frame pass sees adds up to it.
+/// With the project's script clock on "simulation", `time` and `dt` are that
+/// clock. On "frame" (every project before the setting) `time` is unchanged.
+#[test]
+fn scripts_read_the_simulation_clock_when_ticks_are_dropped() {
+    use floptle_scene::ScriptClockDoc as C;
+    let step = 1.0 / 60.0;
+    let frame = clock_lines(C::Frame);
+    let fixed: Vec<&Vec<f64>> = frame.iter().filter(|(k, _)| *k == 'F').map(|(_, v)| v).collect();
+    let upd: Vec<&Vec<f64>> = frame.iter().filter(|(k, _)| *k == 'U').map(|(_, v)| v).collect();
+    assert!(fixed.len() >= 10 && upd.len() >= 10, "too few passes: {} ticks, {} frames", fixed.len(), upd.len());
+    for w in fixed.windows(2) {
+        assert!((w[1][1] - w[0][1] - step).abs() < 1e-6, "simTime is not a step apart tick to tick: {w:?}");
+        assert!((w[1][2] - step).abs() < 1e-6, "simDt in fixedUpdate is not the step: {w:?}");
+    }
+    let last = fixed.last().unwrap();
+    assert!(last[0] - last[1] > 5.0 * step, "the frame clock should run ahead of the dropped ticks: time {} simTime {}", last[0], last[1]);
+    let summed: f64 = upd.iter().map(|v| v[3]).sum();
+    let u_last = upd.last().unwrap();
+    assert!((summed - u_last[2]).abs() < 1e-6, "update's simDt adds up to {summed}, simTime is {}", u_last[2]);
+    assert!(upd.iter().any(|v| (v[1] - 0.25).abs() < 1e-6), "frame-mode dt is not the frame's own: {upd:?}");
+
+    for (k, v) in clock_lines(C::Simulation) {
+        match k {
+            'U' => {
+                assert!((v[0] - v[2]).abs() < 1e-6, "simulation clock: update's time {} is not simTime {}", v[0], v[2]);
+                assert!((v[1] - v[3]).abs() < 1e-6, "simulation clock: update's dt {} is not simDt {}", v[1], v[3]);
+            }
+            _ => assert!((v[0] - v[1]).abs() < 1e-6, "simulation clock: fixedUpdate's time {} is not simTime {}", v[0], v[1]),
+        }
+    }
+}
+
+/// **A new project reads the simulation clock; an old one keeps the frame's.**
+#[test]
+fn a_new_project_reads_the_simulation_clock_and_an_old_one_the_frame() {
+    use floptle_scene::ScriptClockDoc as C;
+    assert_eq!(floptle_scene::ProjectConfigDoc::for_new_project().script_clock, C::Simulation);
+    let old: floptle_scene::ProjectConfigDoc = ron::from_str("(title: Some(\"old\"))").unwrap();
+    assert_eq!(old.script_clock, C::Frame, "a project from before the setting changed clocks");
+    let plain = ron::ser::to_string(&old).unwrap();
+    assert!(!plain.contains("script_clock"), "the default clock is written: {plain}");
+    let back: floptle_scene::ProjectConfigDoc =
+        ron::from_str(&ron::ser::to_string(&floptle_scene::ProjectConfigDoc::for_new_project()).unwrap()).unwrap();
+    assert_eq!(back.script_clock, C::Simulation, "the simulation clock does not round trip");
+}

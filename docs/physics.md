@@ -367,9 +367,27 @@ one, and two settings in **Project Settings → Game** decide what happens:
 
 What a budget costs: while the ticks are expensive the game runs **slower than
 real time**, the way slow motion does, and the dropped time is not made up
-afterwards. Physics and `fixedUpdate` see fewer ticks per second of wall time;
-`time` on the tick still keeps pace with `update`'s. Off (`0`, or absent) runs
-every banked tick, which is what every project made before the setting did.
+afterwards. Physics and `fixedUpdate` see fewer ticks per second of wall time.
+Off (`0`, or absent) runs every banked tick, which is what every project made
+before the setting did.
+
+**Which clock your timers read.** Dropping ticks splits two clocks apart:
+`time` follows the frame, and `simTime` follows the physics (the ticks that
+actually ran, times the step). A timer kept in the frame's clock, such as a
+flight's timeout, a cooldown on a physical action or a controller's integral,
+runs fast against the simulation it is timing. **Script clock** (`script_clock`
+in `project.ron`) picks which one scripts read as `time` and `dt`:
+
+- `Frame` keeps real time. `time` on the tick still keeps pace with `update`'s,
+  so a deadline set in one and checked in the other arrives. Every project
+  made before the setting stays on it.
+- `Simulation` makes `time` and `dt` follow the physics in every pass, so
+  timers stay true and run slow against the wall clock instead. New projects
+  start on it.
+
+`simTime` and `simDt` read the simulation's clock under either setting. In
+`update` and `lateUpdate`, `simDt` is what the simulation advanced since that
+pass last ran: the frame's ticks times the step, 0 on a frame that ran none.
 
 A networked session ignores both and always catches up, because its clock is
 shared with the other machines and running slow would desync it.

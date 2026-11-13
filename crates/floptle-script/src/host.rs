@@ -6967,6 +6967,18 @@ impl ScriptHost {
         }
     }
 
+    /// The simulation's clock, for the pass about to run: `simTime` is the
+    /// seconds the simulation has actually advanced (ticks run times the
+    /// step), `simDt` what it advanced since this pass last ran. They equal
+    /// `time` and `dt` until the catch-up budget or slow motion drops ticks;
+    /// then `time` keeps the frame and these keep the physics. Every script
+    /// reads the same pair, as with `time` (see `run_pass`).
+    pub fn set_sim_clock(&self, sim_time: f64, sim_dt: f64) {
+        let g = self.lua.globals();
+        let _ = g.raw_set("simTime", sim_time);
+        let _ = g.raw_set("simDt", sim_dt);
+    }
+
     /// Run every script's `fixedUpdate(node, dt)` for one gameplay tick (the netcode-era
     /// fixed step, `docs/multiplayer.md` §3). Called zero or more times per frame by
     /// the play loop, between [`Self::run`] (which handles `start`/`update`, instance

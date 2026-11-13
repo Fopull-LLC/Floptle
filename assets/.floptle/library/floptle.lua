@@ -455,6 +455,17 @@ time = 0.0
 ---@type number
 dt = 0.0
 
+---Seconds the simulation has actually advanced: fixed ticks run times the
+---step. Equals `time` until the catch-up budget or slow motion drops ticks;
+---then `time` keeps the frame and `simTime` keeps the physics.
+---@type number
+simTime = 0.0
+
+---Simulation seconds since this pass last ran: the step in fixedUpdate, the
+---ticks this frame ran in update and lateUpdate (0 on a frame that ran none).
+---@type number
+simDt = 0.0
+
 ---The tunables this script declares (shown in the Inspector).
 ---@type table<string, number>
 defaults = {}

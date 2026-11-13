@@ -1847,6 +1847,26 @@ pub enum TickOverloadDoc {
     CatchUp,
 }
 
+/// Which clock scripts read as `time` and `dt` ([`ProjectConfigDoc::script_clock`]).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScriptClockDoc {
+    /// `time` keeps the frame: it counts the ticks the catch-up budget and
+    /// slow motion dropped, so it stays with real time while the physics falls
+    /// behind. Every project before this setting.
+    #[default]
+    Frame,
+    /// `time` and `dt` follow the simulation (`simTime`, `simDt`): a timer
+    /// written in `time` stays true to the physics when ticks are dropped,
+    /// and runs slow against the wall clock instead.
+    Simulation,
+}
+
+impl ScriptClockDoc {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 impl TickOverloadDoc {
     fn is_default(&self) -> bool {
         *self == Self::default()
@@ -3357,6 +3377,14 @@ pub struct ProjectConfigDoc {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tick_budget_ms: Option<f32>,
 
+    /// Which clock scripts read as `time` and `dt`. `Frame` (the default, and
+    /// every project made before it) keeps real time; `Simulation` keeps the
+    /// physics, so script timers stay true when the catch-up budget or slow
+    /// motion drops ticks. `simTime` and `simDt` are the simulation's clock
+    /// either way.
+    #[serde(default, skip_serializing_if = "ScriptClockDoc::is_default")]
+    pub script_clock: ScriptClockDoc,
+
     /// How far, in metres, the camera may get from the physics' floating
     /// origin before the origin moves to it. Physics positions are kept to
     /// a fixed number of digits around the origin, so a body this far away
@@ -3612,6 +3640,7 @@ impl ProjectConfigDoc {
             vsync: VsyncDoc::default(),
             tick_overload: TickOverloadDoc::default(),
             tick_budget_ms: None,
+            script_clock: ScriptClockDoc::default(),
             origin_rebase_m: None,
             shadow_volumes: default_shadow_volumes(),
             terrain_layer_size: default_terrain_layer_size(),
@@ -3675,12 +3704,17 @@ impl ProjectConfigDoc {
     /// compounding into frames of several each. A project made before it
     /// keeps running every banked tick.
     ///
+    /// Its scripts read the simulation's clock as `time`, too: with a budget
+    /// dropping ticks, a timer kept in the frame's clock runs fast against
+    /// the physics it is timing.
+    ///
     /// The editor and the headless `floptle new` the Hub drives both start
     /// here, so they cannot drift apart.
     pub fn for_new_project() -> Self {
         Self {
             script_vec3: Some(ScriptVec3Doc::Fast),
             tick_budget_ms: Some(NEW_PROJECT_TICK_BUDGET_MS),
+            script_clock: ScriptClockDoc::Simulation,
             ..Self::ps1()
         }
     }
