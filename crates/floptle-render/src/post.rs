@@ -369,6 +369,9 @@ pub struct SsaoFrame<'a> {
     pub inv_view: [[f32; 4]; 4],
     /// The camera's world position, for `cameraPosition`.
     pub eye: [f32; 3],
+    /// How far under the water's surface the camera is, in world units (0 in
+    /// air), for `sceneWaterDepth`.
+    pub water_depth: f32,
 }
 
 /// The camera a `stage post` shader reads — `PostCam` in `post_prelude.wgsl`.
@@ -379,6 +382,8 @@ pub struct SsaoFrame<'a> {
 struct PostCam {
     inv_proj: [[f32; 4]; 4],
     inv_view: [[f32; 4]; 4],
+    /// `[0][0]` = how far under water the camera is (0 in air). The rest is
+    /// spare.
     spare: [[f32; 4]; 4],
     /// xyz = the camera's world position.
     eye: [f32; 4],
@@ -543,20 +548,42 @@ pub(crate) mod layouts {
         })
     }
 
-    /// group(2): one authored shader's own uniforms.
-    pub fn shader_params(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("post-flsl-params"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
+    /// group(2): one authored shader's own uniforms, then a texture and a
+    /// sampler for each of its `tex_slots` texture slots (binding `1 + 2i` and
+    /// `2 + 2i`, as a material shader's are). One sampler a texture: the
+    /// OpenGL backend cannot pair one image with two.
+    pub fn shader_params(device: &wgpu::Device, tex_slots: usize) -> wgpu::BindGroupLayout {
+        let mut entries = vec![wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }];
+        for i in 0..tex_slots as u32 {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 1 + 2 * i,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
                 },
                 count: None,
-            }],
+            });
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 2 + 2 * i,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+        }
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("post-flsl-params"),
+            entries: &entries,
         })
     }
 }
@@ -567,6 +594,28 @@ pub struct PostShaderId(usize);
 
 struct CustomPost {
     pipeline: wgpu::RenderPipeline,
+    /// How many texture slots the shader declares: which group(2) layout its
+    /// pipeline was built against.
+    tex_slots: usize,
+}
+
+/// The most texture slots a screen shader can declare (the shader language's
+/// own limit).
+pub const POST_TEXTURE_SLOTS: usize = 8;
+
+/// One texture slot's image for a pass: the view and the sampler it is read
+/// through.
+pub type PostTexture = (wgpu::TextureView, wgpu::Sampler);
+
+/// One pass of the scene's ordered list, as [`PostShaders::set_pass_list`]
+/// takes it.
+pub struct PostPass {
+    pub shader: PostShaderId,
+    /// The shader's packed param block (`CompiledPost::pack_params`).
+    pub params: Vec<u8>,
+    /// The shader's texture slots, in declaration order. A slot left out, or
+    /// `None`, reads plain white.
+    pub textures: Vec<Option<PostTexture>>,
 }
 
 /// One entry in the scene's ordered pass list: which shader, and the knob values
@@ -581,6 +630,10 @@ struct PassSlot {
     params: wgpu::Buffer,
     bind: wgpu::BindGroup,
     size: u64,
+    /// What the bind group was built over, so it is built again only when a
+    /// slot's image changes.
+    tex_slots: usize,
+    textures: Vec<Option<PostTexture>>,
 }
 
 /// Every authored full-screen pass a project has compiled, and the pipelines
@@ -597,11 +650,17 @@ pub struct PostShaders {
     // functions the chain uses so the two agree by construction.
     _chain_layout: wgpu::BindGroupLayout,
     _depth_layout: wgpu::BindGroupLayout,
-    params_layout: wgpu::BindGroupLayout,
-    pipeline_layout: wgpu::PipelineLayout,
+    /// group(2) for a shader with `i` texture slots, at index `i`.
+    params_layouts: Vec<wgpu::BindGroupLayout>,
+    /// The pipeline layout for a shader with `i` texture slots, at index `i`.
+    pipeline_layouts: Vec<wgpu::PipelineLayout>,
     format: wgpu::TextureFormat,
     shaders: Vec<CustomPost>,
     slots: Vec<PassSlot>,
+    /// What an unfilled texture slot reads: one white texel.
+    white: PostTexture,
+    /// How many times a pass's buffer and bind group have been made.
+    binds_built: u64,
 }
 
 impl PostShaders {
@@ -609,25 +668,65 @@ impl PostShaders {
         let device = &gpu.device;
         let chain_layout = layouts::chain(device);
         let depth_layout = layouts::depth(device, "post-flsl-depth");
-        let params_layout = layouts::shader_params(device);
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("post-flsl"),
-            bind_group_layouts: &[
-                Some(&chain_layout),
-                Some(&depth_layout),
-                Some(&params_layout),
-            ],
-            immediate_size: 0,
+        // A layout is a handful of bytes, so all nine are made here: a build
+        // on a worker thread then needs nothing from the registry but a clone.
+        let params_layouts: Vec<_> =
+            (0..=POST_TEXTURE_SLOTS).map(|n| layouts::shader_params(device, n)).collect();
+        let pipeline_layouts = params_layouts
+            .iter()
+            .map(|params| {
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("post-flsl"),
+                    bind_group_layouts: &[Some(&chain_layout), Some(&depth_layout), Some(params)],
+                    immediate_size: 0,
+                })
+            })
+            .collect();
+        let white_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("post-flsl-white"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
         });
+        gpu.queue.write_texture(
+            white_tex.as_image_copy(),
+            &[255, 255, 255, 255],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let white = (
+            white_tex.create_view(&wgpu::TextureViewDescriptor::default()),
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("post-flsl-white"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
+        );
         Self {
             _chain_layout: chain_layout,
             _depth_layout: depth_layout,
-            params_layout,
-            pipeline_layout,
+            params_layouts,
+            pipeline_layouts,
             format: gpu.scene_format(),
             shaders: Vec::new(),
             slots: Vec::new(),
+            white,
+            binds_built: 0,
         }
+    }
+
+    /// Can a screen shader with `tex_slots` texture slots be built on this
+    /// device? A pass binds the frame and its depth besides its own slots, and
+    /// the frame's sampler. The refusal names the numbers, so a shader that
+    /// cannot build says why instead of failing pipeline validation.
+    pub fn fits(gpu: &Gpu, tex_slots: usize) -> Result<(), String> {
+        let l = gpu.device.limits();
+        post_fits_within(tex_slots, l.max_sampled_textures_per_shader_stage, l.max_samplers_per_shader_stage)
     }
 
     /// Build one authored pass's pipeline. `module_src` is the COMPLETE WGSL —
@@ -642,13 +741,28 @@ impl PostShaders {
     ///
     /// `replace` rebuilds a shader in place, so a hot reload keeps its id and
     /// every scene reference to it stays valid.
+    ///
+    /// For a shader with no texture slots; [`Self::register_textured`] takes
+    /// one that declares some.
     pub fn register(
         &mut self,
         gpu: &Gpu,
         module_src: &str,
         replace: Option<PostShaderId>,
     ) -> PostShaderId {
-        let built = self.builder(gpu).build(module_src);
+        self.register_textured(gpu, module_src, 0, replace)
+    }
+
+    /// [`Self::register`], for a shader that declares `tex_slots` texture
+    /// slots (`CompiledPost::textures.len()`).
+    pub fn register_textured(
+        &mut self,
+        gpu: &Gpu,
+        module_src: &str,
+        tex_slots: usize,
+        replace: Option<PostShaderId>,
+    ) -> PostShaderId {
+        let built = self.builder(gpu).build(module_src, tex_slots);
         self.install(built, replace)
     }
 
@@ -656,7 +770,7 @@ impl PostShaders {
     /// the build can run on a worker thread while the frame keeps drawing.
     /// [`Self::register`] is this and [`Self::install`] in one call.
     pub fn builder(&self, gpu: &Gpu) -> PostShaderBuilder {
-        PostShaderBuilder { device: gpu.device.clone(), pipeline_layout: self.pipeline_layout.clone(), format: self.format }
+        PostShaderBuilder { device: gpu.device.clone(), pipeline_layouts: self.pipeline_layouts.clone(), format: self.format }
     }
 
     /// Put a pass built by [`PostShaderBuilder::build`] into the registry, as
@@ -676,12 +790,28 @@ impl PostShaders {
     }
 }
 
+/// [`PostShaders::fits`] against explicit limits: the frame and the depth are
+/// two textures and one sampler a pass binds before its own slots.
+fn post_fits_within(tex_slots: usize, max_textures: u32, max_samplers: u32) -> Result<(), String> {
+    if tex_slots > POST_TEXTURE_SLOTS {
+        return Err(format!("a screen shader can declare at most {POST_TEXTURE_SLOTS} texture slots (this one declares {tex_slots})"));
+    }
+    let (textures, samplers) = (2 + tex_slots as u32, 1 + tex_slots as u32);
+    if textures > max_textures || samplers > max_samplers {
+        return Err(format!(
+            "this screen shader's {tex_slots} texture slots need {textures} textures and {samplers} samplers in one pass; \
+             this graphics device allows {max_textures} and {max_samplers}"
+        ));
+    }
+    Ok(())
+}
+
 /// What building a screen shader needs from [`PostShaders`], owned. Made by
 /// [`PostShaders::builder`].
 #[derive(Clone)]
 pub struct PostShaderBuilder {
     device: wgpu::Device,
-    pipeline_layout: wgpu::PipelineLayout,
+    pipeline_layouts: Vec<wgpu::PipelineLayout>,
     format: wgpu::TextureFormat,
 }
 
@@ -691,15 +821,17 @@ pub struct BuiltPostShader(CustomPost);
 
 impl PostShaderBuilder {
     /// Build one authored pass's pipeline from its complete module source, as
-    /// [`PostShaders::register`] takes it.
-    pub fn build(&self, module_src: &str) -> BuiltPostShader {
+    /// [`PostShaders::register`] takes it. `tex_slots` is how many texture
+    /// slots the shader declares (at most [`POST_TEXTURE_SLOTS`]).
+    pub fn build(&self, module_src: &str, tex_slots: usize) -> BuiltPostShader {
+        let tex_slots = tex_slots.min(POST_TEXTURE_SLOTS);
         let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("post-flsl"),
             source: wgpu::ShaderSource::Wgsl(module_src.into()),
         });
         let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("post-flsl"),
-            layout: Some(&self.pipeline_layout),
+            layout: Some(&self.pipeline_layouts[tex_slots]),
             vertex: wgpu::VertexState {
                 module: &module,
                 entry_point: Some("vs"),
@@ -722,22 +854,41 @@ impl PostShaderBuilder {
             multiview_mask: None,
             cache: None,
         });
-        BuiltPostShader(CustomPost { pipeline })
+        BuiltPostShader(CustomPost { pipeline, tex_slots })
     }
 }
 
 impl PostShaders {
 
     /// Set the ordered pass list every chain will run this frame: which shaders,
-    /// in which order, with which knob values.
+    /// in which order, with which knob values. Every texture slot reads white;
+    /// [`Self::set_pass_list`] is the one that takes their images.
+    pub fn set_passes(&mut self, gpu: &Gpu, passes: &[(PostShaderId, Vec<u8>)]) {
+        let list: Vec<PostPass> = passes
+            .iter()
+            .map(|(shader, params)| PostPass { shader: *shader, params: params.clone(), textures: Vec::new() })
+            .collect();
+        self.set_pass_list(gpu, &list);
+    }
+
+    /// Set the ordered pass list every chain will run this frame: which shaders,
+    /// in which order, with which knob values and which images in their slots.
     ///
     /// Idempotent and cheap when nothing changed — a slot whose buffer is
-    /// already the right size takes a uniform write and nothing else, so holding
-    /// a knob and dragging it costs one `write_buffer` per frame.
-    pub fn set_passes(&mut self, gpu: &Gpu, passes: &[(PostShaderId, Vec<u8>)]) {
-        for (i, (id, bytes)) in passes.iter().enumerate() {
-            let size = (bytes.len() as u64).max(16);
-            let fits = self.slots.get(i).is_some_and(|s| s.size == size);
+    /// already the right size and whose images are the ones it was bound to
+    /// takes a uniform write and nothing else, so holding a knob and dragging
+    /// it (or a script writing a uniform array every frame) costs one
+    /// `write_buffer` per frame.
+    pub fn set_pass_list(&mut self, gpu: &Gpu, passes: &[PostPass]) {
+        for (i, pass) in passes.iter().enumerate() {
+            let size = (pass.params.len() as u64).max(16);
+            let tex_slots = self.shaders.get(pass.shader.0).map_or(0, |s| s.tex_slots);
+            let image = |n: usize| pass.textures.get(n).cloned().flatten();
+            let fits = self.slots.get(i).is_some_and(|s| {
+                s.size == size
+                    && s.tex_slots == tex_slots
+                    && (0..tex_slots).all(|n| s.textures.get(n).is_some_and(|t| *t == image(n)))
+            });
             if !fits {
                 let params = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("post-flsl-params"),
@@ -745,26 +896,45 @@ impl PostShaders {
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
+                let textures: Vec<Option<PostTexture>> = (0..tex_slots).map(image).collect();
+                let mut entries =
+                    vec![wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() }];
+                for (n, t) in textures.iter().enumerate() {
+                    let (view, sampler) = t.as_ref().unwrap_or(&self.white);
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: (1 + 2 * n) as u32,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    });
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: (2 + 2 * n) as u32,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    });
+                }
                 let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("post-flsl-params"),
-                    layout: &self.params_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: params.as_entire_binding(),
-                    }],
+                    layout: &self.params_layouts[tex_slots],
+                    entries: &entries,
                 });
-                let slot = PassSlot { shader: id.0, params, bind, size };
+                self.binds_built += 1;
+                let slot = PassSlot { shader: pass.shader.0, params, bind, size, tex_slots, textures };
                 if i < self.slots.len() {
                     self.slots[i] = slot;
                 } else {
                     self.slots.push(slot);
                 }
             } else {
-                self.slots[i].shader = id.0;
+                self.slots[i].shader = pass.shader.0;
             }
-            gpu.queue.write_buffer(&self.slots[i].params, 0, bytes);
+            gpu.queue.write_buffer(&self.slots[i].params, 0, &pass.params);
         }
         self.slots.truncate(passes.len());
+    }
+
+    /// How many times a pass's uniform buffer and bind group have been made
+    /// since this registry was. A frame that changes only values adds none:
+    /// what a test holds the "one buffer write a frame" promise against.
+    pub fn binds_built(&self) -> u64 {
+        self.binds_built
     }
 
     /// Does this frame have any authored pass to run?
@@ -1652,7 +1822,11 @@ impl PostStack {
             let cam = PostCam {
                 inv_proj: ssao.map(|f| f.inv_proj).unwrap_or(identity),
                 inv_view: ssao.map(|f| f.inv_view).unwrap_or(identity),
-                spare: [[0.0; 4]; 4],
+                spare: {
+                    let mut m = [[0.0; 4]; 4];
+                    m[0][0] = ssao.map(|f| f.water_depth.max(0.0)).unwrap_or(0.0);
+                    m
+                },
                 eye: ssao.map(|f| [f.eye[0], f.eye[1], f.eye[2], 0.0]).unwrap_or_default(),
             };
             gpu.queue.write_buffer(&self.dof_cam_buf, 0, bytemuck::bytes_of(&cam));
@@ -1682,6 +1856,11 @@ impl PostStack {
             for slot in &c.slots {
                 // A slot can outlive a failed recompile; it simply doesn't draw.
                 let Some(shader) = c.shaders.get(slot.shader) else { continue };
+                // A hot reload that changed the shader's texture slots leaves
+                // this slot bound to the old shape until the next pass list.
+                if shader.tex_slots != slot.tex_slots {
+                    continue;
+                }
                 let dst: &Target =
                     if std::ptr::eq(cur, &self.ping) { &self.pong } else { &self.ping };
                 self.pass3(

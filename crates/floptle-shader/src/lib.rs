@@ -630,3 +630,119 @@ mod offset_tests {
         assert!(c.chunk.contains("flsl_tiled_sample(flsl_tex0"), "the pixel stage lost its ordinary sample");
     }
 }
+
+#[cfg(test)]
+mod screen_pass_tests {
+    fn naga(compiled: &crate::CompiledPost) {
+        let prelude = format!("{}\n{}", crate::transpile::POST_PRELUDE, crate::transpile::POST_FIELD_SHIM);
+        crate::transpile::validate(&prelude, &compiled.chunk)
+            .unwrap_or_else(|e| panic!("naga rejects: {}\n{}", e.message, compiled.chunk));
+    }
+
+    fn f32s(bytes: &[u8]) -> Vec<f32> {
+        bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()
+    }
+
+    /// **A screen shader reads a picture.** A slot it declares is bound in its
+    /// own group beside its uniforms, with one sampler of its own, and both
+    /// `sample` and `sampleTriplanar` reach it.
+    #[test]
+    fn a_screen_shader_declares_and_samples_texture_slots() {
+        let src = "shader caustics {\n  stage post\n  uniform strength: float = 0.5\n  \
+                   texture pattern = \"textures/caustic.png\"\n  texture ramp\n  \
+                   let world = cameraPosition() + sceneRay() * sceneDepth()\n  \
+                   let c = sample(pattern, uv * 4).rgb + sampleTriplanar(ramp, world, vec3(0, 1, 0)).rgb\n  \
+                   output color = sceneColor().rgb + c * strength\n}\n";
+        let c = crate::compile_post(src).expect("a screen shader may declare textures");
+        assert_eq!(c.textures, ["pattern", "ramp"]);
+        assert_eq!(c.texture_defaults, [Some("textures/caustic.png".to_string()), None]);
+        assert!(c.chunk.contains("@group(2) @binding(1) var flsl_tex0: texture_2d<f32>;"), "{}", c.chunk);
+        assert!(c.chunk.contains("@group(2) @binding(4) var flsl_samp1: sampler;"), "{}", c.chunk);
+        naga(&c);
+        // One vec4 for the uniform, then two lanes of tiling a slot: the
+        // image as it is, and a triplanar tile one unit wide.
+        let p = f32s(&c.pack_params(&|_| None));
+        assert_eq!(p.len(), (1 + 2 * 2) * 4);
+        assert_eq!(p[0], 0.5);
+        assert_eq!(&p[4..12], &[1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 4.0]);
+        // More slots than a pass can bind is said, not left to the pipeline.
+        let many: String = (0..9).map(|i| format!("  texture t{i}\n")).collect();
+        let err = crate::compile_post(&format!("shader s {{\n  stage post\n{many}  output color = sceneColor()\n}}\n"))
+            .expect_err("nine slots");
+        assert!(err.contains("at most 8 texture slots"), "{err}");
+    }
+
+    /// **A screen shader reads a list a script fills.** `uniform bodies:
+    /// vec4[8]` is eight elements after the uniforms in the param block, and
+    /// `bodies[i]` reads one: any number, rounded down and held in range.
+    #[test]
+    fn a_screen_shader_reads_a_uniform_array() {
+        let src = "shader bodies {\n  stage post\n  uniform gain: float = 2\n  uniform bodies: vec4[8]\n  \
+                   uniform levels: float[3]\n  \
+                   let near = bodies[0].xyz - bodies[uv.x * 8].xyz\n  \
+                   output color = sceneColor().rgb * levels[2] * gain + near\n}\n";
+        let c = crate::compile_post(src).expect("a screen shader may declare arrays");
+        assert_eq!(c.arrays.len(), 2);
+        assert!(c.chunk.contains("a0: array<vec4<f32>, 8>"), "{}", c.chunk);
+        assert!(c.chunk.contains("P.a0[u32(clamp((in.uv.x * 8.0), 0.0, 7.0))].xyz"), "{}", c.chunk);
+        assert!(c.chunk.contains("P.a1[u32(clamp(2.0, 0.0, 2.0))].x"), "{}", c.chunk);
+        naga(&c);
+
+        let bodies = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]];
+        let levels = [[9.0, 0.0, 0.0, 0.0]; 5];
+        let p = f32s(&c.pack_params_with(&|_| None, &|name| match name {
+            "bodies" => Some(&bodies[..]),
+            "levels" => Some(&levels[..]),
+            _ => None,
+        }));
+        assert_eq!(p.len(), (1 + 8 + 3) * 4, "one uniform, eight bodies, three levels");
+        assert_eq!(&p[4..12], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        assert!(p[12..36].iter().all(|v| *v == 0.0), "elements nobody wrote are zero");
+        assert_eq!(&p[36..], &[9.0, 0.0, 0.0, 0.0, 9.0, 0.0, 0.0, 0.0, 9.0, 0.0, 0.0, 0.0], "a longer list is cut");
+
+        // The text round-trips, so a graph edit (which re-prints) keeps it.
+        let ir = crate::parse(src).expect("parses");
+        let printed = crate::print(&ir);
+        assert!(printed.contains("uniform bodies: vec4[8]") && printed.contains("bodies[uv.x * 8]"), "{printed}");
+        assert!(crate::parse(&printed).expect("re-parses").same_shader(&ir), "{printed}");
+        // And the graph opens it.
+        let ck = crate::ir::check(&ir).expect("checks");
+        assert!(crate::graph::build_view(&ir, Some(&ck)).iter().any(|n| n.op_label() == "bodies[ ]"));
+    }
+
+    /// What an array cannot be is said where it is written.
+    #[test]
+    fn a_bad_uniform_array_is_refused_with_a_reason() {
+        for (body, says) in [
+            ("uniform a: vec4[0]\n  output color = sceneColor()", "1 to 64"),
+            ("uniform a: vec4[65]\n  output color = sceneColor()", "1 to 64"),
+            ("uniform a: color[4]\n  output color = sceneColor()", "not color"),
+            ("uniform a: vec4[4] = 1\n  output color = sceneColor()", "no default"),
+            ("uniform a: vec4[4]\n  output color = sceneColor() * a", "is an array"),
+            ("uniform a: vec4[4]\n  output color = a[uv]", "one number"),
+            ("uniform a: vec4[64]\n  uniform b: vec4[64]\n  uniform c: vec4[64]\n  uniform d: vec4[64]\n  \
+              uniform e: vec4[1]\n  output color = sceneColor()", "at most 256"),
+        ] {
+            let src = format!("shader s {{\n  stage post\n  {body}\n}}\n");
+            let err = crate::compile_post(&src).expect_err(body);
+            assert!(err.contains(says), "{body}: {err}");
+        }
+        let err = crate::compile_fragment("shader s {\n  stage fragment\n  uniform a: vec4[4]\n  output color = a[0]\n}\n")
+            .expect_err("arrays are for screen shaders");
+        assert!(err.contains("screen shaders"), "{err}");
+    }
+
+    /// `sceneWaterDepth()` is a screen op: a number, with nothing to pass it.
+    #[test]
+    fn a_screen_shader_reads_how_deep_the_camera_is() {
+        let c = crate::compile_post(
+            "shader under {\n  stage post\n  output color = mix(sceneColor().rgb, vec3(0, 0.2, 0.3), saturate(sceneWaterDepth()))\n}\n",
+        )
+        .expect("compiles");
+        assert!(c.chunk.contains("flsl_post_water_depth()"), "{}", c.chunk);
+        naga(&c);
+        let err = crate::compile_fragment("shader s {\n  stage fragment\n  output color = vec3(sceneWaterDepth())\n}\n")
+            .expect_err("post only");
+        assert!(err.contains("sceneWaterDepth"), "{err}");
+    }
+}

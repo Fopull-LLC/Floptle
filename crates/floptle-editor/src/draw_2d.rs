@@ -517,6 +517,7 @@ mod water_draw_tests {
             frozen,
             tint: [0.10, 0.32, 0.38],
             visibility: 28.0,
+            underwater: true,
         }
     }
 

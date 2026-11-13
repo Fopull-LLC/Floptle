@@ -1167,19 +1167,45 @@ impl Editor {
             self.ensure_post_shader(p);
         }
 
-        let passes: Vec<(floptle_render::PostShaderId, Vec<u8>)> = listed
+        // Plan each pass from the compile cache, then resolve its texture
+        // slots (which may load an image) and hand the list over. The pass's
+        // own image wins; a slot it leaves alone shows the one the shader
+        // declares, and a slot with neither reads white.
+        let plans: Vec<(floptle_render::PostShaderId, Vec<u8>, Vec<Option<String>>)> = listed
             .iter()
             .filter(|s| s.enabled)
             .filter_map(|s| {
                 let (compiled, id) =
                     self.post_flsl_cache.get(&s.shader).and_then(|e| e.compiled.as_ref())?;
-                Some((*id, compiled.pack_params(&|name| s.params.get(name).copied())))
+                let params = compiled.pack_params_with(
+                    &|name| s.params.get(name).copied(),
+                    &|name| s.arrays.get(name).map(Vec::as_slice),
+                );
+                let slots = compiled
+                    .textures
+                    .iter()
+                    .zip(&compiled.texture_defaults)
+                    .map(|(slot, dflt)| s.textures.get(slot).cloned().or_else(|| dflt.clone()))
+                    .collect();
+                Some((*id, params, slots))
             })
             .collect();
+        let mut passes = Vec::with_capacity(plans.len());
+        for (shader, params, slots) in plans {
+            let textures = slots
+                .iter()
+                .map(|path| {
+                    let id = self.ensure_texture(path.as_deref()?)?;
+                    let (gpu, raster) = (self.gpu.as_ref()?, self.raster.as_mut()?);
+                    raster.texture_binding(gpu, id)
+                })
+                .collect();
+            passes.push(floptle_render::PostPass { shader, params, textures });
+        }
         let (Some(gpu), Some(reg)) = (self.gpu.as_ref(), self.post_shaders.as_mut()) else {
             return;
         };
-        reg.set_passes(gpu, &passes);
+        reg.set_pass_list(gpu, &passes);
     }
 
     /// Compile (or hot-reload) one `stage post` `.flsl`. Keeps the last good
@@ -1222,7 +1248,12 @@ impl Editor {
             }
         };
         let compile = floptle_core::profile::Span::new();
-        let outcome = compile_post_validated(&src);
+        let outcome = compile_post_validated(&src).and_then(|compiled| {
+            match self.gpu.as_ref().map(|gpu| floptle_render::PostShaders::fits(gpu, compiled.textures.len())) {
+                Some(Err(why)) => Err(why),
+                _ => Ok(compiled),
+            }
+        });
         self.note_asset(rel, "shaderCompile", compile.ms());
         match outcome {
             Ok(compiled) => {
@@ -1230,7 +1261,7 @@ impl Editor {
                     return;
                 };
                 let build = floptle_core::profile::Span::new();
-                let built = builder.build(&post_module_source(&compiled.chunk));
+                let built = builder.build(&post_module_source(&compiled.chunk), compiled.textures.len());
                 self.note_asset(rel, "pipelineCompile", build.ms());
                 self.install_post_flsl(rel, mtime, compiled, built);
             }

@@ -1415,7 +1415,7 @@ post:setShaderParam("inkOutline.thickness", 1 + rage * 2)
 
 ### `node:setShaderParam`
 
-node:setShaderParam("glow", 2.5) / node:setShaderParam("nose", x, y, z) — drive a .flsl uniform on this node every tick (a GPU uniform write, never a recompile). Targets the node's Material shader, its UI element's `stage ui` shader (the navball pattern: a script feeds an instrument's uniforms each tick), the Skybox's sky shader, or — on the Post Processing node — its SCREEN shaders: name one with `"inkOutline.thickness"`, or leave the prefix off to set that knob on every pass. Unset lanes are 0. On a MODEL with per-part material overrides and no node Material it fans out to every part that wears a shader; to reach ONE part, go through its handle: node:material("Head#2"):setShaderParam(...). A write with nothing to land on is said once in the Console rather than lost silently.
+node:setShaderParam("glow", 2.5) / node:setShaderParam("nose", x, y, z) — drive a .flsl uniform on this node every tick (a GPU uniform write, never a recompile). Targets the node's Material shader, its UI element's `stage ui` shader (the navball pattern: a script feeds an instrument's uniforms each tick), the Skybox's sky shader, or — on the Post Processing node — its SCREEN shaders: name one with `"inkOutline.thickness"`, or leave the prefix off to set that knob on every pass. A screen shader's UNIFORM ARRAY (`uniform bodies: vec4[8]`) takes a list instead: node:setShaderParam("waterfx.bodies", { {x, y, z, r}, {x2, y2, z2, r2} }), or a list of numbers for a float[n]; elements left out are 0, and writing it every frame is one buffer write. Unset lanes are 0. On a MODEL with per-part material overrides and no node Material it fans out to every part that wears a shader; to reach ONE part, go through its handle: node:material("Head#2"):setShaderParam(...). A write with nothing to land on is said once in the Console rather than lost silently.
 
 ```lua
 -- a live uniform write: safe every tick, never recompiles
@@ -1424,7 +1424,7 @@ node:setShaderParam("cell", math.floor(time * 8) % 16)
 
 ### `node:setShaderTexture`
 
-node:setShaderTexture(slot, ref) — point one of this node's .flsl shader TEXTURE SLOTS somewhere else, at runtime. `slot` is the name the shader declares (`texture ramp` -> "ramp"); `ref` is a project-relative image path, an `rt:<name>` render target (what another camera sees, live), a picture a script made (an `img:` name from img:texture(), assets.textureFromPixels/Bytes/Url or camera.captureTexture), or "" to clear it. A shader may declare up to 8 slots, so a material can mix a base, a mask, a ramp and a screen — and a script can swap any of them per frame.
+node:setShaderTexture(slot, ref) — point one of this node's .flsl shader TEXTURE SLOTS somewhere else, at runtime. `slot` is the name the shader declares (`texture ramp` -> "ramp"); `ref` is a project-relative image path, an `rt:<name>` render target (what another camera sees, live), a picture a script made (an `img:` name from img:texture(), assets.textureFromPixels/Bytes/Url or camera.captureTexture), or "" to clear it. A shader may declare up to 8 slots, so a material can mix a base, a mask, a ramp and a screen — and a script can swap any of them per frame. On the Post Processing node it reaches a SCREEN shader's slots, named like its knobs: "caustics.pattern", or bare for every pass.
 
 ```lua
 -- swap a shader's texture slot at runtime (a path, or a live render target)

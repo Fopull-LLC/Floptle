@@ -3327,6 +3327,15 @@ impl Raster {
         self.textures.get(id.0 as usize).map(|t| &t.view)
     }
 
+    /// A registered texture as another pass binds it: its view, and a sampler
+    /// with the filter and wrap it was registered with. What a screen shader's
+    /// texture slot is filled from.
+    pub fn texture_binding(&mut self, gpu: &Gpu, id: TexId) -> Option<(wgpu::TextureView, wgpu::Sampler)> {
+        let t = self.textures.get(id.0 as usize)?;
+        let (view, sampling) = (t.view.clone(), t.sampling);
+        Some((view, self.sampler_for(gpu, sampling)))
+    }
+
     /// A registered texture's pixel dimensions.
     ///
     /// The UI pass needs these for the two things that can't be decided without

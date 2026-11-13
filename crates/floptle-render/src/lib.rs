@@ -73,7 +73,7 @@ pub use reflect::{MAX_PROBES, PROBE_FACE, PROBE_H, PROBE_W, ProbeDetail, Reflect
 pub use ssr::{FramePose, SceneHistory};
 pub use palette::{Palette, PaletteQuantize};
 pub use particles::{ParticleBatch, ParticleBlend, ParticleGlobals, ParticleInstance, Particles};
-pub use post::{BuiltPostShader, PostSettings, PostShaderBuilder, PostShaderId, PostShaders, PostStack, SsaoFrame, Tonemap};
+pub use post::{BuiltPostShader, PostPass, PostSettings, PostShaderBuilder, PostShaderId, PostShaders, PostStack, PostTexture, SsaoFrame, Tonemap, POST_TEXTURE_SLOTS};
 pub use ui::{BuiltUiShader, Ui, UiBatch, UiBindingId, UiInstance, UiPlane, UiShaderBuilder, UiShaderId, UiTex};
 pub use raster::{
     ext_index_of, instance_of, instance_of_slots, is_slotted, is_terrain, instance_of_mat, merge_parts, pass_prelude, MAX_SLOTS, SLOT_MARK, raster_custom_source, set_ext_index,

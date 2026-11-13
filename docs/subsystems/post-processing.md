@@ -255,7 +255,7 @@ shader inkOutline {
 }
 ```
 
-Six ops, `screen` category, available **only** in `stage post`:
+Seven ops, `screen` category, available **only** in `stage post`:
 
 | Op | What it gives you |
 |---|---|
@@ -265,6 +265,7 @@ Six ops, `screen` category, available **only** in `stage post`:
 | `sceneRay(uv?)` | the **world-space** direction the camera looks through at that pixel, unit length. Right for perspective and orthographic cameras alike |
 | `cameraPosition()` | where the camera is in the world. 32-bit, so coarse far from the origin: measure heights from a nearby point (a planet's centre), not from zero |
 | `screenTexel()` | one pixel, in uv. Follows the **retro** resolution, so an effect written in texels stays one pixel wide instead of being magnified by the upscale |
+| `sceneWaterDepth()` | how far under the water's surface the **camera** is, in world units; 0 in air. See "An underwater pass of your own" below |
 
 `cameraPosition() + sceneRay() * sceneDepth()` is the world point a pixel
 shows, so a screen pass can paint a sky by direction, fog by height, or a grid on
@@ -275,6 +276,91 @@ The optional `uv` is the whole point. Defaulting to this pixel makes a colour
 grade a one-liner; passing another pixel's is what makes an edge detect, a blur
 and a warp expressible at all — and no varying could offer that, which is why
 these are ops and not inputs.
+
+### Textures and lists
+
+A screen shader declares **texture slots** exactly as a material shader does,
+up to eight, and reads them with `sample(slot, uv)` and
+`sampleTriplanar(slot, p, n)`:
+
+```
+shader caustics {
+  stage post
+  texture pattern = "textures/caustic.png"
+  uniform strength: float = 0.4
+
+  let world = cameraPosition() + sceneRay() * sceneDepth()
+  output color = sceneColor().rgb * (1 + sample(pattern, world.xz * 0.25 + time * 0.03).r * strength)
+}
+```
+
+The image after `=` is the slot's default. The pass on the PostProcess node can
+point the slot elsewhere (the Inspector lists each slot under the pass's knobs;
+in a scene file it is `textures: {"pattern": "textures/other.png"}`), and so can
+a script: `post:setShaderTexture("caustics.pattern", "textures/other.png")`,
+with `""` to go back to the shader's own. A slot with no image reads white. An
+`rt:` render target or a picture a script made works as it does on a material.
+A slot is sampled with the filter and wrap its image was imported with; there
+is no per-slot tiling block as a Material has, so scale the coordinate in the
+shader (`sampleTriplanar` tiles once per world unit).
+
+A **uniform array** is a list a script fills, for a pass that treats several
+of something: bodies of water, lights, impact points.
+
+```
+shader waterfx {
+  stage post
+  uniform bodies: vec4[8]          // xyz = centre, w = radius, from the script
+  let d0 = length(cameraPosition() - bodies[0].xyz) - bodies[0].w
+  let d1 = length(cameraPosition() - bodies[1].xyz) - bodies[1].w
+  output color = mix(sceneColor().rgb, vec3(0.0, 0.2, 0.3), step(min(d0, d1), 0))
+}
+```
+
+```lua
+post:setShaderParam("waterfx.bodies", { {x, y, z, r}, {x2, y2, z2, r2} })
+```
+
+- The element type is `float`, `vec2`, `vec3` or `vec4`; the length is 1 to 64,
+  and a shader's arrays hold at most 256 elements between them.
+- `name[i]` reads one element. `i` is any number: a literal, or something the
+  shader worked out (a lookup by distance or by time). It is rounded down and
+  held inside the array, so an index off the end reads the last element rather
+  than something else's memory. FLSL has no loops, so a pass over eight bodies
+  is eight reads.
+- Every element starts at zero and has no Inspector row. A script passes a
+  list of numbers for a `float[n]`, or a list of `{x, y, z, w}` lists; lanes
+  and elements it leaves out are zero. Writing it every frame is one uniform
+  buffer write; nothing is rebuilt.
+- Arrays are for screen shaders only. A surface shader takes per-object data
+  through its uniforms and `vertexColor`.
+
+### An underwater pass of your own
+
+A Water Volume paints the engine's own underwater look while the camera is
+inside it: the scene's fog is replaced by the volume's tint and visibility.
+A game that draws its own (absorption by distance, a waterline, caustics on
+the bed) switches that off on the node, **underwater look** in the Inspector,
+`underwater: false` in a scene file, and keeps everything else the volume
+does: buoyancy, drag, `water.at`. Water a script declares with
+`water.addVolume` has no look unless it asks for one, as before.
+
+`sceneWaterDepth()` is then the pass's switch: metres from the camera up to
+the surface of the deepest water it is in, 0 in air and 0 in a sealed cave
+below the waterline. It counts every Water Volume and all declared water,
+look or no look, so the pass needs no uniform to know it is under:
+
+```
+shader underwater {
+  stage post
+  uniform murk: color = #0A3A4AFF
+  let under = step(0.001, sceneWaterDepth())
+  let fog = 1 - exp(-min(sceneDepth(), 400) * 0.08)
+  output color = mix(sceneColor().rgb, murk.rgb, fog * under)
+}
+```
+
+Scenes saved before the switch existed load with the look on.
 
 **Where they run:** after depth of field and the denoise, **before** the colour
 grade, the lens and the grain. Each part is a decision. After DoF, because focus
@@ -295,7 +381,11 @@ Three bind groups, all built from `post::layouts` so an authored pass and a
 built-in one cannot drift: group(0) is the chain's own `{ frame, sampler, params }`
 (which is why a custom pass ping-pongs between the chain's scratch targets with
 no bind group of its own), group(1) is the depth buffer plus the inverse
-projection, the camera's turn and its world position, group(2) is the shader's uniforms. The WGSL contract lives in
+projection, the camera's turn and its world position, group(2) is the shader's uniforms
+followed by a texture and a sampler of its own for each slot it declares (one
+sampler a texture, never shared: the OpenGL backend pairs each image with exactly
+one). `PostShaders` holds one group(2) layout per slot count, and a pass's bind
+group is rebuilt only when the image in one of its slots changes. The WGSL contract lives in
 `floptle-shader/src/post_prelude.wgsl` — and unlike `TEST_PRELUDE` it is the
 **real** module text, not a mirror, so there is nothing to keep in step.
 
@@ -359,8 +449,9 @@ dithered and undithered).
 
 ## Not yet
 
-- A screen shader cannot declare texture slots yet: the frame, its depth and its
-  normals are bound, and nothing else. A ramp LUT is the obvious next one.
+- The frame from *before* the water and glass were drawn, for a screen pass
+  that refracts. A surface shader has it today (`sceneColor` in `stage
+  fragment`); a screen pass sees the finished frame only.
 - Bilateral (depth-aware) AO upsample. (Fog and CRT effects are no longer a
   gap: they are screen shaders — see the section above, and `crtScanlines.flsl`.)
 - **Auto-exposure.** The pipeline can carry it now (the scene is scene-referred

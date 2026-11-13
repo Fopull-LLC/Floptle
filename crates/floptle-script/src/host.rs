@@ -252,6 +252,15 @@ thread_local! {
     pub(crate) static FLUSHED_TRANSFORMS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// A screen shader's name as a script writes it: the file name without its
+/// extension, lower-cased (`"shaders/WaterFx.flsl"` is `"waterfx"`).
+fn screen_shader_stem(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
 /// `node:setShaderParam` on a model that has per-part overrides and no node
 /// Material: the uniform goes to every part that wears a shader.
 /// `false` when no part does — the caller says so.
@@ -3088,6 +3097,7 @@ impl ScriptHost {
             carry: Rc::new(RefCell::new(HashMap::new())),
             sprite_draws: Rc::new(RefCell::new(HashMap::new())),
             shader_param_sets: Rc::new(RefCell::new(Vec::new())),
+            shader_array_sets: Rc::new(RefCell::new(Vec::new())),
             shader_texture_sets: Rc::new(RefCell::new(Vec::new())),
             screen_shader_toggles: Rc::new(RefCell::new(Vec::new())),
             envs: Rc::new(RefCell::new(HashMap::new())),
@@ -3529,6 +3539,7 @@ impl ScriptHost {
             sprite_draws: shared.sprite_draws.clone(),
             sprites_written: None,
             shader_param_sets: shared.shader_param_sets.clone(),
+            shader_array_sets: shared.shader_array_sets.clone(),
             shader_texture_sets: shared.shader_texture_sets.clone(),
             screen_shader_toggles: shared.screen_shader_toggles.clone(),
             colliders,
@@ -7649,6 +7660,33 @@ impl ScriptHost {
                     );
                 }
             }
+            // `node:setShaderParam(name, { … })`: a whole uniform array, onto
+            // the screen shaders that declare one. Named like a single knob:
+            // `"waterfx.bodies"` for one pass, `"bodies"` for every pass.
+            let array_sets: Vec<_> = self.shader_array_sets.borrow_mut().drain(..).collect();
+            for (eid, name, values) in array_sets {
+                let Some(&ent) = scene.ents.get(&eid) else { continue };
+                if let Some(Matter::PostProcess { screen_shaders, .. }) = world.get_mut::<Matter>(ent) {
+                    let (want, knob) = match name.split_once('.') {
+                        Some((pass, knob)) => (Some(pass.to_ascii_lowercase()), knob),
+                        None => (None, name.as_str()),
+                    };
+                    for pass in screen_shaders.iter_mut() {
+                        if want.as_ref().is_none_or(|w| *w == screen_shader_stem(&pass.shader)) {
+                            // The list a script writes every frame is the
+                            // same length every frame: reuse its storage.
+                            let slot = pass.arrays.entry(knob.to_string()).or_default();
+                            slot.clear();
+                            slot.extend_from_slice(&values);
+                        }
+                    }
+                } else {
+                    shader_nowhere(
+                        &mut self.shader_warned, &self.logs, &scene.names,
+                        eid, "", &name, "is not a Post Processing node, and only a screen shader has uniform arrays",
+                    );
+                }
+            }
             // `node:setShaderTexture(slot, ref)`: point one of the shader's
             // declared texture slots somewhere else, this frame.
             //
@@ -7687,6 +7725,25 @@ impl ScriptHost {
                             &mut self.shader_warned, &self.logs, &scene.names,
                             eid, &part, &slot, "has no material override",
                         ),
+                    }
+                    continue;
+                }
+                // A Post Processing node: the slot of a screen shader, named
+                // as its knobs are (`"waterfx.pattern"`, or bare for every
+                // pass).
+                if let Some(Matter::PostProcess { screen_shaders, .. }) = world.get_mut::<Matter>(ent) {
+                    let (want, knob) = match slot.split_once('.') {
+                        Some((pass, knob)) => (Some(pass.to_ascii_lowercase()), knob),
+                        None => (None, slot.as_str()),
+                    };
+                    for pass in screen_shaders.iter_mut() {
+                        if want.as_ref().is_none_or(|w| *w == screen_shader_stem(&pass.shader)) {
+                            if path.is_empty() {
+                                pass.textures.remove(knob);
+                            } else {
+                                pass.textures.insert(knob.to_string(), path.clone());
+                            }
+                        }
                     }
                     continue;
                 }

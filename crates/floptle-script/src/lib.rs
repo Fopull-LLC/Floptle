@@ -46,6 +46,9 @@ use mlua::{Lua, RegistryKey, Table};
 /// `Some(part)` for one part's override under `ObjectMaterials`
 /// (`node:material("Head#2"):setShaderParam(...)`).
 type ShaderParamSets = Rc<RefCell<Vec<(u32, Option<String>, String, [f32; 4])>>>;
+/// Queued `node:setShaderParam(name, { … })` writes of a whole uniform array:
+/// (entity index, array name, its elements in order).
+type ShaderArraySets = Rc<RefCell<Vec<(u32, String, Vec<[f32; 4]>)>>>;
 /// `node:setShaderTexture(slot, path)` writes, queued per frame: (entity, which
 /// material, slot name, texture ref). The ref is a project-relative image path,
 /// an `rt:` render target, or the empty string to clear the slot.
@@ -741,6 +744,8 @@ pub struct ScriptHost {
     /// name, vec4 lanes), drained by the editor into the node's Material or UI
     /// ElementSpec `shader_params` (the per-frame shader drivers then upload).
     shader_param_sets: ShaderParamSets,
+    /// `node:setShaderParam(name, { … })` writes of a uniform array.
+    shader_array_sets: ShaderArraySets,
     /// See [`ShaderTextureSets`]. Separate from the uniform queue because a
     /// texture write is a rebind, not a buffer write — the two cost different
     /// things and the driver treats them differently.
@@ -2589,6 +2594,8 @@ struct Shared {
     sprite_draws: Rc<RefCell<HashMap<u32, Vec<floptle_core::Sprite>>>>,
     /// `node:setShaderParam(...)` writes, drained by the editor per frame.
     shader_param_sets: ShaderParamSets,
+    /// `node:setShaderParam(name, { … })` writes of a uniform array.
+    shader_array_sets: ShaderArraySets,
     /// See [`ShaderTextureSets`]. Separate from the uniform queue because a
     /// texture write is a rebind, not a buffer write — the two cost different
     /// things and the driver treats them differently.

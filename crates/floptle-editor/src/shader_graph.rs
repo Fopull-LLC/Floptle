@@ -2596,7 +2596,7 @@ fn node_color(ui: &egui::Ui, n: &GNode) -> Color32 {
             "screen" => Color32::from_rgb(120, 200, 235),
             _ => ui.visuals().weak_text_color(),
         },
-        NodeKind::VecCtor(_) | NodeKind::Binary(_) | NodeKind::Neg | NodeKind::Swizzle(_) => {
+        NodeKind::VecCtor(_) | NodeKind::Binary(_) | NodeKind::Neg | NodeKind::Swizzle(_) | NodeKind::Index(_) => {
             Color32::from_rgb(120, 140, 190)
         }
         NodeKind::Constant(_) => Color32::from_rgb(150, 150, 160),

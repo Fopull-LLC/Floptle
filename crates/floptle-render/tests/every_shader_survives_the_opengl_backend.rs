@@ -53,7 +53,27 @@ fn modules() -> Vec<(&'static str, String)> {
         // An authored post shader, assembled exactly as the editor builds it:
         // the prelude declares the depth binding every post effect reads.
         ("post prelude + inkOutline.flsl", authored_post_module()),
+        // A screen shader with texture slots and a uniform array: every slot
+        // has its own sampler, which is the pairing GLSL insists on.
+        ("post prelude + a textured screen shader", textured_post_module()),
     ]
+}
+
+fn textured_post_module() -> String {
+    let compiled = floptle_shader::compile_post(
+        "shader caustics {\n  stage post\n  texture pattern\n  texture flow\n  uniform bodies: vec4[8]\n  \
+         let world = cameraPosition() + sceneRay() * sceneDepth()\n  \
+         let c = sample(pattern, uv + sample(flow, uv).xy) + sampleTriplanar(pattern, world, vec3(0, 1, 0))\n  \
+         output color = sceneColor().rgb + c.rgb * bodies[3].w * sceneWaterDepth()\n}\n",
+    )
+    .expect("a textured screen shader compiles");
+    format!(
+        "{}\n{}\n{}\n{}",
+        floptle_shader::transpile::POST_PRELUDE,
+        floptle_shader::transpile::POST_FIELD_SHIM,
+        floptle_shader::stdlib::SUPPORT_WGSL,
+        compiled.chunk
+    )
 }
 
 fn authored_post_module() -> String {

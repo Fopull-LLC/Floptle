@@ -1827,6 +1827,11 @@ pub enum Matter {
         /// particles all go murky together instead of one of them staying
         /// crisp.
         visibility: f32,
+        /// Paint that tint and visibility while the camera is inside. Off
+        /// keeps everything else the water does (buoyancy, drag, `water.at`,
+        /// `sceneWaterDepth` in a screen shader) and leaves the view alone,
+        /// for a game that draws its own underwater look.
+        underwater: bool,
     },
     /// An authored SDF shape: its Material's `.flsl`
     /// shader is the geometry, raymarched as part of the scene field (up to 4
@@ -2334,12 +2339,26 @@ pub struct ScreenShader {
     /// no longer declares is ignored, not an error: renaming a uniform must not
     /// fail to load a scene.
     pub params: std::collections::BTreeMap<String, [f32; 4]>,
+    /// The shader's uniform arrays (`uniform bodies: vec4[8]`), by name: the
+    /// elements in order, a float or a short vector in the first lanes of
+    /// each. An array with no entry here is all zeros.
+    pub arrays: std::collections::BTreeMap<String, Vec<[f32; 4]>>,
+    /// Images for the shader's texture slots, by slot name: a
+    /// project-relative path or an `rt:` render target. A slot with no entry
+    /// shows the image the shader itself declares (`texture ramp = "…"`).
+    pub textures: std::collections::BTreeMap<String, String>,
 }
 
 impl ScreenShader {
     /// A freshly added pass: on, and using the shader's own defaults.
     pub fn new(shader: impl Into<String>) -> Self {
-        Self { shader: shader.into(), enabled: true, params: Default::default() }
+        Self {
+            shader: shader.into(),
+            enabled: true,
+            params: Default::default(),
+            arrays: Default::default(),
+            textures: Default::default(),
+        }
     }
 }
 
@@ -2559,6 +2578,7 @@ impl Matter {
             frozen: false,
             tint: [0.10, 0.32, 0.38],
             visibility: 28.0,
+            underwater: true,
         }
     }
 

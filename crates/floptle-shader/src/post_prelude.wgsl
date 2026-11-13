@@ -33,7 +33,7 @@ struct PostChainParams {
 struct PostCam {
     inv_proj: mat4x4<f32>, // clip → view
     inv_view: mat4x4<f32>, // view → world, rotation only (the world is camera-relative)
-    spare: mat4x4<f32>,
+    spare: mat4x4<f32>,    // [0].x = how far under water the camera is (0 in air)
     eye: vec4<f32>,        // xyz = the camera's world position
 };
 @group(1) @binding(1) var<uniform> pc: PostCam;
@@ -148,4 +148,10 @@ fn flsl_post_ray(uv: vec2<f32>) -> vec3<f32> {
 // Where the camera is in the world.
 fn flsl_post_camera() -> vec3<f32> {
     return pc.eye.xyz;
+}
+
+// How far under the nearest water surface the camera is, in world units; 0 in
+// air (and in a sealed cave below the waterline).
+fn flsl_post_water_depth() -> f32 {
+    return pc.spare[0].x;
 }

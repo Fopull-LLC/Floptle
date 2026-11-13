@@ -281,6 +281,7 @@ impl Rig {
             fog: [0.0; 4],
             inv_view: glam::Mat4::IDENTITY.to_cols_array_2d(),
             eye: [0.0; 3],
+            water_depth: 0.0,
         };
         self.post.run(gpu, s, Some(&ssao), &self.out_view);
         read_rgb(gpu, &self.out)

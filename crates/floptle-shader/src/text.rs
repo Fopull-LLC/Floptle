@@ -26,6 +26,7 @@ use std::collections::BTreeMap;
 
 use crate::ir::{
     BinOp, Blend, CallArg, ExprId, ExprKind, Input, ShaderIr, Span, Stage, Ty, Uniform,
+    UniformArray,
 };
 use crate::stdlib;
 
@@ -92,7 +93,7 @@ fn lex(src: &str) -> Result<Vec<Token>, ParseError> {
                     i += 1;
                 }
             }
-            '{' | '}' | '(' | ')' | ',' | ':' | '=' | '.' | '+' | '-' | '*' | '/' => {
+            '{' | '}' | '(' | ')' | '[' | ']' | ',' | ':' | '=' | '.' | '+' | '-' | '*' | '/' => {
                 out.push(Token { tok: Tok::Punct(c), span: Span { start, end: start + 1 } });
                 i += 1;
             }
@@ -379,6 +380,30 @@ impl Parser<'_> {
                 ));
             }
         };
+        // `vec4[8]`: a list a script fills. It has no default and no range,
+        // because it has no Inspector row to show either in.
+        if self.eat_punct('[') {
+            let span = self.span();
+            let n = self.const_number()?;
+            self.expect_punct(']')?;
+            if is_color {
+                return Err(ParseError::new("an array holds float, vec2, vec3 or vec4 (not color)", tspan));
+            }
+            if n.fract() != 0.0 || n < 1.0 || n > crate::ir::MAX_ARRAY_LEN as f64 {
+                return Err(ParseError::new(
+                    format!("an array holds 1 to {} elements", crate::ir::MAX_ARRAY_LEN),
+                    span,
+                ));
+            }
+            if matches!(self.peek(), Some(Tok::Punct('='))) {
+                return Err(ParseError::new(
+                    "a uniform array has no default: every element starts at zero and a script fills it",
+                    self.span(),
+                ));
+            }
+            self.ir.arrays.push(UniformArray { name, ty, len: n as u32 });
+            return Ok(());
+        }
         let mut default = [0.0f32; 4];
         if is_color {
             default = [1.0, 1.0, 1.0, 1.0];
@@ -510,6 +535,7 @@ impl Parser<'_> {
     fn check_fresh_name(&self, name: &str, span: Span) -> Result<(), ParseError> {
         let taken = Input::by_name(name).is_some()
             || self.ir.uniforms.iter().any(|u| u.name == name)
+            || self.ir.arrays.iter().any(|a| a.name == name)
             || self.ir.textures.iter().any(|t| t == name)
             || self.ir.lets.iter().any(|(n, _)| n == name);
         if taken {
@@ -612,6 +638,18 @@ impl Parser<'_> {
                 if let Some(u) = self.ir.uniforms.iter().position(|u| u.name == name) {
                     return Ok(self.ir.push(ExprKind::Uniform(u), span));
                 }
+                if let Some(a) = self.ir.arrays.iter().position(|a| a.name == name) {
+                    if !self.eat_punct('[') {
+                        return Err(ParseError::new(
+                            format!("`{name}` is an array: read one element, `{name}[0]`"),
+                            span,
+                        ));
+                    }
+                    let i = self.expr(0)?;
+                    self.expect_punct(']')?;
+                    let end = self.toks.get(self.pos - 1).map(|t| t.span.end).unwrap_or(span.end);
+                    return Ok(self.ir.push(ExprKind::Index(a, i), Span { start: span.start, end }));
+                }
                 if let Some(t) = self.ir.textures.iter().position(|t| *t == name) {
                     return Ok(self.ir.push(ExprKind::Texture(t), span));
                 }
@@ -658,6 +696,9 @@ pub fn print(ir: &ShaderIr) -> String {
             s.push_str(&format!(" range({}, {})", lo, hi));
         }
         s.push('\n');
+    }
+    for a in &ir.arrays {
+        s.push_str(&format!("  uniform {}: {}[{}]\n", a.name, a.ty.flsl(), a.len));
     }
     for t in &ir.textures {
         match ir.texture_defaults.get(t) {
@@ -723,6 +764,7 @@ fn print_expr(ir: &ShaderIr, id: ExprId, parent_prec: u8) -> String {
         ExprKind::Uniform(u) => ir.uniforms[*u].name.clone(),
         ExprKind::Texture(t) => ir.textures[*t].clone(),
         ExprKind::Let(l) => ir.lets[*l].0.clone(),
+        ExprKind::Index(a, i) => format!("{}[{}]", ir.arrays[*a].name, print_expr(ir, *i, 0)),
         ExprKind::Call { op, args } => {
             let parts: Vec<String> = args
                 .iter()

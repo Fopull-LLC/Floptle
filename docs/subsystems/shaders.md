@@ -32,7 +32,7 @@
 >
 > **`stage post` is live** (v0.44): full-screen passes over the finished frame,
 > carried as an ORDERED LIST on the PostProcess node rather than as one slot, so
-> a project stacks its own looks instead of choosing from a fixed menu. Its four
+> a project stacks its own looks instead of choosing from a fixed menu. Its
 > `screen`-category ops — `sceneColor` / `sceneDepth` / `sceneNormal` /
 > `sceneRay` / `screenTexel` — each take an OPTIONAL uv, and that optionality is the design:
 > the default makes a colour grade a one-liner, and passing another pixel's uv
@@ -225,7 +225,10 @@ Start small (the ADR-0007 subset), grow over time. Categories, with examples:
   see [`./materials-and-textures.md`](./materials-and-textures.md).
 - **Screen** (`stage post` only) — `sceneColor`, `sceneDepth`, `sceneNormal`,
   `sceneRay`, `cameraPosition`, `screenTexel`: the finished frame, readable at any pixel rather than only this
-  one. See [`./post-processing.md`](./post-processing.md).
+  one, and `sceneWaterDepth`, how far under water the camera is. A screen
+  shader also declares texture slots (`sample`, `sampleTriplanar`) and
+  **uniform arrays**, `uniform bodies: vec4[8]` read as `bodies[i]`, which a
+  script fills in one call. See [`./post-processing.md`](./post-processing.md).
 - **The mesh and the sky** (`stage fragment`) — `vertexColor` is the colour
   each vertex carries (`mesh.build`'s `colors`, a glTF's COLOR_0, vertex paint;
   white where a mesh has none), so data a game bakes into a mesh, such as a

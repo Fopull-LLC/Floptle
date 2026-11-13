@@ -221,18 +221,20 @@ pub(crate) fn render_frame_texture(
     }
     let gpu = ed.gpu.as_ref()?;
     let proj = cam.proj_matrix(aspect);
-    let ssao = floptle_render::SsaoFrame {
-        depth: &depth_view,
-        proj: proj.to_cols_array_2d(),
-        inv_proj: proj.inverse().to_cols_array_2d(),
-        fog: crate::shading::ao_fog(
+    let (fog, water_depth) = crate::shading::ao_fog_and_water_depth(
             &ed.world,
             &ed.script_host.declared_water(),
             &crate::shading::roofed_by(ed.sim.as_ref()),
             cam.world_position,
-        ),
+        );
+    let ssao = floptle_render::SsaoFrame {
+        depth: &depth_view,
+        proj: proj.to_cols_array_2d(),
+        inv_proj: proj.inverse().to_cols_array_2d(),
+        fog,
         inv_view: cam.view_matrix().inverse().to_cols_array_2d(),
         eye: cam.world_position.as_vec3().to_array(),
+        water_depth,
     };
     // Where the chain lands: the retro target when there is one, the picture
     // itself otherwise. (`out` is the file; this is the texture.)

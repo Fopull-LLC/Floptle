@@ -1086,18 +1086,20 @@ impl Editor {
                 }
                 {
                     let proj = cam.proj_matrix(aspect);
-                    let ssao_frame = floptle_render::SsaoFrame {
-                        depth: if lowres { retro.depth_view() } else { gpu.depth_view() },
-                        proj: proj.to_cols_array_2d(),
-                        inv_proj: proj.inverse().to_cols_array_2d(),
-                        fog: crate::shading::ao_fog(
+                    let (fog, water_depth) = crate::shading::ao_fog_and_water_depth(
                     &self.world,
                     &self.script_host.declared_water(),
                     &crate::shading::roofed_by(self.sim.as_ref()),
                     cam.world_position,
-                ),
+                );
+                    let ssao_frame = floptle_render::SsaoFrame {
+                        depth: if lowres { retro.depth_view() } else { gpu.depth_view() },
+                        proj: proj.to_cols_array_2d(),
+                        inv_proj: proj.inverse().to_cols_array_2d(),
+                        fog,
                         inv_view: cam.view_matrix().inverse().to_cols_array_2d(),
                         eye: cam.world_position.as_vec3().to_array(),
+                        water_depth,
                     };
                     // In retro mode the chain writes the retro colour target and
                     // the nearest-neighbour blit carries the finished picture up;

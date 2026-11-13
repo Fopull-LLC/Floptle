@@ -73,6 +73,9 @@ const FSKY: &[Stage] = &[Stage::Fragment, Stage::Sky, Stage::Ui, Stage::Post];
 // Fragment + Ui: texture sampling (a UI element's own image is bound like a
 // material texture, so the same ops read it).
 const FRAGUI: &[Stage] = &[Stage::Fragment, Stage::Ui];
+// Fragment + Post: a declared texture slot, read by a surface or by a screen
+// pass (a caustic pattern, a flow map, a lookup).
+const FRAGPOSTTEX: &[Stage] = &[Stage::Fragment, Stage::Post];
 // Ui only: the backdrop (scene behind the UI layer) exists only in the UI pass.
 const UIONLY: &[Stage] = &[Stage::Ui];
 // Post only: the finished frame, its depth and the normals reconstructed from
@@ -168,8 +171,8 @@ pub static OPS: &[OpSpec] = &[
     OpSpec { name: "palette", inputs: &[req("t", F), req("name", SigTy::Str)], output: V3, stages: FSKY, emit: Emit::Special, doc: "A looping color ramp: \"sunset\", \"bruise\", \"neon\", \"ocean\", \"ember\", \"mono\".", category: "color" },
 
     // ---- texture -----------------------------------------------------------
-    OpSpec { name: "sample", inputs: &[req("tex", SigTy::Texture), req("uv", V2)], output: V4, stages: FRAG, emit: Emit::Special, doc: "Sample a declared texture slot (honors the slot's tiling block from the material).", category: "texture" },
-    OpSpec { name: "sampleTriplanar", inputs: &[req("tex", SigTy::Texture), req("p", V3), req("n", V3)], output: V4, stages: FRAG, emit: Emit::Special, doc: "Project a slot's texture from three axes, blended by the normal — clean tiling with no UVs (scale/blend come from the slot's tiling block).", category: "texture" },
+    OpSpec { name: "sample", inputs: &[req("tex", SigTy::Texture), req("uv", V2)], output: V4, stages: FRAGPOSTTEX, emit: Emit::Special, doc: "Sample a declared texture slot (honors the slot's tiling block from the material).", category: "texture" },
+    OpSpec { name: "sampleTriplanar", inputs: &[req("tex", SigTy::Texture), req("p", V3), req("n", V3)], output: V4, stages: FRAGPOSTTEX, emit: Emit::Special, doc: "Project a slot's texture from three axes, blended by the normal — clean tiling with no UVs (scale/blend come from the slot's tiling block).", category: "texture" },
     OpSpec { name: "baseTexture", inputs: &[opt("uv", V2, f64::NAN)], output: V4, stages: FRAGUI, emit: Emit::Special, doc: "In a material: the node's own base-color texture through its tiling. In a UI shader: the element's own image (pass a uv, or omit for the element's 0..1 rect UV).", category: "texture" },
     OpSpec { name: "backdrop", inputs: &[opt("uv", V2, f64::NAN)], output: V4, stages: UIONLY, emit: Emit::Special, doc: "UI only: the (blurred) scene BEHIND this UI layer — frosted glass / refraction. Sample at `uv` (0..1 across the screen for this element's pixel) or omit for this pixel's screen position; offset the uv to refract.", category: "texture" },
 
@@ -207,6 +210,7 @@ pub static OPS: &[OpSpec] = &[
     OpSpec { name: "sceneNormal", inputs: &[opt("uv", V2, f64::NAN)], output: V3, stages: POSTONLY, emit: Emit::Special, doc: "Which way the surface faces, in view space (+z toward the camera) — worked out from depth, so every kind of geometry has one.", category: "screen" },
     OpSpec { name: "sceneRay", inputs: &[opt("uv", V2, f64::NAN)], output: V3, stages: POSTONLY, emit: Emit::Special, doc: "The world-space direction the camera looks through at this pixel, unit length. With cameraPosition and sceneDepth it places a pixel in the world: a sky or atmosphere pass, height fog, a world-space grid.", category: "screen" },
     OpSpec { name: "cameraPosition", inputs: &[], output: V3, stages: POSTONLY, emit: Emit::Fn("flsl_post_camera"), doc: "Where the camera is in the world. Far from the origin this is coarse (it is 32-bit); measure heights from a nearby point, not from zero.", category: "screen" },
+    OpSpec { name: "sceneWaterDepth", inputs: &[], output: F, stages: POSTONLY, emit: Emit::Fn("flsl_post_water_depth"), doc: "How far under the water's surface the camera is, in world units; 0 in air. It reads every Water Volume and all water a script declared, whether or not that water draws the engine's own underwater look, so an underwater pass needs no uniform to know it is under.", category: "screen" },
     OpSpec { name: "screenTexel", inputs: &[], output: V2, stages: POSTONLY, emit: Emit::Fn("flsl_post_texel"), doc: "The size of one pixel in uv. Step by this to reach a neighbour — and it follows the retro resolution, so an effect stays one pixel wide.", category: "screen" },
 ];
 

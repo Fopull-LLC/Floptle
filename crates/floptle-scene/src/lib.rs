@@ -1344,6 +1344,10 @@ pub enum MatterDoc {
         tint: [f32; 3],
         #[serde(default = "default_water_visibility")]
         visibility: f32,
+        /// The engine's own underwater look. On when the field is absent:
+        /// every scene saved before there was a choice had it.
+        #[serde(default = "on", skip_serializing_if = "is_on")]
+        underwater: bool,
     },
     /// An authored SDF shape — its Material's sdf-stage `.flsl` is the geometry.
     FieldShape {
@@ -1882,11 +1886,25 @@ pub struct ScreenShaderDoc {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub params: std::collections::BTreeMap<String, [f32; 4]>,
+    /// Uniform arrays by name. Usually a script's to fill, and saved only
+    /// when the scene holds some.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub arrays: std::collections::BTreeMap<String, Vec<[f32; 4]>>,
+    /// Texture slot images by slot name, where the pass overrides the
+    /// shader's own.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub textures: std::collections::BTreeMap<String, String>,
 }
 
 impl From<&ScreenShader> for ScreenShaderDoc {
     fn from(s: &ScreenShader) -> Self {
-        Self { shader: s.shader.clone(), enabled: s.enabled, params: s.params.clone() }
+        Self {
+            shader: s.shader.clone(),
+            enabled: s.enabled,
+            params: s.params.clone(),
+            arrays: s.arrays.clone(),
+            textures: s.textures.clone(),
+        }
     }
 }
 
@@ -1896,6 +1914,8 @@ impl ScreenShaderDoc {
             shader: self.shader.clone(),
             enabled: self.enabled,
             params: self.params.clone(),
+            arrays: self.arrays.clone(),
+            textures: self.textures.clone(),
         }
     }
 }
@@ -1931,6 +1951,9 @@ impl From<AoMode> for AoModeDoc {
 
 fn on() -> bool {
     true
+}
+fn is_on(v: &bool) -> bool {
+    *v
 }
 fn default_ao_strength() -> f32 {
     0.7
@@ -2269,6 +2292,7 @@ impl From<&Matter> for MatterDoc {
                 frozen,
                 tint,
                 visibility,
+                underwater,
             } => MatterDoc::WaterVolume {
                 pool: *kind == floptle_core::WaterKind::Pool,
                 radius: *radius,
@@ -2279,6 +2303,7 @@ impl From<&Matter> for MatterDoc {
                 frozen: *frozen,
                 tint: *tint,
                 visibility: *visibility,
+                underwater: *underwater,
             },
             Matter::LightProbes {
                 half_extents,
@@ -2548,6 +2573,7 @@ impl MatterDoc {
                 frozen,
                 tint,
                 visibility,
+                underwater,
             } => Matter::WaterVolume {
                 kind: if *pool {
                     floptle_core::WaterKind::Pool
@@ -2562,6 +2588,7 @@ impl MatterDoc {
                 frozen: *frozen,
                 tint: *tint,
                 visibility: *visibility,
+                underwater: *underwater,
             },
             MatterDoc::LightProbes {
                 half_extents,
@@ -7064,11 +7091,20 @@ mod tests {
                     params: [("thickness".to_string(), [2.0, 0.0, 0.0, 0.0])]
                         .into_iter()
                         .collect(),
+                    // A list a scene saved and a slot it re-pointed.
+                    arrays: [("bodies".to_string(), vec![[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])]
+                        .into_iter()
+                        .collect(),
+                    textures: [("pattern".to_string(), "textures/caustic.png".to_string())]
+                        .into_iter()
+                        .collect(),
                 },
                 floptle_core::ScreenShader {
                     shader: "shaders/examples/crtScanlines.flsl".into(),
                     enabled: false,
                     params: Default::default(),
+                    arrays: Default::default(),
+                    textures: Default::default(),
                 },
             ],
         };
@@ -7082,6 +7118,48 @@ mod tests {
             world2.query::<Matter>().filter(|(_, m)| matches!(m, Matter::PostProcess { .. })).collect();
         assert_eq!(posts.len(), 1, "self-heal must not duplicate an authored PostProcess node");
         assert_eq!(*posts[0].1, authored);
+    }
+
+    /// **A Water Volume saved before it had an `underwater` switch keeps its
+    /// look.** The field is absent from every older scene, so absent reads as
+    /// on; a volume left on writes nothing, so an older engine still opens
+    /// the file; and off comes back off.
+    #[test]
+    fn a_water_volume_keeps_its_underwater_look_unless_told_otherwise() {
+        const OLD: &str = r#"(
+    name: "sea",
+    nodes: [
+        (
+            name: "Sea",
+            transform: (translation: (0, 0, 0), rotation: (0, 0, 0, 1), scale: (1, 1, 1)),
+            matter: WaterVolume(radius: 40, tint: (0.1, 0.2, 0.3), visibility: 12),
+        ),
+    ],
+)"#;
+        let look = |world: &World| {
+            world
+                .query::<Matter>()
+                .find_map(|(_, m)| match m {
+                    Matter::WaterVolume { underwater, .. } => Some(*underwater),
+                    _ => None,
+                })
+                .expect("the sea")
+        };
+        let mut world = World::new();
+        spawn_into(&from_ron(OLD).expect("an older scene loads"), &mut world);
+        assert!(look(&world), "an older scene's water lost its underwater look");
+        let text = to_ron(&to_doc("sea", &world)).unwrap();
+        assert!(!text.contains("underwater"), "a default water volume wrote the new field:\n{text}");
+
+        let sea = world.query::<Matter>().find(|(_, m)| matches!(m, Matter::WaterVolume { .. })).map(|(e, _)| e).unwrap();
+        if let Some(Matter::WaterVolume { underwater, .. }) = world.get_mut::<Matter>(sea) {
+            *underwater = false;
+        }
+        let text = to_ron(&to_doc("sea", &world)).unwrap();
+        assert!(text.contains("underwater: false"), "{text}");
+        let mut again = World::new();
+        spawn_into(&from_ron(&text).unwrap(), &mut again);
+        assert!(!look(&again), "a look switched off came back on");
     }
 
     #[test]
