@@ -109,11 +109,17 @@ pub fn clean_leftovers() {
 /// most likely to run one. `.cargo-lock` sits in every profile directory cargo writes,
 /// and it is there whatever the tree is called.
 fn in_a_cargo_target_dir(exe: &Path) -> bool {
-    let Some(dir) = exe.parent() else { return false };
-    // `<target>/<profile>/exe`, and `<target>/<profile>/deps/exe` for a test binary.
-    dir.join(".cargo-lock").exists()
-        || dir.parent().is_some_and(|p| p.join(".cargo-lock").exists())
+    // `<target>/<profile>/exe`; `<target>/<profile>/deps/exe` for a test binary
+    // up to Rust 1.99; and `<target>/<profile>/build/<pkg>/<hash>/out/exe` from
+    // 1.100, whose build-directory layout moved test binaries four levels below
+    // the lock. Bounded, so an install that merely sits somewhere under an old
+    // cargo tree is not mistaken for cargo's own binary.
+    exe.ancestors().skip(1).take(CARGO_LOCK_DEPTH).any(|d| d.join(".cargo-lock").exists())
 }
+
+/// How many directories above a binary `in_a_cargo_target_dir` looks for
+/// cargo's lock: `out`, `<hash>`, `<pkg>`, `build`, then the profile itself.
+const CARGO_LOCK_DEPTH: usize = 5;
 
 fn old_path(exe: &Path) -> PathBuf {
     let mut name = exe.file_name().unwrap_or_default().to_os_string();
@@ -354,6 +360,17 @@ mod tests {
         let deps = odd.join("deps");
         std::fs::create_dir_all(&deps).unwrap();
         assert!(in_a_cargo_target_dir(&deps.join("floptle-hub-abc123")));
+        // …and four levels down, where Rust 1.100's build-directory layout puts
+        // a test binary (`build/<pkg>/<hash>/out/`). CI moved to it on the day
+        // it shipped and this guard read "not a dev build" again.
+        let out = odd.join("build/floptle-hub/f11a44796889ad72/out");
+        std::fs::create_dir_all(&out).unwrap();
+        assert!(in_a_cargo_target_dir(&out.join("floptle_hub-f11a44796889ad72")));
+        // An install merely somewhere under an old cargo tree, deeper than any
+        // layout cargo uses, is still not cargo's.
+        let deep = odd.join("a/b/c/d/e/f");
+        std::fs::create_dir_all(&deep).unwrap();
+        assert!(!in_a_cargo_target_dir(&deep.join("floptle-hub")));
     }
 
 }
