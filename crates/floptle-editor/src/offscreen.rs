@@ -1336,6 +1336,7 @@ impl Editor {
                 vol_fog_b,
                 vol_fog_c,
                 vol_fog_d: crate::shading::fog_strengths(&light_node),
+                vol_fog_e: [if light_node.fog_normalize { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                 contact,
                 ssr,
                 ssr_prev_vp,

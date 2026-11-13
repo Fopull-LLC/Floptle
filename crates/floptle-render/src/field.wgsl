@@ -198,6 +198,8 @@ struct Globals {
     // fog colour (0 = none). A lamp's own share is `point_color[i].w`, the
     // same way round.
     vol_fog_d: vec4<f32>,
+    // x = 1: the fog colour is the look, not the albedo (`fog_normalize`).
+    vol_fog_e: vec4<f32>,
 };
 
 // One terrain palette slot, as the slot store holds it (`terrain_slots`,
@@ -1244,13 +1246,38 @@ fn fog_emitter(shape: vec4<f32>, to: vec3<f32>) -> FogEmitter {
 // The ceiling scales all three channels together, so a white-out comes down
 // to the fog's own hue rather than to grey.
 fn fog_light_in(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>, gain: f32) -> vec3<f32> {
-    let lit = fog_inscatter(p, rd, amb, pix) * gain;
+    var lit = fog_inscatter(p, rd, amb, pix) * gain;
+    if (G.vol_fog_e.x > 0.5) {
+        // The colour is the look: divide by how strong the light reaching the
+        // air is on average over every direction (the phase averages 1, so it
+        // is the unshadowed sun or stars plus the ambient), never by less
+        // than 1, so dim light still reads dim.
+        lit = lit / max(fog_light_level(p, amb), 1.0);
+    }
     let ceiling = G.vol_fog_d.w;
     let top = max(max(lit.r, lit.g), lit.b);
     if (ceiling > 0.0 && top > ceiling) {
         return lit * (ceiling / top);
     }
     return lit;
+}
+
+// The luminance of the light reaching the media at `p`, averaged over every
+// direction it could scatter toward the eye: the ambient and the sun (or each
+// star), unshadowed, at the strengths `vol_fog_d` gives them. Lamps are local
+// and left out. `fog_light_in` divides by it when the fog colour is the look.
+fn fog_light_level(p: vec3<f32>, amb: vec3<f32>) -> f32 {
+    let sun_k = 1.0 - G.vol_fog_d.x;
+    var l = amb * (1.0 - G.vol_fog_d.z);
+    let ns = u32(G.star_meta.x);
+    if (ns == 0u) {
+        l += G.light_color.rgb * sun_k;
+    } else {
+        for (var i = 0u; i < min(ns, 4u); i++) {
+            l += star_col_at(i, p) * sun_k;
+        }
+    }
+    return dot(max(l, vec3<f32>(0.0)), vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
 fn fog_inscatter(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {

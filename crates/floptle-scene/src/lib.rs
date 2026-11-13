@@ -2915,6 +2915,10 @@ pub struct LightDoc {
     pub fog_ambient: f32,
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub fog_clamp: f32,
+    /// `Light::fog_normalize`: the fog colour is the look, not the albedo.
+    /// Off, and not written, by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fog_normalize: bool,
     #[serde(default = "default_fog_steps")]
     pub fog_steps: u32,
     #[serde(default = "true_bool")]
@@ -3090,6 +3094,7 @@ impl From<&Light> for LightDoc {
             fog_lamps: l.fog_lamps,
             fog_ambient: l.fog_ambient,
             fog_clamp: l.fog_clamp,
+            fog_normalize: l.fog_normalize,
             fog_steps: l.fog_steps,
             fog_shafts: l.fog_shafts,
             fog_shafts_map: l.fog_shafts_map,
@@ -3155,6 +3160,7 @@ impl LightDoc {
             fog_lamps: self.fog_lamps.max(0.0),
             fog_ambient: self.fog_ambient.max(0.0),
             fog_clamp: self.fog_clamp.max(0.0),
+            fog_normalize: self.fog_normalize,
             fog_steps: self.fog_steps.clamp(2, 64),
             fog_shafts: self.fog_shafts,
             fog_shafts_map: self.fog_shafts_map,
@@ -6911,6 +6917,7 @@ mod tests {
             fog_lamps: 2.0,
             fog_ambient: 0.0,
             fog_clamp: 1.5,
+            fog_normalize: true,
             ..Light::default()
         };
         let ron = ron::ser::to_string(&LightDoc::from(&authored)).expect("serializes");
@@ -6926,10 +6933,11 @@ mod tests {
         .expect("an old Lighting block still loads");
         let l = old.to_light();
         assert_eq!((l.fog_sun, l.fog_lamps, l.fog_ambient, l.fog_clamp), (1.0, 1.0, 1.0, 0.0));
+        assert!(!l.fog_normalize, "an old scene keeps the colour as albedo");
         // …and at its defaults writes none of them, so scenes do not all grow
         // four lines the day this shipped.
         let plain = ron::ser::to_string(&LightDoc::from(&Light::default())).expect("serializes");
-        for f in ["fog_sun", "fog_lamps", "fog_ambient", "fog_clamp"] {
+        for f in ["fog_sun", "fog_lamps", "fog_ambient", "fog_clamp", "fog_normalize"] {
             assert!(!plain.contains(f), "{f} is written at its default: {plain}");
         }
     }

@@ -1421,6 +1421,16 @@ pub struct Light {
     /// times the fog colour; this is what keeps it from washing out to white.
     /// 0 is no ceiling (as before).
     pub fog_clamp: f32,
+    /// Volumetric only — read `fog_color` as the fog's LOOK rather than its
+    /// albedo. Lit fog multiplies its colour by the light reaching it, so a
+    /// colour picked by eye to match a daytime horizon comes out several
+    /// times brighter under an HDR sun. With this on, the scattered light is
+    /// divided by how strong the sun (or stars) and ambient light are (never
+    /// by less than 1): in daylight the fog averages the colour you chose and
+    /// still brightens toward the sun and darkens in shadow, and at dusk or
+    /// night, where that light is under 1, it darkens as before. Off is as
+    /// before.
+    pub fog_normalize: bool,
     /// Steps the per-pixel fog march takes (quality against cost).
     pub fog_steps: u32,
     /// March the sun shadow at every fog step. This is what turns lit fog into
@@ -1514,6 +1524,7 @@ impl Default for Light {
             fog_lamps: 1.0,
             fog_ambient: 1.0,
             fog_clamp: 0.0,
+            fog_normalize: false,
             fog_steps: 16,
             fog_shafts: true,
             fog_shafts_map: false,

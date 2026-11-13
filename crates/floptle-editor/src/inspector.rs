@@ -5161,6 +5161,15 @@ impl EditorTabViewer<'_> {
                                 ui.weak("(none)");
                             }
                         });
+                        cmd.inspector_changed |= crate::responsive::check(ui, &mut l.fog_normalize, "colour is the look")
+                            .on_hover_text(
+                                "read the fog colour as how the fog should LOOK, not what it is made of. Lit fog multiplies \
+                                 its colour by the light reaching it, so a colour picked to match a daytime horizon comes out \
+                                 several times brighter under a bright sun. On, the scattered light is divided by how strong \
+                                 the sun and ambient are (never by less than 1): by day the fog averages your colour and still \
+                                 brightens toward the sun; at dusk and night it darkens as before.",
+                            )
+                            .changed();
                         cmd.inspector_changed |= crate::responsive::check(ui, &mut l.fog_shafts, "shafts (shadows in the fog)")
                             .on_hover_text(
                                 "march the sun shadow at every fog step, so shadowed air stays dark and beams appear through \

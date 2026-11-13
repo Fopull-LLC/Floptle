@@ -292,6 +292,11 @@ pub struct RaymarchGlobals {
     /// colour (0 = none). Each lamp's own share rides `point_color[i].w`, the
     /// same way round. Appended at the end.
     pub vol_fog_d: [f32; 4],
+    /// x = 1 when the fog colour is the fog's look rather than its albedo
+    /// (`fog_normalize`): the scattered light is divided by the strength of
+    /// the sun or stars and the ambient, never by less than 1. 0 is as
+    /// before. Appended at the end.
+    pub vol_fog_e: [f32; 4],
 }
 
 impl RaymarchGlobals {
@@ -399,6 +404,7 @@ impl Default for RaymarchGlobals {
             fog_froxel: [0.0; 4],
             fog_range: [0.0; 4],
             vol_fog_d: [0.0; 4],
+            vol_fog_e: [0.0; 4],
             probe_pos: [[0.0; 4]; crate::reflect::MAX_PROBES],
             probe_half: [[1.0; 4]; crate::reflect::MAX_PROBES],
         }

@@ -51,6 +51,7 @@ fn main() {
     a_lamp_glows_where_it_stands(&gpu, &rm, &dir);
     each_light_has_its_own_strength(&gpu, &rm);
     the_ceiling_holds_the_glow_and_keeps_its_hue(&gpu, &rm, &dir);
+    the_colour_can_be_the_look(&gpu, &rm);
 
     println!("fog probe OK");
 }
@@ -386,6 +387,48 @@ fn the_ceiling_holds_the_glow_and_keeps_its_hue(gpu: &Gpu, rm: &Raymarch, dir: &
     );
 }
 
+// ---------------------------------------------------------------------------
+// 8. The fog colour can be the look rather than the albedo.
+//
+// With isotropic scattering the injected light IS the sun's colour, so a
+// white sun of strength 3, normalised, must land exactly on the unlit fog
+// (check 1's closed form) where the plain lit fog is far brighter. A light
+// under 1 is divided by 1: the picture must not move. And forward scattering
+// must still brighten the air toward the sun by the same ratio as before.
+// ---------------------------------------------------------------------------
+fn the_colour_can_be_the_look(gpu: &Gpu, rm: &Raymarch) {
+    let sun = Vec3::new(0.0, 0.0, -1.0);
+    let f = |light, g, amount, normalize, sun| Frame { sun, light, fog: (amount, g, false), normalize, ..Frame::default() };
+    let flat = centre(&render(gpu, rm, f([3.0; 3], 0.0, 0.0, false, sun), "norm-flat"));
+    let lit = centre(&render(gpu, rm, f([3.0; 3], 0.0, 1.0, false, sun), "norm-lit"));
+    let look = centre(&render(gpu, rm, f([3.0; 3], 0.0, 1.0, true, sun), "norm-look"));
+    println!("strength-3 sun, isotropic: unlit {flat:.3?}  lit {lit:.3?}  colour-is-the-look {look:.3?}");
+    assert!(lit[1] > flat[1] * 1.5, "the control must be brighter than the colour — {:.3} vs {:.3}", lit[1], flat[1]);
+    for c in 0..3 {
+        assert!(
+            (look[c] - flat[c]).abs() < 0.01,
+            "normalised under an isotropic white sun, the fog must BE its colour — {look:.3?} vs {flat:.3?}"
+        );
+    }
+    let dim_off = centre(&render(gpu, rm, f([0.5; 3], 0.0, 1.0, false, sun), "norm-dim-off"));
+    let dim_on = centre(&render(gpu, rm, f([0.5; 3], 0.0, 1.0, true, sun), "norm-dim-on"));
+    println!("strength-0.5 sun: plain {dim_off:.3?}  colour-is-the-look {dim_on:.3?}");
+    assert!(
+        (dim_on[1] - dim_off[1]).abs() < 0.004,
+        "a light under 1 must not be brightened — {:.4} vs {:.4}",
+        dim_on[1],
+        dim_off[1]
+    );
+    let ratio = |normalize| {
+        let toward = centre(&render(gpu, rm, f([3.0; 3], 0.5, 1.0, normalize, sun), "norm-toward"))[1];
+        let away = centre(&render(gpu, rm, f([3.0; 3], 0.5, 1.0, normalize, -sun), "norm-away"))[1];
+        (toward, away)
+    };
+    let (t1, a1) = ratio(true);
+    println!("forward scatter, colour-is-the-look: toward {t1:.3}  away {a1:.3}");
+    assert!(t1 > a1 * 1.5, "normalised fog must still brighten toward the sun — {t1:.3} vs {a1:.3}");
+}
+
 /// Henyey-Greenstein, normalised so isotropic reads 1 — the same convention the
 /// shader uses, and written out here so the two are independent statements of it.
 fn hg(cos_t: f32, g: f32) -> f32 {
@@ -410,6 +453,8 @@ struct Frame {
     strengths: [f32; 4],
     /// The lamp's `point_color.w`: one minus its own fog share.
     lamp_fog: f32,
+    /// `fog_normalize`: the fog colour is the look, not the albedo.
+    normalize: bool,
 }
 
 impl Default for Frame {
@@ -424,6 +469,7 @@ impl Default for Frame {
             lamp: None,
             strengths: [0.0; 4],
             lamp_fog: 0.0,
+            normalize: false,
         }
     }
 }
@@ -487,6 +533,7 @@ fn render(gpu: &Gpu, rm: &Raymarch, f: Frame, label: &str) -> Vec<[u8; 4]> {
         vol_fog_b: [24.0, 0.0, 0.0, 1.0],
         vol_fog_c: [amount, g, f.steps, if shafts { 1.0 } else { 0.0 }],
         vol_fog_d: f.strengths,
+        vol_fog_e: [if f.normalize { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         ..Default::default()
     };
 

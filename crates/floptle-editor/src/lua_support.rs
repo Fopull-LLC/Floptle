@@ -265,6 +265,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field fogSun number Volumetric: how strongly the sun/stars scatter in the fog, on top of fogLight (1 = as before).
 ---@field fogLamps number Volumetric: how strongly the placeable lamps scatter in the fog, on top of fogLight (1 = as before).
 ---@field fogAmbient number Volumetric: how much of the ambient and baked bounce lights the fog (1 = as before).
+---@field fogNormalize boolean Volumetric: the fog colour is its look, not its albedo (scattered light divided by the sun+ambient strength, never by less than 1).
 ---@field fogClamp number Volumetric: ceiling on the fog's scattered light, brightest channel, in multiples of the fog colour (0 = none).
 ---@field fogSteps number Volumetric: samples along each pixel's fog ray (2..64).
 ---@field fogShafts number Volumetric (1/0): march the sun shadow per fog step — the beams, and the cost.

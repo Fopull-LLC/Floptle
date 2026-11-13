@@ -187,6 +187,15 @@ The Lighting node, under **fog → volumetric**:
   together, so the hue survives. Forward-scattering fog looking into a bright sun
   can reach many times the fog colour and wash out to white; this stops it. 0 is
   no ceiling.
+- **colour is the look** (`fogNormalize`) — lit fog multiplies its colour by the
+  light reaching it, so a colour picked by eye to match a daytime horizon comes
+  out several times brighter under an HDR sun. On, the scattered light is divided
+  by the luminance of the sun (or stars) and ambient reaching the air, averaged
+  over every direction (the phase function averages 1, so that is the unshadowed
+  light), and never by less than 1. By day the fog averages the colour you chose
+  and still brightens toward the sun and darkens in shadow; at dusk and night,
+  where that light is under 1, it darkens as before. Lamps are divided by the
+  same amount, so they matter less in daylight fog, as they should.
 - Each lamp also has **lights the fog** (`fog` on its `PointLight`), its own share
   of the air, 1 by default. 0 lights the room but leaves the air around the lamp
   dark.
@@ -196,7 +205,7 @@ The Lighting node, under **fog → volumetric**:
 
 From Lua, on the Lighting node's `Light` component: `fogLight`,
 `fogAnisotropy`, `fogSteps`, `fogShafts`, `fogSun`, `fogLamps`, `fogAmbient`,
-`fogClamp` (and `fog` on each lamp's `PointLight`), alongside the existing `fogDensity`,
+`fogClamp`, `fogNormalize` (and `fog` on each lamp's `PointLight`), alongside the existing `fogDensity`,
 `fogHeight`, `fogFalloff`, `fogNoise`, `fogNoiseScale`.
 
 ## Verified by
