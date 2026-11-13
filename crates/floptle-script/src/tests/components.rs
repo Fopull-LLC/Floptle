@@ -649,6 +649,53 @@ fn audio_play_queues_and_handle_controls() {
     assert!(host.take_audio_commands().is_empty(), "drained");
 }
 
+/// **A sound joins a voice group, and a script caps the group.** `group`
+/// and `priority` reach the play parameters, `audio.limit` reaches the
+/// engine (nil lifts the cap), and `audio.groupCount` reads the count the
+/// mixer published. A sound that names no group carries none.
+#[test]
+fn voice_group_options_and_limits_reach_the_engine() {
+    let dir = std::env::temp_dir().join("floptle_script_test_voice_groups");
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "splash",
+        "function start(node)\n\
+         \x20 audio.limit('water', 8)\n\
+         \x20 audio.limit('steps', nil)\n\
+         \x20 audio.play('audio/splash.ogg', 1, 2, 3, { group = 'water', priority = 3 })\n\
+         \x20 audio.play('audio/ding.ogg')\n\
+         \x20 node.x = audio.groupCount('water')\n\
+         \x20 node.y = audio.groupCount('nope')\n\
+         \x20 local ok, e = pcall(audio.limit, 'water', -1)\n\
+         \x20 print(tostring(ok) .. ' ' .. tostring(e))\n\
+         \x20 local ok2, e2 = pcall(audio.play, 'audio/a.ogg', { group = 4 })\n\
+         \x20 print(tostring(ok2) .. ' ' .. tostring(e2))\n\
+         end\n",
+    );
+    let (mut world, e) = world_with_script("splash");
+    let mut host = ScriptHost::new();
+    host.set_audio_info(AudioInfo { groups: vec![("water".into(), 5)], ..Default::default() });
+    host.run(&mut world, &dir, 0.1, 0.1);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let said = host.drain_logs().into_iter().map(|l| l.msg).collect::<Vec<_>>().join("\n");
+    assert!(said.contains("false") && said.contains("maxVoices is 0 or more"), "{said}");
+    assert!(said.contains("`group` takes a group name"), "{said}");
+
+    let cmds = host.take_audio_commands();
+    assert!(
+        matches!(&cmds[0], AudioCmd::GroupLimit { group, max: Some(8) } if group == "water"),
+        "{cmds:?}"
+    );
+    assert!(matches!(&cmds[1], AudioCmd::GroupLimit { group, max: None } if group == "steps"), "{cmds:?}");
+    let AudioCmd::Play { params, .. } = &cmds[2] else { panic!("{cmds:?}") };
+    assert_eq!((params.group.as_str(), params.priority), ("water", 3));
+    let AudioCmd::Play { params: plain, .. } = &cmds[3] else { panic!("{cmds:?}") };
+    assert_eq!((plain.group.as_str(), plain.priority), ("", 0), "a sound that names no group");
+    let tr = world.get::<Transform>(e).unwrap().translation;
+    assert_eq!((tr.x, tr.y), (5.0, 0.0), "audio.groupCount reads the mixer's count");
+}
+
 #[test]
 fn node_sound_handle_and_component_mirror() {
     let dir = std::env::temp_dir().join("floptle_script_test_audio_src");

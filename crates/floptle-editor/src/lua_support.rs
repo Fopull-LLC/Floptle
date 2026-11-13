@@ -479,12 +479,16 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field loop boolean? Shorthand for endBehavior = \"Loop\".
 ---@field sends table<string, number>? Taps into other mixer tracks beside its own, track = level (a reverb bus heard partly).
 ---@field lowpass number? Muffle this sound alone above that many Hz (behind a wall); 0 = off.
+---@field group string? The voice group it counts against (see `audio.limit`).
+---@field priority integer? Which sound gives way when its group is full: the lowest goes first (default 0).
 
 ---The sound system: fire-and-forget playback + mixer control. Positions and
 ---following make it spatial; pass no position for flat 2D (UI, music).
 ---@class audio
 ---@field play fun(clip: string, a?: Node|number, b?: number|AudioPlayOpts, c?: number, opts?: AudioPlayOpts): SoundHandle Play a clip: `audio.play(\"audio/ding.ogg\")` (flat) · `audio.play(\"audio/hit.ogg\", x, y, z, opts)` (at a point) · `audio.play(\"audio/engine.ogg\", carNode, {loop=true})` (follows the node).
 ---@field stopAll fun() Stop every playing sound (sources and one-shots).
+---@field limit fun(group: string, maxVoices: integer?) Cap how many sounds a voice group plays at once; nil lifts the cap. At the cap a new sound replaces the lowest-priority voice, then the quietest at the listener, or is dropped if it ranks below them all.
+---@field groupCount fun(group: string): integer How many voices a voice group is playing, as the mixer last counted them.
 ---@field track fun(name: string): AudioTrackHandle? A mixer track handle (\"Master\" or a track name from the Mixer tab); nil when the mixer has no such track.
 ---@field tracks fun(): AudioTrackInfo[] Every mixer track, Master first, as this play session has it.
 audio = {}

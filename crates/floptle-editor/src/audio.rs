@@ -757,6 +757,11 @@ impl AudioSystem {
                     let v = hz.max(0.0) as f32;
                     mixer_dirty |= self.edit_track(&track, |t| t.lowpass = v, |e| e.lowpass = Some(v));
                 }
+                AudioCmd::GroupLimit { group, max } => {
+                    if let Some(eng) = self.engine() {
+                        eng.set_group_limit(&group, max.map(|n| n as usize));
+                    }
+                }
                 AudioCmd::TrackBypass { track, slot, on } => {
                     mixer_dirty |= self.edit_track(
                         &track,
@@ -838,6 +843,7 @@ impl AudioSystem {
         let sources: Vec<(u32, VoiceId)> =
             self.source_voices.iter().map(|(e, v)| (e.index(), *v)).collect();
         if let Some(eng) = self.engine() {
+            info.groups = eng.group_counts();
             for (h, v) in sounds {
                 if let Some(st) = eng.status(v) {
                     info.sounds.insert(
@@ -992,6 +998,60 @@ mod tests {
         ed.toggle_play();
         assert_eq!(music(&ed), Some(-6.0), "a new session starts from the project mixer");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An `AudioSystem` on an engine that is mixed by hand: the function
+    /// renders that many frames, as the output callback would.
+    fn offline(decode: crate::audio_clips::Decoder) -> (AudioSystem, impl FnMut(usize)) {
+        let (engine, mut render) = AudioEngine::offline(48_000);
+        let a = AudioSystem {
+            engine: Some(engine),
+            clips: ClipCache::with_decoder(decode, IDLE_BUDGET_BYTES),
+            ..Default::default()
+        };
+        (a, move |frames: usize| render(&mut vec![0.0f32; frames * 2]))
+    }
+
+    fn play_with(handle: u32, clip: &str, params: PlayParams) -> AudioCmd {
+        AudioCmd::Play { handle, clip: clip.into(), at: AudioAt::Flat, params: Box::new(params) }
+    }
+
+    /// **`audio.limit` caps a group in the real mixer, and the count comes
+    /// back.** Three looping sounds in a group capped at two, through the
+    /// command queue and the engine's own channel: the lowest-priority one
+    /// is replaced and its handle ends, `audio.groupCount` reads two, and a
+    /// sound outside the group is left alone.
+    #[test]
+    fn a_group_limit_reaches_the_mixer_and_the_count_comes_back() {
+        let root = project("groups", &["splash.ogg"]);
+        let world = World::default();
+        let (mut a, mut render) = offline(fixed(48_000));
+        let grouped = |priority: i32| PlayParams {
+            group: "water".into(),
+            priority,
+            end: EndBehavior::Loop,
+            ..Default::default()
+        };
+        // Decode the clip first, so the three plays reach the mixer in order.
+        a.apply_script_commands(&world, &root, vec![play(9, "audio/splash.ogg")]);
+        until_live(&mut a, &world, &root, 9);
+        a.apply_script_commands(
+            &world,
+            &root,
+            vec![
+                AudioCmd::GroupLimit { group: "water".into(), max: Some(2) },
+                play_with(1, "audio/splash.ogg", grouped(5)),
+                play_with(2, "audio/splash.ogg", grouped(1)),
+                play_with(3, "audio/splash.ogg", grouped(3)),
+            ],
+        );
+        render(4800);
+        a.advance(&world, &root, Listener::default());
+        let info = a.script_info();
+        assert_eq!(info.groups, vec![("water".to_string(), 2)], "what audio.groupCount reads");
+        assert!(info.sounds.contains_key(&1) && info.sounds.contains_key(&3), "the two that outrank it play on");
+        assert!(!info.sounds.contains_key(&2), "the lowest-priority sound was not replaced");
+        assert!(info.sounds.contains_key(&9), "a sound outside the group was touched");
     }
 
     /// A playlist polls `isPlaying()` to know when a track has ended. A track

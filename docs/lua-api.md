@@ -45,7 +45,7 @@ each group, and meant to be searched.
 - [components — getcomponent](#components--getcomponent) — 125
 - [animation — node:animator](#animation--nodeanimator) — 33
 - [particles — effects from script](#particles--effects-from-script) — 16
-- [audio — sounds & the mixer](#audio--sounds--the-mixer) — 36
+- [audio — sounds & the mixer](#audio--sounds--the-mixer) — 38
 - [assets](#assets) — 19
 - [debug gizmos](#debug-gizmos) — 5
 - [lua stdlib](#lua-stdlib) — 43
@@ -4662,9 +4662,17 @@ spawnEffect(key, pos [, opts]) or spawnEffect(key, x, y, z [, vx, vy, vz]) — f
 
 Sounds and the mixer: audio.play for one-shots, audio.track for a mixer bus, node:sound() for a node's Audio Source.
 
+### `audio.groupCount`
+
+audio.groupCount(group) → how many voices that voice group is playing (paused ones count, ones fading out do not), as the mixer last counted them: a sound asked for this frame shows up a frame or so later. 0 for a group nothing has played in, and on a host with no audio output.
+
+### `audio.limit`
+
+audio.limit(group, maxVoices) — cap how many sounds a voice group plays at once; nil lifts the cap. A sound joins a group with audio.play's `group` option. At the cap, a new sound takes the place of the group's lowest-`priority` voice, then the quietest one at the listener (volume times distance falloff), then the oldest; that voice fades out in a few milliseconds and ends as if stopped. A new sound ranking below every voice in the group is dropped instead: its handle reads as finished. Lowering a cap below what is playing fades the extras out. The choice is made in the mixer, so it costs the game no per-frame bookkeeping. Holds until Play stops. e.g. audio.limit("splash", 8)
+
 ### `audio.play`
 
-audio.play(clip [, node | x, y, z] [, opts]) — play a clip with no setup: audio.play("audio/ding.ogg") is flat 2D; pass x,y,z for a world point; pass a node to follow it. Local to this machine: in a session, play it from state that replicates, or a sound the server's code plays is heard by nobody. opts: {volume, pitch, pan, mode="Spatial|Distance|Flat", falloff="Inverse|Linear|Exponential", minDistance, maxDistance, track, endBehavior="Stop|Destroy|Loop", loop=true, sends={["Verb Large"]=0.4}, lowpass=hz}. sends taps the sound into other mixer tracks beside its own, at those levels, after its volume and distance (a reverb bus heard partly); lowpass muffles it alone (a sound behind a wall), 0 = off. Returns a sound handle: :stop/:pause/:resume/:setVolume/:setPitch/:setPan/:setTrack/:setSend/:setLowpass/:setPosition/:seek/:isPlaying/:isLoading/:position. A clip's first play reads the file in the background, so the sound starts a frame or more after the call (a long music file takes longest); audio.preload removes the wait. e.g. audio.play("audio/hit.ogg", h.x, h.y, h.z, { maxDistance = 35, track = "SFX" })
+audio.play(clip [, node | x, y, z] [, opts]) — play a clip with no setup: audio.play("audio/ding.ogg") is flat 2D; pass x,y,z for a world point; pass a node to follow it. Local to this machine: in a session, play it from state that replicates, or a sound the server's code plays is heard by nobody. opts: {volume, pitch, pan, mode="Spatial|Distance|Flat", falloff="Inverse|Linear|Exponential", minDistance, maxDistance, track, endBehavior="Stop|Destroy|Loop", loop=true, sends={["Verb Large"]=0.4}, lowpass=hz, group="water", priority=n}. sends taps the sound into other mixer tracks beside its own, at those levels, after its volume and distance (a reverb bus heard partly); lowpass muffles it alone (a sound behind a wall), 0 = off; group counts it against that voice group's audio.limit, and priority (default 0, higher matters more) decides which sound gives way when the group is full. Returns a sound handle: :stop/:pause/:resume/:setVolume/:setPitch/:setPan/:setTrack/:setSend/:setLowpass/:setPosition/:seek/:isPlaying/:isLoading/:position. A clip's first play reads the file in the background, so the sound starts a frame or more after the call (a long music file takes longest); audio.preload removes the wait. e.g. audio.play("audio/hit.ogg", h.x, h.y, h.z, { maxDistance = 35, track = "SFX" })
 
 ```lua
 audio.play("audio/footstep", node, { track = "SFX", volume = 0.6, minDistance = 4 })

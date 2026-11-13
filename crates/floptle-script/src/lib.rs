@@ -1746,6 +1746,8 @@ pub enum AudioCmd {
     TrackLowpass { track: String, hz: f64 },
     /// `track:setBypass(slot, on)` — `slot` counts the chain from 0 here.
     TrackBypass { track: String, slot: usize, on: bool },
+    /// `audio.limit(group, maxVoices)` — `None` lifts the group's cap.
+    GroupLimit { group: String, max: Option<u32> },
 }
 
 /// Live playback state of one sound / source, mirrored for script reads.
@@ -1772,6 +1774,9 @@ pub struct AudioInfo {
     /// build with no audio device), and then `audio.track` hands out a handle
     /// for any name rather than claiming the track is missing.
     pub mixer: bool,
+    /// Voices playing per voice group, as the mixer last counted them —
+    /// `audio.groupCount`.
+    pub groups: Vec<(String, u32)>,
 }
 
 /// One mixer track as a script reads it.

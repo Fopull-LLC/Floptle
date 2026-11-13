@@ -144,10 +144,21 @@ pub struct PlayParams {
     /// A low-pass on this sound alone, in Hz: a voice behind a wall. 0 = off.
     #[serde(skip_serializing_if = "is_zero")]
     pub lowpass: f32,
+    /// The voice group this sound counts against, for a per-group voice
+    /// limit ([`crate::voice::AudioCore::set_group_limit`]). Empty = none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub group: String,
+    /// Which sound gives way when its group is full: the lowest goes first.
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    pub priority: i32,
 }
 
 fn is_zero(x: &f32) -> bool {
     *x == 0.0
+}
+
+fn is_zero_i32(x: &i32) -> bool {
+    *x == 0
 }
 
 /// One wet tap: how much of a sound also goes into another track.
@@ -182,6 +193,8 @@ impl Default for PlayParams {
             end: EndBehavior::Stop,
             sends: Vec::new(),
             lowpass: 0.0,
+            group: String::new(),
+            priority: 0,
         }
     }
 }

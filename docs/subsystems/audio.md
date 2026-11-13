@@ -100,6 +100,37 @@ not have; `setLowpass` is a bus low-pass after the effect chain, the
 `TrackDesc::lowpass` field), `audio.tracks()` to read the mixer, tunables via
 `getcomponent("AudioSource")`. See scripting.md §11.
 
+## Voice groups
+
+`PlayParams::group` + `priority`, capped per group with
+`AudioCore::set_group_limit` (`audio.limit` in Lua). The cap is enforced on
+the audio thread, in `AudioCore::start`, where the true voice list lives: a
+control-side count would lag the mixer by a callback and could not see a
+voice that had just ended.
+
+- A group is named on the control side: `AudioEngine` keeps the names and
+  sends each one to the audio thread once (`Cmd::Group`), ahead of the first
+  sound or limit that uses it, so the string is moved in, never copied there.
+  The core's group list is allocated at `MAX_GROUPS` (64) up front; a voice
+  carries its group as a `u16`. A new sound finds its group by name among at
+  most 64; counting the group and picking the voice to give way is then one
+  pass over at most 256 voices comparing integers, with one `spatialize` per
+  candidate. No allocation, no lock. A group past the 64th
+  plays ungrouped.
+- Rank: lowest `priority`, then the quietest at the listener (`volume ×
+  distance gain`, the same number the voice is mixed at), then the oldest.
+  The newcomer is ranked with the rest: one that ranks below every voice in
+  the group is dropped (it reports finished at once) rather than replacing a
+  louder sound.
+- A replaced voice gets `stopping = true`, the ordinary declick fade. It
+  stops counting against its group at once and is reaped a few milliseconds
+  later.
+- Per-group counts are published with the other status as a plain `u32`
+  per group, by index (`try_lock`, into a buffer allocated at `MAX_GROUPS`);
+  the engine puts the names back on, and scripts read it as
+  `audio.groupCount`.
+- Limits live in the core and are cleared by `reset` (Play stopped).
+
 ## Real-time rules (keep these)
 
 - The callback never locks/allocates on the steady path. Status publishing

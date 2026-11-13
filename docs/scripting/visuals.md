@@ -230,6 +230,37 @@ goes first. A dropped clip is read again the next time it plays.
 `endBehavior = "Destroy"` on a node-following sound despawns that node when
 the sound finishes — spawn a node, hang a sound on it, and it cleans itself up.
 
+### Voice groups: a budget for sounds that come in crowds
+
+Splashes, impacts and footsteps are fired by physics, and physics does not
+count. Give those sounds a **group** and the group a **limit**, and the mixer
+keeps the ones that matter:
+
+```lua
+audio.limit("splash", 8)                     -- once, e.g. in start()
+
+audio.play("audio/splash.ogg", x, y, z, {
+  group = "splash",
+  priority = big and 2 or 0,                 -- default 0; higher matters more
+})
+```
+
+When the group is full, a new sound takes the place of the voice that ranks
+lowest: the lowest `priority`, then the quietest at the listener (its volume
+times its distance falloff), then the oldest. That voice fades out over a few
+milliseconds, exactly as `s:stop()` would. A new sound that ranks below every
+voice the group is playing is dropped instead, and its handle reads as
+finished.
+
+`audio.limit(group, nil)` lifts the cap, and lowering one below what is
+playing fades the extras out. `audio.groupCount("splash")` is how many voices
+the group is playing, as the mixer last counted them (a sound asked for this
+frame shows up a frame or so later). A limit holds until Play stops. A play
+session can name up to 64 groups; a sound in a group past that plays
+ungrouped. Sounds
+with no group are never counted and never replaced, so a game that names no
+groups plays exactly as before.
+
 ### The Audio Source component
 
 For authored emitters (ambient loops, music zones, alarm props), add an

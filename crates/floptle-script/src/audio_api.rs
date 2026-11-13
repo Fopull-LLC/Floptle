@@ -25,7 +25,7 @@ pub(crate) struct AudioBridges {
 /// Every key an `audio.play` options table reads. Anything else is refused.
 pub(crate) const PLAY_KEYS: &[&str] = &[
     "volume", "pitch", "pan", "minDistance", "maxDistance", "mode", "falloff", "track",
-    "endBehavior", "loop", "sends", "lowpass",
+    "endBehavior", "loop", "sends", "lowpass", "group", "priority",
 ];
 
 /// Read a play-options table into `PlayParams`, refusing anything it does not
@@ -88,6 +88,19 @@ fn parse_params(opts: Option<&Table>) -> mlua::Result<PlayParams> {
     }
     if let Some(v) = num("lowpass") {
         p.lowpass = v.max(0.0) as f32;
+    }
+    match t.raw_get::<Value>("group")? {
+        Value::Nil => {}
+        Value::String(s) => p.group = s.to_str()?.to_string(),
+        v => {
+            return Err(mlua::Error::runtime(format!(
+                "{CALL}: `group` takes a group name (a string), got {}",
+                v.type_name()
+            )));
+        }
+    }
+    if let Some(v) = num("priority") {
+        p.priority = v.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
     }
     Ok(p)
 }
@@ -442,6 +455,40 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
                     out.raw_set(i + 1, track_table(lua, t)?)?;
                 }
                 Ok(out)
+            })?,
+        )?;
+    }
+    {
+        // audio.limit(group, maxVoices) — cap how many voices a group plays
+        // at once; nil lifts the cap.
+        let cmds = b.commands.clone();
+        audio.set(
+            "limit",
+            lua.create_function(move |_, (group, max): (String, Option<f64>)| {
+                if group.is_empty() {
+                    return Err(mlua::Error::runtime("audio.limit(group, maxVoices): the group name is empty"));
+                }
+                let max = match max {
+                    None => None,
+                    Some(n) if n.is_finite() && n >= 0.0 => Some(n.round().min(u32::MAX as f64) as u32),
+                    Some(n) => {
+                        return Err(mlua::Error::runtime(format!(
+                            "audio.limit(group, maxVoices): maxVoices is 0 or more, or nil for no limit; got {n}"
+                        )));
+                    }
+                };
+                cmds.borrow_mut().push(AudioCmd::GroupLimit { group, max });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // audio.groupCount(group) → how many voices the group is playing.
+        let inf = b.info.clone();
+        audio.set(
+            "groupCount",
+            lua.create_function(move |_, group: String| {
+                Ok(inf.borrow().groups.iter().find(|(g, _)| *g == group).map_or(0, |(_, n)| *n))
             })?,
         )?;
     }
