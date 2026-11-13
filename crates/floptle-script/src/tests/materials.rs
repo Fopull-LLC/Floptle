@@ -1595,12 +1595,15 @@ fn set_material_on_a_model_made_in_the_same_callback_patches_it() {
 }
 
 /// Every key `setMaterial` accepts is one a patch can carry over, so no key
-/// works on a primitive and silently does nothing on a model.
+/// works on a primitive and silently does nothing on a model. The one
+/// exception is `shader`, which gives a model a Material of its own instead
+/// (`a_script_puts_a_shader_on_a_model_it_built`).
 #[test]
 fn every_set_material_key_reaches_a_patch() {
     let src = floptle_core::Material::default();
     let missing: Vec<&&str> = crate::api::MATERIAL_KEYS
         .iter()
+        .filter(|k| **k != "shader")
         .filter(|k| !floptle_core::Material::default().take_key(&src, k))
         .collect();
     assert!(missing.is_empty(), "setMaterial keys a patch drops: {missing:?}");
@@ -1787,5 +1790,79 @@ end
     host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
     let msg = host.errors().join(" | ");
     assert!(msg.contains("setSurfaceFriction") && msg.contains("0 or more"), "a negative friction was accepted: {msg}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A script can put a `.flsl` shader on a model it built.** A patch cannot
+/// carry a shader, so `setMaterial{ shader = … }` was refused on a model and
+/// a `node:material()` handle had nothing to write to: a game's lakes and rivers,
+/// built with `mesh.build`, drew in the default look for a whole release and
+/// the only sign was a Console line. Now a shader gives the model a Material
+/// of its own (keeping what an earlier `setMaterial` patched), and a
+/// `setShaderParam` in the same callback lands on it.
+#[test]
+fn a_script_puts_a_shader_on_a_model_it_built() {
+    use floptle_core::{Material, MaterialPatch, Matter, Name};
+    let dir = std::env::temp_dir().join(format!("floptle-matshader-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "build",
+        "function start(node)\n\
+         \x20 createNode(\"Lake\", node, function(n)\n\
+         \x20   n.model = \"models/sheet.gltf\"\n\
+         \x20   n:setMaterial{ color = {0.2, 0.4, 0.6} }\n\
+         \x20   n:setMaterial{ shader = \"shaders/water.flsl\", alpha = 0.8 }\n\
+         \x20   n:setShaderParam(\"depth\", 3)\n\
+         \x20 end)\n\
+         \x20 createNode(\"River\", node, function(n)\n\
+         \x20   n.model = \"models/sheet.gltf\"\n\
+         \x20   n:setMaterial{ shader = \"shaders/river.flsl\" }\n\
+         \x20   n:material().roughness = 0.3\n\
+         \x20 end)\n\
+         \x20 createNode(\"Pond\", node, function(n)\n\
+         \x20   n.model = \"models/sheet.gltf\"\n\
+         \x20   n:setMaterial{ color = {0.1, 0.5, 0.3} }\n\
+         \x20   n:material().shader = \"shaders/pond.flsl\"\n\
+         \x20 end)\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst::new("build")]));
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let mut made = Vec::new();
+    for c in host.take_create_requests() {
+        let n = world.spawn();
+        world.insert(n, Transform::IDENTITY);
+        world.insert(n, Name(c.name.clone()));
+        world.insert(n, Matter::Empty);
+        host.call_create_callback(&mut world, c.cb.expect("a callback"), n);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        made.push(n);
+    }
+    let (lake, river) = (made[0], made[1]);
+    assert!(matches!(world.get::<Matter>(lake), Some(Matter::Mesh { .. })), "the node did not become the model");
+
+    let m = world.get::<Material>(lake).expect("setMaterial{ shader } gave the model no Material");
+    assert_eq!(m.shader.as_deref(), Some("shaders/water.flsl"));
+    assert_eq!(m.color, [0.2, 0.4, 0.6], "what the earlier patch said was lost");
+    assert_eq!(m.alpha, 0.8);
+    assert_eq!(m.shader_params.get("depth"), Some(&[3.0, 0.0, 0.0, 0.0]), "the param in the same callback was dropped");
+    assert!(world.get::<MaterialPatch>(lake).is_none(), "a patch was left beside the Material, never to be read");
+
+    // The handle taken in the same callback reaches the Material the shader
+    // made, rather than a patch nobody reads.
+    let r = world.get::<Material>(river).expect("setMaterial{ shader } on a model created nothing");
+    assert_eq!(r.shader.as_deref(), Some("shaders/river.flsl"));
+    assert_eq!(r.roughness, 0.3, "a material() write in the same callback missed the new Material");
+    // A patched model whose handle is given a shader: the same promotion,
+    // through `node:material()`.
+    let pond = world.get::<Material>(made[2]).expect("material().shader on a patched model created nothing");
+    assert_eq!(pond.shader.as_deref(), Some("shaders/pond.flsl"));
+    assert_eq!(pond.color, [0.1, 0.5, 0.3], "what the patch said was lost");
     let _ = std::fs::remove_dir_all(&dir);
 }

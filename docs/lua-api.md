@@ -1383,6 +1383,8 @@ sway=0.3 bends the surface in the game's wind (weather.addWind): the metres a po
 
 Retro artefacts: jitter (screen-grid vertex snapping, 0 = follow the project), affineUv, vertexLit, ditherAlpha. The project can ask for all four at once (Project Settings ⏵ Rendering); retroExempt=true takes none of them, which is how you hold a viewmodel steady in a world that wobbles.
 
+shader="shaders/water.flsl" puts a .flsl surface shader on the node ("" goes back to the built-in look). On a MODEL with no Material of its own, every other key is laid over each part's own material, but a shader is a whole surface, so it gives the model a Material of its own, keeping what earlier setMaterial calls said: this is how a surface made with mesh.build gets a shader. node:material() and node:setShaderParam in the same callback reach that Material.
+
 ```lua
 -- setup-time; use setShaderParam for per-frame values
 node:setMaterial{ unlit = true, emissive = {1, 0.45, 0.15}, emissiveStrength = 2.5 }

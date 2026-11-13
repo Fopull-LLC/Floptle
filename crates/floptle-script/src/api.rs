@@ -498,7 +498,7 @@ pub fn apply_component_color(
         // be dropped here with the write looking successful.
         "Material" | OBJECT_MATERIAL_PREFIX => {
             let known = matches!(field, "color" | "tint" | "emissive" | "specular" | "rim");
-            let Some(m) = material_target(world, ent, comp, known) else { return };
+            let Some(m) = material_target(world, ent, comp, known, false) else { return };
             let rgb = [v[0], v[1], v[2]];
             match field {
                 "color" | "tint" => m.color = rgb,
@@ -712,9 +712,19 @@ pub(crate) fn material_target<'a>(
     // white one has changed its look. A typo'd field name must not be able to
     // do that — it would blank a part of a model and report nothing.
     known_field: bool,
+    // Is this write one that makes the node's own Material when there is
+    // none? Only a shader: it is a whole surface, and a patch cannot carry it
+    // (see `promote_patch_to_material`). Any other write keeps its old reach.
+    creates: bool,
 ) -> Option<&'a mut floptle_core::Material> {
     let Some(key) = comp.strip_prefix(OBJECT_MATERIAL_PREFIX) else {
-        return (comp == "Material").then(|| world.get_mut::<floptle_core::Material>(ent))?;
+        if comp != "Material" {
+            return None;
+        }
+        if creates && known_field && world.get::<floptle_core::Material>(ent).is_none() {
+            promote_patch_to_material(world, ent);
+        }
+        return world.get_mut::<floptle_core::Material>(ent);
     };
     if key.is_empty() || !known_field {
         return None;
@@ -724,6 +734,16 @@ pub(crate) fn material_target<'a>(
     }
     let om = world.get_mut::<floptle_core::ObjectMaterials>(ent)?;
     Some(om.0.entry(key.to_string()).or_default())
+}
+
+/// Give node `ent` a Material of its own, starting from what its
+/// `MaterialPatch` already said (or the default), and drop the patch: the
+/// Material now speaks for the whole node, so a patch beside it would never
+/// be read. Used when a script gives a node a shader.
+pub(crate) fn promote_patch_to_material(world: &mut World, ent: Entity) {
+    let base = world.get::<floptle_core::MaterialPatch>(ent).map(|p| p.mat.clone()).unwrap_or_default();
+    world.remove::<floptle_core::MaterialPatch>(ent);
+    world.insert(ent, base);
 }
 
 /// Every numeric field of a Material, in the spellings the API uses.
@@ -1906,7 +1926,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 set_sprite_cell(world, ent, val.max(0.0) as u32);
                 return;
             }
-            if let Some(m) = material_target(world, ent, comp, MATERIAL_NUM_FIELDS.contains(&field))
+            if let Some(m) = material_target(world, ent, comp, MATERIAL_NUM_FIELDS.contains(&field), false)
             {
                 let n = val.max(0.0) as u32;
                 match field {
@@ -2548,6 +2568,13 @@ pub(crate) fn apply_material_fields(m: &mut floptle_core::Material, fields: &[(S
                     m.emissive_map = (!t.is_empty()).then(|| t.clone());
                 }
             }
+            // A `.flsl` surface shader (project-relative path); "" back to the
+            // built-in look.
+            "shader" => {
+                if let CompVal::Str(t) = v {
+                    m.shader = (!t.is_empty()).then(|| t.clone());
+                }
+            }
             "reflectivity" => {
                 m.reflectivity = num(v).map(|n| n as f32).unwrap_or(m.reflectivity)
             }
@@ -2704,6 +2731,18 @@ pub(crate) fn apply_rich_sets(
                 // all of that. A node that has a Material is changed in place,
                 // as before.
                 let model = matches!(world.get::<Matter>(e), Some(Matter::Mesh { .. }));
+                // **A shader is a whole surface, so it makes the node's own
+                // Material.** A patch lays keys over each part's material and
+                // cannot carry a shader (the FLSL draw reads the node's
+                // Material), so `setMaterial{ shader = … }` on a model, a
+                // built mesh above all, used to be refused and the surface
+                // drew in the default look. What a patch already said is kept.
+                let wants_shader = fields
+                    .iter()
+                    .any(|(k, v)| k == "shader" && matches!(v, crate::CompVal::Str(t) if !t.is_empty()));
+                if model && wants_shader && world.get::<floptle_core::Material>(e).is_none() {
+                    promote_patch_to_material(world, e);
+                }
                 let patching = model && world.get::<floptle_core::Material>(e).is_none();
                 let mut patch = patching
                     .then(|| world.get::<floptle_core::MaterialPatch>(e).cloned().unwrap_or_default());
@@ -2720,7 +2759,9 @@ pub(crate) fn apply_rich_sets(
                 let fades = apply_material_fields(m, &fields);
                 if let Some(mut p) = patch {
                     for (k, _) in &fields {
-                        if !p.names(k) && MATERIAL_KEYS.contains(&k.as_str()) {
+                        // `shader` is never a patch key: a shader made the node
+                        // its own Material above, and an empty one says nothing.
+                        if k != "shader" && !p.names(k) && MATERIAL_KEYS.contains(&k.as_str()) {
                             p.keys.push(k.clone());
                         }
                     }
@@ -3412,7 +3453,7 @@ pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "normalMap", "normalStrength", "roughnessMap", "roughness", "metallicMap", "metallic",
     "occlusionMap", "occlusionStrength", "emissiveMap", "reflectivity", "transmission", "ior", "thickness",
     "refraction", "sway", "backlight", "nearFadeStart", "nearFadeEnd", "shading", "jitter", "affineUv", "vertexLit",
-    "ditherAlpha", "retroExempt", "alphaCutoff", "doubleSided", "blend",
+    "ditherAlpha", "retroExempt", "alphaCutoff", "doubleSided", "blend", "shader",
 ];
 
 /// Every key `node:setCelestial{...}` reads.
@@ -4103,7 +4144,7 @@ pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, fie
         }
         "Material" | OBJECT_MATERIAL_PREFIX => {
             if let Some(m) =
-                material_target(world, ent, comp, MATERIAL_STR_FIELDS.contains(&field))
+                material_target(world, ent, comp, MATERIAL_STR_FIELDS.contains(&field), field == "shader" && !val.is_empty())
             {
                 // `""` clears a slot — the spelling `texture` already used, kept
                 // for the surface maps so there is one rule, not five.
@@ -6507,9 +6548,11 @@ fn node_lookup_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
                 if !has {
                     return Err(mlua::Error::runtime(
                         "node:material(): this node has no Material. Add one in the \
-                         Inspector, or call node:setMaterial{ ... } first — on a MODEL a \
-                         Material covers every part, and node:material(\"<name>\") is how \
-                         you reach one part instead.",
+                         Inspector, or call node:setMaterial{ ... } first. On a MODEL, \
+                         setMaterial lays its keys over every part, and \
+                         setMaterial{ shader = \"shaders/x.flsl\" } gives the model a Material \
+                         of its own (a mesh.build surface wanting a shader); \
+                         node:material(\"<name>\") reaches one part instead.",
                     ));
                 }
                 return crate::env::new_component_handle(lua, e, "Material");
