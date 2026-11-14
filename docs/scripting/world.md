@@ -386,6 +386,8 @@ end
 | `water.hold(id, cells, level [, group])` / `water.release(id, cells)` | hold a sim's points at a level, or let them go. |
 | `water.exchanged(id)` | what each group of held points gave the water since the last ask, m³. |
 | `water.tiles(id)` | a tiled sim's wet tiles, each with a serial that changes when its water does. |
+| `water.state(id)` | a tiled sim's wet points, for a save (`addVolume{ state = ... }` starts from it). |
+| `water.addWater(id, at, m3)` / `water.setSpring(id, at, rate)` | add or take water at a point; a spring changed while it runs. |
 | `water.removeVolume(id)` | take it away again. |
 
 A lake on a round world is part of a sphere about the planet's centre, and only
@@ -491,6 +493,14 @@ local gave = water.exchanged(trench)[2] or 0       -- m³ the sea gave since the
   default). Past it the water runs slow for a moment; the frame does not.
   `perf.counts()` reports `waterAwake` (points in tiles that are moving),
   `waterSolved` (points solved in the frame) and `waterTiles` (tiles held).
+- `water.state(id)` is its wet points, `{ columns, rows, cells = { i, j,
+  depth, ... } }`, for a save; `addVolume{ ..., state = s }` starts from it.
+- `water.addWater(id, at, m3)` adds water at a point (takes it, if negative):
+  seepage, rain, a pump. `water.setSpring(id, at, rate)` puts a spring there,
+  changes it, or at 0 takes it away.
+- `minDepth` (1 mm) is the least depth that moves and reads as water, and
+  `soak` (metres a second) soaks away films thinner than `soakBelow` (1 cm),
+  so a drained channel dries instead of holding a film for good.
 - `water.tiles(id)` lists the tiles holding water, each `{ key, serial, i,
   j }`; a tile's `serial` changes only when its water does, so a game
   rebuilds only the tiles that moved: `water.surface(id, { tile = key })` is

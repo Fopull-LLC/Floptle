@@ -323,7 +323,7 @@ fn push_quads(out: &mut Vec<u32>, index: &[u32], columns: usize, rows: usize) {
 pub(crate) const VOLUME_KEYS: &[&str] = &[
     "shape", "parent", "center", "radius", "reach", "origin", "cell", "columns", "rows", "levels", "flow",
     "density", "drag", "angularDrag", "current", "depth", "tint", "visibility", "underwater", "level",
-    "roughness", "springs", "holdEdges", "size", "depths", "held", "solver", "flat", "budget",
+    "roughness", "springs", "holdEdges", "size", "depths", "held", "solver", "flat", "budget", "state", "minDepth", "soak", "soakBelow",
 ];
 
 /// The most cells a tiled sim may span, held or not: 4,096 a side.
@@ -583,13 +583,47 @@ fn tiled_from(opts: &Table, call: &str) -> mlua::Result<(Surface, floptle_core::
     };
     let budget_ms = num("budget").unwrap_or(1.0).max(0.05) as f32;
     let hold_edges = opts.get::<Option<bool>>("holdEdges").map_err(|_| err("`holdEdges` is true or false"))?.unwrap_or(false);
+    // A saved state: what water.state handed back.
+    let state = match opts.get::<Option<Table>>("state").map_err(|_| err("`state` is what water.state returned"))? {
+        None => None,
+        Some(t) => {
+            let cells: Table = t.get("cells").map_err(|_| err("`state` is what water.state returned: { cells = { i, j, depth, ... } }"))?;
+            let n = cells.raw_len();
+            if !n.is_multiple_of(3) {
+                return Err(err("a state's `cells` is column, row, depth for each wet point"));
+            }
+            let mut v = Vec::with_capacity(n / 3);
+            for k in 0..n / 3 {
+                let (i, j, d): (f64, f64, f64) = (cells.raw_get(k * 3 + 1)?, cells.raw_get(k * 3 + 2)?, cells.raw_get(k * 3 + 3)?);
+                if i >= 0.0 && j >= 0.0 && (i as usize) < columns && (j as usize) < rows && d > 0.0 {
+                    v.push((i as u32, j as u32, d as f32));
+                }
+            }
+            Some(std::sync::Arc::new(v))
+        }
+    };
+    let min_depth = num("minDepth").unwrap_or(1e-3).max(1e-5) as f32;
+    let soak = num("soak").unwrap_or(0.0).max(0.0) as f32;
+    let soak_below = num("soakBelow").unwrap_or(0.01).max(0.0) as f32;
     let spec = SimSpec {
         level: level as f32,
         roughness: roughness as f32,
         springs,
         hold_edges,
         falls: Vec::new(),
-        tiled: Some(TiledSpec { patch, fill: fill && depths.is_none(), depths, held, pipes, budget_ms, hold_edges }),
+        tiled: Some(TiledSpec {
+            patch,
+            fill: fill && depths.is_none() && state.is_none(),
+            depths,
+            held,
+            pipes,
+            budget_ms,
+            hold_edges,
+            state,
+            min_depth,
+            soak,
+            soak_below,
+        }),
     };
     let surface = Surface::Tiles(std::sync::Arc::new(TiledSurface { patch, tiles: Default::default() }));
     Ok((surface, spec))
@@ -1046,6 +1080,81 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
         }
     }
 
+    // water.state(id) → { columns, rows, cells = { i, j, depth, ... } }: a
+    // tiled sim's wet points, for a save. addVolume{ state = ... } starts
+    // from it.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |lua, id: u32| {
+            let d = s.declared.borrow();
+            let Some(Surface::Tiles(tiles)) = d.iter().find(|w| w.id == id).map(|w| &w.surface) else { return Ok(Value::Nil) };
+            let out = lua.create_table()?;
+            out.set("columns", tiles.patch.columns)?;
+            out.set("rows", tiles.patch.rows)?;
+            let cells = lua.create_table()?;
+            let mut keys: Vec<&u32> = tiles.tiles.keys().collect();
+            keys.sort_unstable();
+            let mut n = 0;
+            let side = floptle_core::water::TILE;
+            for k in keys {
+                let (ti, tj) = ((k & 0xffff) as usize, (k >> 16) as usize);
+                for (c, depth) in tiles.tiles[k].depth.iter().enumerate() {
+                    if *depth > 0.0 {
+                        cells.raw_set(n + 1, ti * side + c % side)?;
+                        cells.raw_set(n + 2, tj * side + c / side)?;
+                        cells.raw_set(n + 3, *depth as f64)?;
+                        n += 3;
+                    }
+                }
+            }
+            out.set("cells", cells)?;
+            Ok(Value::Table(out))
+        }) {
+            let _ = t.set("state", f);
+        }
+    }
+
+    // water.addWater(id, at, m3): add water to a tiled sim at a point (or an
+    // {i, j} cell), or take it if negative: seepage, rain, a pump.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |_, (id, at, volume): (u32, Value, f64)| {
+            let d = s.declared.borrow();
+            let Some(patch) = d.iter().find(|w| w.id == id).and_then(|w| w.simulated.as_ref()?.tiled.as_ref()).map(|t| t.patch) else {
+                return Ok(false);
+            };
+            let cell = cell_of(&patch, &at)
+                .ok_or_else(|| mlua::Error::RuntimeError("water.addWater: `at` is a point on the sim (vec3, in the parent's frame) or an {i, j} cell".into()))?;
+            if volume.is_finite() && volume != 0.0 {
+                s.sim_cmds.borrow_mut().push(floptle_core::water::SimCmd::AddWater { id, cell, volume });
+            }
+            Ok(true)
+        }) {
+            let _ = t.set("addWater", f);
+        }
+    }
+
+    // water.setSpring(id, at, rate): a spring at a point of a tiled sim
+    // giving `rate` m³/s, changed or (at 0) taken away while it runs.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |_, (id, at, rate): (u32, Value, f64)| {
+            let d = s.declared.borrow();
+            let Some(patch) = d.iter().find(|w| w.id == id).and_then(|w| w.simulated.as_ref()?.tiled.as_ref()).map(|t| t.patch) else {
+                return Ok(false);
+            };
+            let cell = cell_of(&patch, &at)
+                .ok_or_else(|| mlua::Error::RuntimeError("water.setSpring: `at` is a point on the sim (vec3, in the parent's frame) or an {i, j} cell".into()))?;
+            if !rate.is_finite() || rate < 0.0 {
+                return Err(mlua::Error::RuntimeError("water.setSpring: `rate` is 0 or more m³/s (0 takes the spring away)".into()));
+            }
+            s.sim_cmds.borrow_mut().push(floptle_core::water::SimCmd::Spring { id, cell, rate: rate as f32 });
+            Ok(true)
+        }) {
+            let _ = t.set("setSpring", f);
+        }
+    }
+
     // water.removeVolume(id) → true if there was one.
     {
         let s = shared.clone();
@@ -1445,6 +1554,47 @@ mod tests {
             .unwrap();
         assert_eq!((n, serial, i, verts, tris), (1, 9, 256, 4, 2), "the tile's mesh is its four wet points, two triangles");
         assert!((depth - 0.3).abs() < 1e-6, "{depth}");
+    }
+
+    /// **A tiled sim saves and restarts, and takes water and springs while
+    /// it runs.** water.state hands back its wet points, addVolume{ state }
+    /// starts from them, and water.addWater and water.setSpring reach the
+    /// engine for the point under them.
+    #[test]
+    fn a_tiled_sims_state_round_trips_and_water_can_be_added() {
+        let (lua, shared) = host();
+        let id: u32 = lua
+            .load(r#"return water.addVolume{ shape = "sim", center = vec3(0, 0, 0), flat = true, cell = 1, size = 63, level = false, soak = 0.002 }"#)
+            .eval()
+            .unwrap();
+        let patch = shared.declared.borrow()[0].simulated.as_ref().unwrap().tiled.as_ref().unwrap().patch;
+        let mut depth = vec![0.0f32; floptle_core::water::TILE * floptle_core::water::TILE];
+        depth[33] = 0.7;
+        let tile = floptle_core::water::TileLevels { level: vec![f32::NAN; depth.len()], flow: vec![[0.0; 2]; depth.len()], depth, serial: 1 };
+        let tiles = floptle_core::water::TiledSurface { patch, tiles: [(floptle_core::water::tile_key(1, 0), std::sync::Arc::new(tile))].into_iter().collect() };
+        shared.declared.borrow_mut()[0].surface = Surface::Tiles(std::sync::Arc::new(tiles));
+        let again: u32 = lua
+            .load(format!(
+                r#"local s = water.state({id})
+                   assert(s.columns == 64 and #s.cells == 3 and s.cells[1] == 33 and s.cells[2] == 1, "the state is " .. #s.cells)
+                   assert(water.addWater({id}, vec3(0.2, 0, 0.1), 2.5) and water.setSpring({id}, {{ 5, 6 }}, 0))
+                   return water.addVolume{{ shape = "sim", center = vec3(0, 0, 0), flat = true, cell = 1, size = 63, level = false, state = s }}"#
+            ))
+            .eval()
+            .unwrap();
+        let d = shared.declared.borrow();
+        let t = d.iter().find(|w| w.id == again).unwrap().simulated.as_ref().unwrap().tiled.as_ref().unwrap();
+        assert_eq!(t.state.as_deref(), Some(&vec![(33, 1, 0.7)]));
+        assert!(!t.fill);
+        assert_eq!(d[0].simulated.as_ref().unwrap().tiled.as_ref().unwrap().soak, 0.002);
+        let cmds = shared.sim_cmds.borrow().clone();
+        assert_eq!(
+            cmds,
+            vec![
+                floptle_core::water::SimCmd::AddWater { id, cell: [32, 32], volume: 2.5 },
+                floptle_core::water::SimCmd::Spring { id, cell: [5, 6], rate: 0.0 },
+            ]
+        );
     }
 
     /// A frozen sea has no inside. A swim controller must not think the player

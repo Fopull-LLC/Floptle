@@ -357,6 +357,14 @@ pub struct TiledSpec {
     pub budget_ms: f32,
     /// Hold the patch's edge cells whose ground is below the level.
     pub hold_edges: bool,
+    /// Wet cells to start from, `(column, row, depth)`: what `water.state`
+    /// handed back.
+    pub state: Option<Arc<Vec<(u32, u32, f32)>>>,
+    /// The least depth that moves and reads as water, metres.
+    pub min_depth: f32,
+    /// Films thinner than `soak_below` soak away at `soak` metres a second.
+    pub soak: f32,
+    pub soak_below: f32,
 }
 
 /// A cell held at a level, and the group what it gives is counted in.
@@ -376,13 +384,15 @@ pub enum SimCmd {
     Hold { id: u32, cells: Vec<[u32; 2]>, level: f32, group: u16 },
     Release { id: u32, cells: Vec<[u32; 2]> },
     AddWater { id: u32, cell: [u32; 2], volume: f64 },
+    /// A spring at a cell, `rate` m³/s; 0 takes it away.
+    Spring { id: u32, cell: [u32; 2], rate: f32 },
 }
 
 impl SimCmd {
     /// The volume it is for.
     pub fn id(&self) -> u32 {
         match self {
-            SimCmd::Hold { id, .. } | SimCmd::Release { id, .. } | SimCmd::AddWater { id, .. } => *id,
+            SimCmd::Hold { id, .. } | SimCmd::Release { id, .. } | SimCmd::AddWater { id, .. } | SimCmd::Spring { id, .. } => *id,
         }
     }
 }

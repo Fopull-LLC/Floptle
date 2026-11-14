@@ -19,6 +19,8 @@ pub(crate) struct TiledSim {
     /// whether to hold it only where its ground is below the level (the
     /// patch's edge, `holdEdges`).
     pending_holds: Vec<(usize, usize, f32, u16, bool)>,
+    /// Water added to points whose tile is not made yet: `(i, j, m³)`.
+    pending_water: Vec<(usize, usize, f64)>,
     /// The level edit the ground was last read against.
     seen_edits: u64,
     /// The level it was last held at (`water.setLevel`).
@@ -169,12 +171,20 @@ impl crate::Editor {
             let s = self.water_sims.tiled.entry(w.id).or_insert_with(|| {
                 let mut water = TiledWater::new(p, if t.pipes { Solver::Pipes } else { Solver::Swe });
                 water.roughness = spec.roughness;
+                water.min_depth = t.min_depth;
+                water.soak = t.soak;
+                water.soak_below = t.soak_below;
                 for &(cell, q) in &spec.springs {
                     water.set_spring(cell % p.columns, cell / p.columns, q);
                 }
                 let (nx, nz) = p.tiles();
                 let seeding = if t.fill {
                     (0..nz).flat_map(|tj| (0..nx).map(move |ti| tile_key(ti, tj))).collect()
+                } else if let Some(st) = &t.state {
+                    let mut keys: Vec<u32> = st.iter().map(|&(i, j, _)| tile_key(i as usize / TILE, j as usize / TILE)).collect();
+                    keys.sort_unstable();
+                    keys.dedup();
+                    keys
                 } else if let Some(d) = &t.depths {
                     let mut keys: Vec<u32> = (0..d.len())
                         .filter(|&c| d[c] > 0.0)
@@ -199,7 +209,7 @@ impl crate::Editor {
                         }
                     }
                 }
-                TiledSim { water, seeding, pending_holds, seen_edits: edits, level: spec.level }
+                TiledSim { water, seeding, pending_holds, pending_water: Vec::new(), seen_edits: edits, level: spec.level }
             });
             // Scripts' holds, releases and water added this frame.
             for c in cmds.iter().filter(|c| c.id() == w.id) {
@@ -216,7 +226,10 @@ impl crate::Editor {
                         }
                     }
                     floptle_core::water::SimCmd::AddWater { cell: [i, j], volume, .. } => {
-                        s.water.add_water(*i as usize, *j as usize, *volume);
+                        s.pending_water.push((*i as usize, *j as usize, *volume));
+                    }
+                    floptle_core::water::SimCmd::Spring { cell: [i, j], rate, .. } => {
+                        s.water.set_spring(*i as usize, *j as usize, *rate);
                     }
                 }
             }
@@ -248,6 +261,13 @@ impl crate::Editor {
                     None
                 } else if let Some(l) = fill {
                     Some(vec![l; TILE * TILE])
+                } else if let Some(st) = &t.state {
+                    let mut sf = vec![f32::NAN; TILE * TILE];
+                    for &(i, j, d) in st.iter().filter(|(i, j, _)| (*i as usize / TILE, *j as usize / TILE) == (ti, tj)) {
+                        let c = (j as usize % TILE) * TILE + i as usize % TILE;
+                        sf[c] = g[c] + d;
+                    }
+                    Some(sf)
                 } else {
                     t.depths.as_ref().map(|d| {
                         (0..TILE * TILE)
@@ -266,6 +286,8 @@ impl crate::Editor {
                     s.water.add_tile(ti, tj, g, surface.as_deref());
                 }
             }
+            // Water added where the tile is not made yet waits for it.
+            s.pending_water.retain(|&(i, j, v)| s.water.add_water(i, j, v) == 0.0 && !s.water.has_tile(i / TILE, j / TILE));
             s.pending_holds.retain(|&(i, j, level, group, under)| {
                 if under && s.water.cell(i, j).is_some_and(|(g, _)| g >= level) {
                     return false;

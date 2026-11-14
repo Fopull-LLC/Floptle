@@ -159,6 +159,11 @@ pub struct TiledWater {
     /// The least depth that moves, and that reads back as water, metres:
     /// a film thinner than this on a slope stays put, unseen.
     pub min_depth: f32,
+    /// Water thinner than `soak_below` metres soaks into the ground at
+    /// `soak` metres a second, so a drained channel dries rather than
+    /// holding a film for good. 0 soaks nothing.
+    pub soak: f32,
+    pub soak_below: f32,
     tiles: Vec<Tile>,
     index: HashMap<u32, u32>,
     /// Tiles water has reached the edge of, or that a script asked for,
@@ -189,6 +194,8 @@ impl TiledWater {
             roughness: 0.0,
             damping: if solver == Solver::Swe { 0.2 } else { 0.3 },
             min_depth: WET,
+            soak: 0.0,
+            soak_below: 0.0,
             tiles: Vec::new(),
             index: HashMap::new(),
             wanted: Vec::new(),
@@ -656,6 +663,7 @@ impl TiledWater {
                 *spring_add.entry(at).or_insert(0.0) += q * dt;
             }
         }
+        let (soak, soak_below) = (self.soak, self.soak_below);
         let depths = self.each(&awake, false, |t| {
             let tile = &self.tiles[t];
             let (mut moved, mut fastest, mut added) = (0.0f32, 0.0f32, 0.0f64);
@@ -679,6 +687,11 @@ impl TiledWater {
                 }
                 let before = *d;
                 let mut after = (before + vol / tile.area[c]).max(0.0);
+                if soak > 0.0 && after > 0.0 && after < soak_below {
+                    let gone = (soak * dt).min(after);
+                    after -= gone;
+                    added -= gone as f64 * tile.area[c] as f64;
+                }
                 let hold = tile.hold[c];
                 if hold.is_finite() {
                     let want = (hold - tile.ground[c]).max(0.0);
@@ -700,7 +713,8 @@ impl TiledWater {
             let tile = &mut self.tiles[t];
             tile.depth = depth;
             tile.changed = true;
-            let still = moved < STEADY && fastest < STILL && tile.springs == 0;
+            let soaking = soak > 0.0 && tile.depth.iter().any(|d| *d > 0.0 && *d < soak_below);
+            let still = moved < STEADY && fastest < STILL && tile.springs == 0 && !soaking;
             tile.calm = if still { tile.calm.saturating_add(1) } else { 0 };
         }
         // 5. Still tiles sleep, their faces stopped.
@@ -1277,6 +1291,32 @@ mod tests {
         let p = w.patch.point(0.0, 0.0, 0.0);
         assert!((p.length() - 800.0).abs() < 1e-9);
         assert!(s.cell(0, 0).is_some_and(|(l, d, _)| l.abs() < 1e-6 && (d - 2.0).abs() < 1e-6));
+    }
+
+
+    /// **A film soaks away; water added stays.** A drained channel's
+    /// centimetre films are gone within a few seconds at a soak of 5 mm/s,
+    /// counted as taken; deeper water is untouched; and water added at a
+    /// cell, or given by a spring that is then turned off, is exactly what
+    /// the patch then holds.
+    #[test]
+    fn films_soak_away_and_added_water_is_counted() {
+        let mut w = patch(32, 32, 1.0, Solver::Swe, |i, _| if i < 16 { 0.0 } else { -2.0 }, |i, _| if i < 16 { 0.008 } else { -1.0 });
+        w.soak = 0.005;
+        w.soak_below = 0.01;
+        let before = w.volume();
+        run(&mut w, 5.0);
+        assert!(w.cell(4, 4).is_some_and(|(_, d)| d < 1e-6), "the film is still there: {:?}", w.cell(4, 4));
+        assert!(w.cell(24, 4).is_some_and(|(_, d)| d > 0.9), "deep water soaked away: {:?}", w.cell(24, 4));
+        assert!((w.volume() - (before + w.added())).abs() < 1e-3, "{} m³ now, {} at the start, {} counted", w.volume(), before, w.added());
+        let mut w = patch(32, 32, 1.0, Solver::Swe, |_, _| 0.0, |_, _| f32::NAN);
+        assert!((w.add_water(10, 10, 3.0) - 3.0).abs() < 1e-6);
+        w.set_spring(20, 20, 2.0);
+        run(&mut w, 1.0);
+        w.set_spring(20, 20, 0.0);
+        run(&mut w, 1.0);
+        assert!((w.volume() - 5.0).abs() < 0.05, "3 m³ added and a spring at 2 m³/s for a second hold {} m³", w.volume());
+        assert!((w.added() - w.volume()).abs() < 1e-3);
     }
 
     /// What a tick of moving water costs at 500, 6,000 and 30,000 wet

@@ -1959,7 +1959,7 @@ function water.flowAt(x, y, z) end
 ---so a cave under a lake is dry. From inside it looks like a Water Volume node
 ---(`tint`, `visibility` to change that, `underwater = false` for none). Returns
 ---an id.
----@param opts { shape?: \"lake\"|\"heightfield\"|\"sim\", level?: number|false, size?: number, depths?: number[], held?: { pos?: Vec3, cell?: integer[], level?: number, group?: integer }[], solver?: \"swe\"|\"pipes\", budget?: number, flat?: boolean, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
+---@param opts { shape?: \"lake\"|\"heightfield\"|\"sim\", level?: number|false, size?: number, depths?: number[], held?: { pos?: Vec3, cell?: integer[], level?: number, group?: integer }[], solver?: \"swe\"|\"pipes\", budget?: number, flat?: boolean, state?: { columns: integer, rows: integer, cells: number[] }, minDepth?: number, soak?: number, soakBelow?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
 ---@return integer
 function water.addVolume(opts) end
 ---Every place simulated water pours off a drop of more than 1.5 m, in the
@@ -2005,6 +2005,25 @@ function water.exchanged(id) end
 ---@param id integer
 ---@return { key: integer, serial: integer, i: integer, j: integer }[]|nil
 function water.tiles(id) end
+---Every wet point of a sim laid with a `center`, for a save:
+---`water.addVolume{ ..., state = s }` starts the same sim from it.
+---@param id integer
+---@return { columns: integer, rows: integer, cells: number[] }|nil
+function water.state(id) end
+---Add `m3` cubic metres of water to a sim laid with a `center` at a point (or
+---an `{i, j}` point), or take it if negative: seepage, rain, a pump.
+---@param id integer
+---@param at Vec3|integer[]
+---@param m3 number
+---@return boolean
+function water.addWater(id, at, m3) end
+---A spring at a point of a sim laid with a `center`, giving `rate` m³/s; 0 takes
+---it away.
+---@param id integer
+---@param at Vec3|integer[]
+---@param rate number
+---@return boolean
+function water.setSpring(id, at, rate) end
 ---Move the surface of water `water.addVolume` declared, in place: its id,
 ---look, density, drag, current and depth stay, and the physics floats things on
 ---the new level from the next tick. A lake's `level` is its surface's radius

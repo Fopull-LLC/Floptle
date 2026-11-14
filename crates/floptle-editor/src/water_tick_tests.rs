@@ -402,3 +402,45 @@ end
     assert!(tiles > 1, "the water never reached past its first tile: {rows:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **Water added to a dry sim stays, and its saved state starts the same
+/// water again.** A flat dry sim over a floor: 12 m³ poured in at one point
+/// spreads over the floor, the patch holds all 12, and a second sim started
+/// from `water.state` of the first holds the same.
+#[test]
+fn water_added_to_a_dry_sim_stays_and_its_state_restarts_it() {
+    let (mut ed, dir) = project(
+        "tiled_state",
+        r#"
+local id, copy, n = nil, nil, 0
+function update(node, dt)
+  n = n + 1
+  if not id then
+    id = water.addVolume{ shape = "sim", center = vec3(0, 0, 0), flat = true, cell = 1, size = 40, level = false }
+  end
+  if n == 2 then assert(water.addWater(id, vec3(0, 0, 0), 12)) end
+  if n == 300 then
+    copy = water.addVolume{ shape = "sim", center = vec3(0, 0, 0), flat = true, cell = 1, size = 40, level = false, state = water.state(id) }
+  end
+end
+"#,
+    );
+    let floor = node(&mut ed, "Floor", DVec3::new(0.0, -0.5, 0.0));
+    ed.world.insert(
+        floor,
+        RigidBody { kind: floptle_core::BodyKind::Box, half_extents: [40.0, 0.5, 40.0], mode: floptle_core::BodyMode::Static, ..Default::default() },
+    );
+    camera(&mut ed, DVec3::new(0.0, 10.0, 30.0));
+    ed.toggle_play();
+    for _ in 0..330 {
+        ed.play_step(1.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    }
+    let ids: Vec<u32> = ed.script_host.declared_water().iter().map(|w| w.id).collect();
+    assert_eq!(ids.len(), 2);
+    let first = ed.water_sims.tiled[&ids[0]].water.volume();
+    let second = ed.water_sims.tiled[&ids[1]].water.volume();
+    assert!((first - 12.0).abs() < 0.05, "12 m³ poured, the sim holds {first}");
+    assert!((second - first).abs() < 0.05, "the copy started from its state holds {second}, the first {first}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
