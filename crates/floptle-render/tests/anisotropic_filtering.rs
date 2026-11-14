@@ -52,8 +52,16 @@ fn far_contrast(px: &[[u8; 4]], row: u32) -> f32 {
 #[test]
 fn far_ground_keeps_its_stripes_at_8_and_loses_them_at_1() {
     let gpu = Gpu::headless(W, H);
-    if !gpu.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::ANISOTROPIC_FILTERING) {
+    let flags = gpu.adapter.get_downlevel_capabilities().flags;
+    if !flags.contains(wgpu::DownlevelFlags::ANISOTROPIC_FILTERING) {
         eprintln!("skipped — this device does not filter anisotropically");
+        return;
+    }
+    // The raster pass reads a picture's texels raw as well as as colour,
+    // which takes view formats; a device without them (OpenGL) cannot build
+    // it at all.
+    if !flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
+        eprintln!("skipped — this device cannot build the raster pass");
         return;
     }
     let out = gpu.device.create_texture(&wgpu::TextureDescriptor {
