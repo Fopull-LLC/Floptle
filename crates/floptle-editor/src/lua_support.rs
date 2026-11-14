@@ -2325,6 +2325,21 @@ function terrain.prepare(x, y, z, r) end
 ---@return string|nil why \"air\" or \"unknown\"
 ---@return number|nil at How far along the ray the unmade ground starts.
 function terrain.raycast(origin, dir, maxDist) end
+---How far along a direction the ground's surface is, for many points in one
+---call, off the field. `points`: a buffer of f32 x, y, z triples or a list of
+---vec3s. `dirs`: one vec3, one per point (buffer or list), or `{ toward = vec3 }`
+---for each point's way to a centre. Positive below the point, negative inside
+---the ground, NaN for none within maxDist (default 1000) or ground not made.
+---Buffer points answer as a buffer of f32s (into `opts.out` when big enough);
+---list points as a list. `opts.flags`: a second answer, 0 made, 1 stand-in,
+---2 not made.
+---@param points buffer|vec3[]
+---@param dirs vec3|buffer|vec3[]|{ toward: vec3 }
+---@param maxDist? number
+---@param opts? { out?: buffer, flags?: boolean }
+---@return buffer|number[] dists
+---@return buffer|integer[]|nil flags
+function terrain.surfaceBelow(points, dirs, maxDist, opts) end
 ---The milliseconds of each frame the engine spends landing the game's terrain
 ---edits (4 by default); the rest wait, in order, for the frames after. Raise
 ---it while a loading screen covers the view, and set it back (or pass nil)

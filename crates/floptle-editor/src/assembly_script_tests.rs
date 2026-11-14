@@ -2158,6 +2158,88 @@ end
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **Many ground queries answer in one call, off the field.**
+/// `terrain.surfaceBelow` over a slab whose top is y = 0: a point 5 m above
+/// it is 5, one 0.3 m inside it is -0.3 (the surface above it), one past the
+/// slab's edge is NaN. The same points as a buffer answer into the buffer
+/// given as `out`, with a flag a point; `{ toward = c }` points each down
+/// toward a centre; over a second terrain the nearer top wins and a point
+/// inside either is inside; ten thousand points are one call.
+#[test]
+fn many_ground_queries_answer_in_one_call() {
+    let (mut ed, dir) = project(
+        "below",
+        r#"
+local done = false
+function update(node, dt)
+  local g = find("Ground")
+  if not g or done then return end
+  done = true
+  local pts = { vec3(2, 5, 0), vec3(2, -0.3, 0), vec3(30, 5, 0) }
+  local d = terrain.surfaceBelow(pts, vec3(0, -1, 0), 30)
+  local f = function(v) return v ~= v and "nan" or string.format("%.2f", v) end
+  log(string.format("L %s %s %s", f(d[1]), f(d[2]), f(d[3])))
+  -- Over the shelf (a second terrain 3 m higher at x 10..20): the nearer
+  -- top below wins, and a point in the shelf is in the ground.
+  local c = terrain.surfaceBelow({ vec3(15, 5, 0), vec3(15, 1, 0) }, vec3(0, -1, 0), 30)
+  log(string.format("C %s %s", f(c[1]), f(c[2])))
+  local b = buffer.create(36)
+  for k, p in ipairs(pts) do
+    buffer.writef32(b, (k - 1) * 12, p.x) buffer.writef32(b, (k - 1) * 12 + 4, p.y) buffer.writef32(b, (k - 1) * 12 + 8, p.z)
+  end
+  local out = buffer.create(12)
+  local db, fl = terrain.surfaceBelow(b, vec3(0, -1, 0), 30, { out = out, flags = true })
+  log(string.format("B %s %s %s %s %d", tostring(rawequal(db, out)), f(buffer.readf32(db, 0)), f(buffer.readf32(db, 4)), f(buffer.readf32(db, 8)), buffer.readu8(fl, 0)))
+  local t = terrain.surfaceBelow({ vec3(2, 5, 0), vec3(-3, 7, 4) }, { toward = vec3(2, -100, 0) }, 30)
+  log(string.format("T %s %s", f(t[1]), f(t[2])))
+  local ok, err = pcall(terrain.surfaceBelow, pts, { vec3(0, -1, 0) })
+  log("E " .. tostring(ok) .. " " .. (tostring(err):match("1 dirs for 3 points") and "count" or tostring(err)))
+  local many = buffer.create(10000 * 12)
+  for k = 0, 9999 do
+    buffer.writef32(many, k * 12, (k % 100) * 0.28 - 18) buffer.writef32(many, k * 12 + 4, 0.6) buffer.writef32(many, k * 12 + 8, (k // 100) * 0.3 - 15)
+  end
+  local t0 = os.clock()
+  local dm = terrain.surfaceBelow(many, vec3(0, -1, 0), 30)
+  local ms = (os.clock() - t0) * 1000
+  local hits = 0
+  for k = 0, 9999 do if math.abs(buffer.readf32(dm, k * 4) - 0.6) < 0.05 then hits += 1 end end
+  log(string.format("M %d %.1f", hits, ms))
+end
+"#,
+    );
+    let mut field = floptle_field::ChunkField::new(1.0);
+    field.fill_slab(Vec3::new(-20.0, -20.0, -20.0), Vec3::new(20.0, 0.0, 20.0), 0.0, [0.5, 0.5, 0.5]);
+    let g = ed.world.spawn();
+    ed.world.insert(g, Transform::from_translation(DVec3::new(0.0, 0.0, 0.0)));
+    ed.world.insert(g, Name("Ground".into()));
+    ed.world.insert(g, Matter::Terrain { id: 7, collision: Default::default() });
+    ed.terrains.insert(g, crate::terrain_edit::EditorTerrain::new(field));
+    let mut shelf = floptle_field::ChunkField::new(1.0);
+    shelf.fill_slab(Vec3::new(10.0, -20.0, -20.0), Vec3::new(20.0, 0.0, 20.0), 0.0, [0.5, 0.5, 0.5]);
+    let h = ed.world.spawn();
+    ed.world.insert(h, Transform::from_translation(DVec3::new(0.0, 3.0, 0.0)));
+    ed.world.insert(h, Name("Shelf".into()));
+    ed.world.insert(h, Matter::Terrain { id: 8, collision: Default::default() });
+    ed.terrains.insert(h, crate::terrain_edit::EditorTerrain::new(shelf));
+    ed.toggle_play();
+    run(&mut ed, 3);
+    let mut one = |tag: &str| lines(&mut ed, tag).last().cloned().unwrap_or_default();
+    assert_eq!(one("L"), "5.00 -0.30 nan", "a list of points");
+    assert_eq!(one("C"), "2.00 -2.00", "two terrains: the nearer top below, and inside the shelf is inside");
+    assert_eq!(one("B"), "true 5.00 -0.30 nan 0", "a buffer of points, into `out`, with flags");
+    // Toward (2, -100, 0): the first point looks straight down; the second
+    // slants in and meets the top farther along than its 7 m height.
+    let t = one("T");
+    let v: Vec<f64> = t.split(' ').map(|x| x.parse().unwrap()).collect();
+    assert!((v[0] - 5.0).abs() < 0.02 && v[1] > 7.0 && v[1] < 7.2, "toward a centre: {t}");
+    assert_eq!(one("E"), "false count", "a dirs list of the wrong length is refused");
+    let m = one("M");
+    let hits: usize = m.split(' ').next().unwrap().parse().unwrap();
+    assert_eq!(hits, 10_000, "ten thousand points 0.6 m over the slab: {m}");
+    eprintln!("surfaceBelow 10,000 points: {m}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **Ground that is not made yet does not read as open air.** A cold planet
 /// has no collider at all, so `terrain.query` over it answers whatever else
 /// is near and a ray straight down through it finds nothing. `terrain.ready`

@@ -224,7 +224,34 @@ end
 | `terrain.slotMaterial(slot)` → `table` | the slot's own Material, in `node:setMaterial`'s keys; `nil` when it draws with its terrain's |
 | `terrain.setSlotMaterial(slot, opts)` | give a slot a Material of its own (keys laid over the one it has); `nil` gives it back to its terrain's. A run's sets are undone on Stop |
 | `terrain.height(x, z)` → `y` | world Y of the highest surface under (x,z); `nil` if none |
+| `terrain.surfaceBelow(points, dirs [, maxDist [, opts]])` → `dists [, flags]` | the ground along a direction for many points in one call, off the field: a water sim's flood front, scatter, footprints (below) |
 | `terrain.yields()` → `list` | the reports for edits that have **landed** since the last call (drained) |
+
+### Many ground queries at once
+
+`terrain.surfaceBelow` answers for thousands of points in one call, read off
+the ground's own field (so it sees ground no collider covers yet). `points` is
+a buffer of f32 x, y, z triples or a list of vec3s. `dirs` is one vec3 for
+every point, one per point the same way, or `{ toward = centre }` for each
+point's own way to a planet's centre. Each answer is how far along its
+direction the surface is: positive below the point, negative when the point is
+in the ground (the surface is above it), NaN when there is none within
+`maxDist` (default 1000), or the ground there is not made yet.
+
+Points given as a buffer answer as a buffer of f32s, written into `opts.out`
+when that is a buffer big enough, so a game that asks every frame makes no
+garbage. `opts.flags = true` adds a second answer, one value a point: 0 for
+made ground, 1 for stand-in ground that may still move (`terrain.ready`), 2 for
+ground not made at all.
+
+```lua
+-- where the ground is under each cell of a flood front, down toward the planet
+local out = buffer.create(n * 4)
+local d = terrain.surfaceBelow(cells, { toward = planet.pos }, 50, { out = out })
+for k = 0, n - 1 do
+  local dist = buffer.readf32(d, k * 4) -- NaN: no ground known there
+end
+```
 
 ### Which way "flat" is
 

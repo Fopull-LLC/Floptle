@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 79
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 36
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 37
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 25
 - [weather — wind](#weather--wind) — 6
@@ -3123,6 +3123,10 @@ terrain.slotMaterial(slot) → the palette slot's own Material as a table of nod
 ### `terrain.stats`
 
 terrain.stats([id]) → what the terrains hold in memory, in bytes: { total=, field= (voxels at full detail), standIns= (chunks put away as coarse stand-ins), tables=, meshesGpu= (drawn chunk meshes, at their capacity), meshesCpu=, collision= (the physics' triangles for ground near a body: ground no body is within about 64 m of, plus a second of its travel, is let go about once a second and meshed again if anything reaches it), shadow= (the volume shadows and AO are marched through), undo=, finePaint= (the cells of fine paint, in the blocks painted fine; 0 when none), dataChunks=, standInChunks=, terrains=, age=, budget=, detail= }, every terrain summed, or terrain id's alone (nil when there is no such terrain). Counted once a second while a game runs; age is how many seconds old the count is (-1 before the first). Chunks shared between copies of a field (the physics' copy, Play's snapshot) are counted once. budget is what terrain.setBudget set (nil for none), and detail how much of its detail the terrain keeps to stay in it, 0 to 1.
+
+### `terrain.surfaceBelow`
+
+terrain.surfaceBelow(points, dirs [, maxDist [, opts]]) → dists [, flags] — how far along a direction the ground's surface is, for thousands of points in one call, read off the ground's own field (a flood front, scatter, building footprints). points: a buffer of f32 x, y, z triples or a list of vec3s. dirs: one vec3 for all, one per point (buffer or list), or { toward = vec3 } for each point's way to a planet's centre. Each answer is positive below the point, negative when it is in the ground (the surface above), NaN when there is none within maxDist (default 1000) or the ground is not made yet. Buffer points answer as a buffer of f32s, into opts.out when that buffer is big enough (no garbage a frame); list points as a list. opts.flags = true adds a second answer: 0 made ground, 1 stand-in ground that may move (terrain.ready), 2 not made. e.g. local d = terrain.surfaceBelow(cells, { toward = planet.pos }, 50, { out = buf })
 
 ### `terrain.warm`
 

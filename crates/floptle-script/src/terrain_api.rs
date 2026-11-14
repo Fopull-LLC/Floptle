@@ -1502,6 +1502,213 @@ pub(crate) fn install_terrain_api(
         }
     }
 
+    // terrain.surfaceBelow(points, dirs [, maxDist [, opts]]) → distances
+    // [, flags]: for many points at once, how far along a direction the
+    // ground's surface is, read off the field in one call (what a water
+    // sim's flood front, a scatter pass or a footprint search marches for).
+    //
+    // `points` is a buffer of f32 x, y, z triples or a list of vec3s.
+    // `dirs` is one vec3 for every point, one per point (a buffer of f32
+    // triples or a list of vec3s), or `{ toward = vec3 }` for each point's
+    // own way to a centre: a planet's down. Each distance is positive below
+    // the point, negative when the point is in the ground and the surface is
+    // above it, and NaN when there is none within maxDist (default 1000)
+    // either way, or the ground there is not made yet. Points given as a
+    // buffer answer as a buffer of f32s (into `opts.out` when it is one big
+    // enough, so a game that asks every frame makes no garbage); as a list,
+    // as a list. `opts.flags = true` adds one byte (buffer) or number (list)
+    // a point: 0 made ground, 1 stand-in ground that may move
+    // (terrain.ready), 2 ground not made at all.
+    {
+        let cols = colliders.clone();
+        let unmade = unmade.clone();
+        if let Ok(f) = lua.create_function(
+            move |lua, (points, dirs, max, opts): (Value, Value, Option<f64>, Option<Table>)| {
+                const CALL: &str = "terrain.surfaceBelow";
+                let max = max.unwrap_or(1000.0).clamp(0.0, 1.0e6);
+                if let Some(o) = &opts {
+                    crate::opts::check_keys(o, &["out", "flags"], CALL)?;
+                }
+                let want_flags = match &opts {
+                    Some(o) => crate::opts::opt_bool(o, CALL, "flags")?.unwrap_or(false),
+                    None => false,
+                };
+                // Triples of a buffer or a list of vec3s.
+                let triples = |v: &Value, key: &str| -> mlua::Result<Vec<glam::DVec3>> {
+                    match v {
+                        Value::Buffer(b) => {
+                            let bytes = b.to_vec();
+                            if !bytes.len().is_multiple_of(12) {
+                                return Err(mlua::Error::runtime(format!(
+                                    "{CALL}: the `{key}` buffer is {} bytes, not a whole number of f32 x, y, z triples (12 bytes each)",
+                                    bytes.len()
+                                )));
+                            }
+                            let f: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+                            Ok(f.as_chunks::<3>().0.iter().map(|c| glam::DVec3::new(c[0] as f64, c[1] as f64, c[2] as f64)).collect())
+                        }
+                        Value::Table(t) => {
+                            let mut out = Vec::with_capacity(t.raw_len());
+                            for (i, v) in t.sequence_values::<Value>().enumerate() {
+                                let v = v?;
+                                match crate::math_api::vec3_of(&v) {
+                                    Some(p) => out.push(p),
+                                    None => {
+                                        let other = v;
+                                        return Err(mlua::Error::runtime(format!(
+                                            "{CALL}: `{key}`[{}] is a {}; it takes vec3s",
+                                            i + 1,
+                                            other.type_name()
+                                        )));
+                                    }
+                                }
+                            }
+                            Ok(out)
+                        }
+                        other => Err(mlua::Error::runtime(format!(
+                            "{CALL}: `{key}` is a {}; it takes a buffer of f32 triples or a list of vec3s",
+                            other.type_name()
+                        ))),
+                    }
+                };
+                let as_buffer = matches!(points, Value::Buffer(_));
+                let pts = triples(&points, "points")?;
+                let n = pts.len();
+                // One way down for every point, or one each.
+                let dirs: Vec<glam::DVec3> = match &dirs {
+                    v if crate::math_api::vec3_of(v).is_some() => vec![crate::math_api::vec3_of(v).unwrap_or_default()],
+                    Value::Table(t) if t.contains_key("toward")? => {
+                        let c: crate::math_api::LuaVec3 = t.get("toward")?;
+                        pts.iter().map(|p| c.0 - *p).collect()
+                    }
+                    v => {
+                        let d = triples(v, "dirs")?;
+                        if d.len() != n {
+                            return Err(mlua::Error::runtime(format!(
+                                "{CALL}: {} dirs for {n} points; give one each, one vec3 for all, or {{ toward = vec3 }}",
+                                d.len()
+                            )));
+                        }
+                        d
+                    }
+                };
+                let dirs: Vec<glam::DVec3> = dirs.into_iter().map(|d| d.normalize_or_zero()).collect();
+                // A zero direction (or a point at its own `toward`) has no down.
+                if let Some(k) = dirs.iter().position(|d| *d == glam::DVec3::ZERO) {
+                    return Err(mlua::Error::runtime(format!("{CALL}: direction {} is zero (a point at its own `toward`?)", k + 1)));
+                }
+                let dir_of = |k: usize| if dirs.len() == 1 { dirs[0] } else { dirs[k] };
+
+                // Every terrain's answer, the nearest kept: a point in any
+                // ground is in the ground (its surface above, the nearest
+                // one), and otherwise the nearest surface below.
+                let mut best = vec![f64::NAN; n];
+                let mut stand_in = vec![false; n];
+                let mut local = Vec::with_capacity(n);
+                let mut local_dirs = Vec::with_capacity(dirs.len());
+                let mut found = vec![0.0f64; n];
+                let mut flags = vec![0u8; n];
+                for c in cols.borrow().iter() {
+                    let Some(t) = c.shape.chunk_terrain() else { continue };
+                    let s = t.scale.max(1e-6) as f64;
+                    let inv = t.rot.inverse().as_dquat();
+                    local.clear();
+                    local.extend(pts.iter().map(|p| (inv * (*p - c.anchor)) / s));
+                    local_dirs.clear();
+                    local_dirs.extend(dirs.iter().map(|d| inv * *d));
+                    let along = if local_dirs.len() == 1 {
+                        floptle_field::surface::Dirs::One(local_dirs[0])
+                    } else {
+                        floptle_field::surface::Dirs::Each(&local_dirs)
+                    };
+                    t.field.surface_below(&local, along, max / s, &mut found, want_flags.then_some(&mut flags[..]));
+                    for k in 0..n {
+                        let d = found[k] * s;
+                        if !d.is_finite() {
+                            continue;
+                        }
+                        let b = best[k];
+                        let better = b.is_nan() || if d < 0.0 { b >= 0.0 || d > b } else { b >= 0.0 && d < b };
+                        if better {
+                            best[k] = d;
+                            stand_in[k] = want_flags && flags[k] & floptle_field::surface::SURFACE_STAND_IN != 0;
+                        }
+                    }
+                }
+                // Ground not made yet before the surface (or with none
+                // found) is not a miss: it is not known.
+                let mut code = vec![0u8; n];
+                {
+                    let unmade = unmade.borrow();
+                    if !unmade.is_empty() {
+                        for k in 0..n {
+                            let (p, d) = (pts[k], dir_of(k));
+                            let reach = if best[k] >= 0.0 { best[k] } else if best[k].is_nan() { max } else { 0.0 };
+                            if unmade.iter().any(|u| u.entry([p.x, p.y, p.z], [d.x, d.y, d.z], reach).is_some()) {
+                                best[k] = f64::NAN;
+                                code[k] = 2;
+                            }
+                        }
+                    }
+                }
+                for k in 0..n {
+                    if code[k] == 0 && stand_in[k] {
+                        code[k] = 1;
+                    }
+                }
+
+                let mut out = mlua::MultiValue::new();
+                if as_buffer {
+                    let given = match &opts {
+                        Some(o) => match o.get::<Value>("out")? {
+                            Value::Buffer(b) => Some(b),
+                            Value::Nil => None,
+                            other => {
+                                return Err(mlua::Error::runtime(format!("{CALL}: `out` is a {}; it takes a buffer", other.type_name())));
+                            }
+                        },
+                        None => None,
+                    };
+                    let bytes: Vec<u8> = best.iter().flat_map(|d| (*d as f32).to_le_bytes()).collect();
+                    let buf = match given {
+                        Some(b) if b.len() >= bytes.len() => {
+                            b.write_bytes(0, &bytes);
+                            b
+                        }
+                        Some(b) => {
+                            return Err(mlua::Error::runtime(format!(
+                                "{CALL}: the `out` buffer is {} bytes; {n} points need {}",
+                                b.len(),
+                                bytes.len()
+                            )));
+                        }
+                        None => lua.create_buffer(bytes)?,
+                    };
+                    out.push_back(Value::Buffer(buf));
+                    if want_flags {
+                        out.push_back(Value::Buffer(lua.create_buffer(code)?));
+                    }
+                } else {
+                    let t = lua.create_table_with_capacity(n, 0)?;
+                    for (k, d) in best.iter().enumerate() {
+                        t.raw_set(k + 1, *d)?;
+                    }
+                    out.push_back(Value::Table(t));
+                    if want_flags {
+                        let f = lua.create_table_with_capacity(n, 0)?;
+                        for (k, c) in code.iter().enumerate() {
+                            f.raw_set(k + 1, *c)?;
+                        }
+                        out.push_back(Value::Table(f));
+                    }
+                }
+                Ok(out)
+            },
+        ) {
+            let _ = t.set("surfaceBelow", f);
+        }
+    }
+
     // terrain.height(x, z) → the world-space Y of the highest terrain surface under
     // (x, z), or nil if no terrain is hit. Casts down each terrain's own field from
     // just above its content bounds — chunk-accurate and cheap.
