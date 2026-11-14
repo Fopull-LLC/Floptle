@@ -96,6 +96,29 @@ impl crate::Editor {
         self.water_sims.posers = posers;
     }
 
+    /// Hand the solver the surfaces scripts moved since the last tick
+    /// (`water.setLevel`, `water.setLevels`): the next step floats things
+    /// on the new level, without the water being built again.
+    fn take_new_water_levels(&mut self) {
+        let changed = self.script_host.take_water_changed();
+        if changed.is_empty() {
+            return;
+        }
+        let Some(sim) = self.sim.as_mut() else { return };
+        let declared = self.script_host.declared_water();
+        for v in &mut sim.world.water.volumes {
+            let floptle_physics::WaterShape::Declared { water, .. } = &mut v.shape else { continue };
+            if !changed.contains(&water.id) {
+                continue;
+            }
+            if let Some(w) = declared.iter().find(|w| w.id == water.id) {
+                let water = std::sync::Arc::make_mut(water);
+                water.surface = w.surface.clone();
+                water.simulated.clone_from(&w.simulated);
+            }
+        }
+    }
+
     /// The node at or above `node` whose body the solver moves: what a pool
     /// on a ship's deck rides. Only a node with a Rigid Body is asked about.
     fn water_carrier(&self, node: Entity) -> Option<Entity> {
@@ -120,6 +143,7 @@ impl crate::Editor {
             self.refresh_winds();
             self.vfx.wind = (self.script_host.wind_field().clone(), self.script_host.weather_time());
         }
+        self.take_new_water_levels();
         if self.water_sims.posers.is_empty() {
             return;
         }

@@ -69,6 +69,9 @@ pub(crate) struct WaterShared {
     /// Water scripts declared with `water.addVolume`. The driver keeps each
     /// one's frame on its anchor and hands them to the solver.
     pub declared: Rc<RefCell<Vec<DeclaredWater>>>,
+    /// Ids whose surface `water.setLevel` / `setLevels` moved, for the
+    /// driver to hand the solver before the next tick.
+    pub changed: Rc<RefCell<Vec<u32>>>,
     pub next_id: Rc<std::cell::Cell<u32>>,
     /// The level, lent for the frame, so `water.surface` can tell which of a
     /// lake's sphere lies in its basin and which runs under the ground.
@@ -449,6 +452,17 @@ fn deepest(vols: &[WaterInfo], p: [f64; 3]) -> Option<(&WaterInfo, f64)> {
     best
 }
 
+/// A declared water's level as `water.levelOf` reads it.
+fn level_of(w: &DeclaredWater) -> Option<f64> {
+    match &w.surface {
+        Surface::Lake { radius, .. } => Some(*radius),
+        Surface::Grid(g) => {
+            let wet: Vec<f64> = g.levels.iter().filter(|l| l.is_finite()).map(|l| *l as f64).collect();
+            (!wet.is_empty()).then(|| wet.iter().sum::<f64>() / wet.len() as f64)
+        }
+    }
+}
+
 /// Read a `(x, y, z)` triple or a single vec3/node from the argument list.
 fn point_of(a: &[Value]) -> Option<[f64; 3]> {
     if let Some(v) = a.first().and_then(crate::math_api::vec3_of) {
@@ -683,6 +697,84 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
         }
     }
 
+    // water.setLevel(id, level): move a declared body of water's surface in
+    // place, its id, look, density, drag, current and depth kept. A lake's
+    // `level` is its surface sphere's radius; a heightfield's wet points all
+    // go to `level`; a sim's held points (and the level it fills to, if it
+    // has not filled yet) go to `level`. Cheap enough to call every frame.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |_, (id, level): (u32, f64)| {
+            let err = |m: &str| mlua::Error::RuntimeError(format!("water.setLevel: {m}"));
+            if !level.is_finite() {
+                return Err(err("`level` is a number: a lake's radius, a heightfield's or a sim's height"));
+            }
+            let mut d = s.declared.borrow_mut();
+            let Some(w) = d.iter_mut().find(|w| w.id == id) else { return Ok(false) };
+            match (&mut w.surface, &mut w.simulated) {
+                (_, Some(sim)) => sim.level = level as f32,
+                (Surface::Lake { radius, .. }, None) => {
+                    if level <= 0.0 {
+                        return Err(err("a lake's level is its surface's radius from its parent's centre, more than 0"));
+                    }
+                    *radius = level;
+                }
+                (Surface::Grid(g), None) => {
+                    for l in std::sync::Arc::make_mut(g).levels.iter_mut().filter(|l| l.is_finite()) {
+                        *l = level as f32;
+                    }
+                }
+            }
+            s.changed.borrow_mut().push(id);
+            Ok(true)
+        }) {
+            let _ = t.set("setLevel", f);
+        }
+    }
+
+    // water.setLevels(id, levels): a heightfield's levels, one per point as
+    // `addVolume` took them (`false` for dry ground).
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |_, (id, levels): (u32, Table)| {
+            let err = |m: &str| mlua::Error::RuntimeError(format!("water.setLevels: {m}"));
+            let mut d = s.declared.borrow_mut();
+            let Some(w) = d.iter_mut().find(|w| w.id == id) else { return Ok(false) };
+            let (Surface::Grid(g), None) = (&mut w.surface, &w.simulated) else {
+                return Err(err("only a heightfield has a level per point; water.setLevel moves a lake or a sim"));
+            };
+            let g = std::sync::Arc::make_mut(g);
+            if levels.raw_len() != g.levels.len() {
+                return Err(err(&format!("`levels` has {} entries for {} points", levels.raw_len(), g.levels.len())));
+            }
+            for (i, l) in g.levels.iter_mut().enumerate() {
+                *l = match levels.raw_get::<Value>(i + 1)? {
+                    Value::Number(n) => n as f32,
+                    Value::Integer(n) => n as f32,
+                    _ => f32::NAN,
+                };
+            }
+            s.changed.borrow_mut().push(id);
+            Ok(true)
+        }) {
+            let _ = t.set("setLevels", f);
+        }
+    }
+
+    // water.levelOf(id) → its level now: a lake's radius, the mean of a
+    // heightfield's wet points, a sim's mean surface where it is wet. nil
+    // when there is no such volume, or none of it is wet.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |_, id: u32| {
+            let d = s.declared.borrow();
+            let Some(w) = d.iter().find(|w| w.id == id) else { return Ok(None) };
+            Ok(level_of(w))
+        }) {
+            let _ = t.set("levelOf", f);
+        }
+    }
+
     // water.removeVolume(id) → true if there was one.
     {
         let s = shared.clone();
@@ -773,6 +865,7 @@ mod tests {
             volumes: Rc::default(),
             freeze: Rc::default(),
             declared: Rc::default(),
+            changed: Rc::default(),
             next_id: Rc::default(),
             colliders: Rc::default(),
             sim_origin: Rc::default(),
@@ -946,6 +1039,73 @@ mod tests {
             .eval()
             .unwrap();
         assert!(verts > 100 && tris > 100 && nothing, "{verts} {tris} {nothing}");
+    }
+
+    /// **`water.setLevel` moves a body of water's surface in place.** A
+    /// lake takes a new radius, a heightfield's wet points all go to the
+    /// level (its dry ones stay dry), `setLevels` sets them one by one, and
+    /// `levelOf` reads it back; the id, the count of volumes and everything
+    /// else about the water stay, and the driver is told which moved.
+    #[test]
+    fn set_level_moves_a_surface_in_place() {
+        let (lua, shared) = host();
+        let (lake, field, before, after, mean, n): (u32, u32, f64, f64, f64, i64) = lua
+            .load(
+                r#"local lake = water.addVolume{ shape = "lake", center = vec3(0, 805, 0), reach = 60, depth = 6 }
+                   local field = water.addVolume{ shape = "heightfield", cell = 2, columns = 2, rows = 2, levels = { 3, 3, false, 1 } }
+                   local before = water.depthAt(0, 803, 0)
+                   assert(water.setLevel(lake, 806))
+                   assert(water.setLevel(field, 5))
+                   assert(not water.isUnderwater(0, 4, 2), "a dry point was wetted")
+                   assert(water.setLevel(999, 3) == false)
+                   return lake, field, before, water.depthAt(0, 803, 0), water.levelOf(field), #water.volumes()"#,
+            )
+            .eval()
+            .unwrap();
+        assert!((before - 2.0).abs() < 1e-9 && (after - 3.0).abs() < 1e-9, "{before} {after}");
+        assert!((mean - 5.0).abs() < 1e-9, "{mean}");
+        assert_eq!(n, 0);
+        assert_eq!(shared.declared.borrow().len(), 2);
+        assert_eq!(shared.declared.borrow()[0].id, lake);
+        assert_eq!(shared.declared.borrow()[0].floor, 6.0, "the lake's bed went");
+        let mut changed = shared.changed.borrow().clone();
+        changed.sort_unstable();
+        assert_eq!(changed, vec![lake, field]);
+        let level: f64 = lua.load(format!("return water.levelOf({lake})")).eval().unwrap();
+        assert_eq!(level, 806.0);
+        let (one, dry): (f64, bool) = lua
+            .load(format!(
+                "water.setLevels({field}, {{ 2, false, 2, 2 }}) return water.depthAt(1, 1, 1), water.isUnderwater(2, 1.5, 0)"
+            ))
+            .eval()
+            .unwrap();
+        assert!((one - 1.0).abs() < 1e-9 && !dry, "{one} {dry}");
+        let err = lua.load(format!("water.setLevels({field}, {{ 1, 2 }})")).exec().unwrap_err();
+        assert!(err.to_string().contains("`levels` has 2 entries"), "{err}");
+        let err = lua.load(format!("water.setLevels({lake}, {{ 1 }})")).exec().unwrap_err();
+        assert!(err.to_string().contains("heightfield"), "{err}");
+        let err = lua.load(format!("water.setLevel({lake}, -1)")).exec().unwrap_err();
+        assert!(err.to_string().contains("radius"), "{err}");
+    }
+
+    /// **Moving a lake's level costs next to nothing**, so a game can do it
+    /// every frame while a lake drains: a thousand calls among twenty
+    /// volumes take well under the 0.02 ms a frame the card allows for one
+    /// a frame.
+    #[test]
+    fn set_level_is_cheap() {
+        let (lua, _) = host();
+        let ms: f64 = lua
+            .load(
+                r#"local ids = {}
+                   for i = 1, 20 do ids[i] = water.addVolume{ shape = "lake", center = vec3(0, 800 + i, 0), reach = 60 } end
+                   local t = os.clock()
+                   for k = 1, 1000 do water.setLevel(ids[20], 820 + k * 0.001) end
+                   return (os.clock() - t) * 1000 / 1000"#,
+            )
+            .eval()
+            .unwrap();
+        assert!(ms < 0.02, "one setLevel took {ms} ms");
     }
 
     /// A frozen sea has no inside. A swim controller must not think the player

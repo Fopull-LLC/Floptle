@@ -1928,6 +1928,28 @@ function water.falls(id) end
 ---@param opts? { cells?: integer }
 ---@return { positions: number[], normals: number[], uvs: number[], indices: integer[] }|nil
 function water.surface(id, opts) end
+---Move the surface of water `water.addVolume` declared, in place: its id,
+---look, density, drag, current and depth stay, and the physics floats things on
+---the new level from the next tick. A lake's `level` is its surface's radius
+---from its parent's centre; a heightfield's wet points all go to `level`; a
+---sim's held points go to `level`. Cheap enough to call every frame. true if
+---there was such water.
+---@param id integer
+---@param level number
+---@return boolean
+function water.setLevel(id, level) end
+---A heightfield's surface heights, one per point as `water.addVolume` took
+---them (`false` for dry ground), the same count. true if there was such water.
+---@param id integer
+---@param levels (number|boolean)[]
+---@return boolean
+function water.setLevels(id, levels) end
+---The level of water `water.addVolume` declared: a lake's radius, the mean of
+---a heightfield's wet points, a sim's mean surface where it is wet. nil when
+---there is none, or none of it is wet.
+---@param id integer
+---@return number|nil
+function water.levelOf(id) end
 ---Take away water `water.addVolume` declared. true if there was some.
 ---@param id integer
 ---@return boolean

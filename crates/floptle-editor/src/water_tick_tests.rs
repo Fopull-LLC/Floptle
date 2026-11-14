@@ -223,3 +223,63 @@ fn a_pool_on_a_moving_ship_carries_what_floats_in_it() {
     assert!(b.y > t.y, "the ball sank in the tank: {b} against {t}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A lake whose level a script moves every tick floats things at the new
+/// level from the next tick**, with no rebuild: its id and the count of
+/// volumes stay, the solver's lake has the radius the last tick set, and a
+/// ball floating on it rises with it, 1.2 m in 2 s.
+#[test]
+fn a_lake_raised_every_tick_floats_a_body_at_its_new_level() {
+    let (mut ed, dir) = project(
+        "setlevel",
+        r#"
+local id, n = nil, 0
+function update(node, dt)
+  if not id then id = water.addVolume{ shape = "lake", parent = "Planet", center = vec3(0, 0, 100), reach = 40 } end
+end
+function fixedUpdate(node, dt)
+  if not id then return end
+  n = n + 1
+  if n > 300 and n <= 420 then water.setLevel(id, 100 + (n - 300) * 0.01) end
+  log(string.format("L %d %d %.4f", id, #water.volumes(), water.levelOf(id)))
+end
+"#,
+    );
+    let planet = node(&mut ed, "Planet", DVec3::ZERO);
+    ed.world.insert(planet, CelestialBody { mu: 9.8e4, body_radius: 95.0, soi: 2000.0, ..Default::default() });
+    let ball = node(&mut ed, "Ball", DVec3::new(0.0, 0.0, 100.4));
+    ed.world.insert(ball, RigidBody { radius: 0.5, mass: 20.0, ..Default::default() });
+    camera(&mut ed, DVec3::new(20.0, 0.0, 110.0));
+    ed.toggle_play();
+    let radius = |ed: &crate::Editor| {
+        ed.sim.as_ref().unwrap().world.water.volumes.iter().find_map(|v| match &v.shape {
+            floptle_physics::WaterShape::Declared { water, .. } => match water.surface {
+                floptle_core::water::Surface::Lake { radius, .. } => Some(radius),
+                _ => None,
+            },
+            _ => None,
+        })
+    };
+    let mut rest = 0.0;
+    for f in 0..240 {
+        ed.play_step(2.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        let r = (floptle_core::world_transform(&ed.world, ball).translation).length();
+        if f == 149 {
+            rest = r;
+        }
+        // After a frame's ticks, the solver's lake is the level its last
+        // tick set.
+        let want = 100.0 + ((2 * (f + 1)) as f64 - 300.0).clamp(0.0, 120.0) * 0.01;
+        if let Some(got) = radius(&ed) {
+            assert!((got - want).abs() < 1e-9, "frame {f}: the solver's lake is at {got}, the script set {want}");
+        }
+    }
+    let r = floptle_core::world_transform(&ed.world, ball).translation.length();
+    assert!((r - rest - 1.2).abs() < 0.1, "the ball rose {} m with a lake raised 1.2 m", r - rest);
+    ed.drain_script_logs();
+    let ids: std::collections::HashSet<String> =
+        ed.console.entries.iter().filter_map(|e| e.msg.strip_prefix("L ")).map(|l| l.split(' ').take(2).collect::<Vec<_>>().join(" ")).collect();
+    assert_eq!(ids.len(), 1, "the lake's id or the count of volumes changed: {ids:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

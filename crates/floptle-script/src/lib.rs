@@ -1015,6 +1015,9 @@ pub struct ScriptHost {
     water_freeze: Rc<RefCell<Vec<(u32, bool)>>>,
     /// Water scripts declared with `water.addVolume`.
     water_declared: Rc<RefCell<Vec<floptle_core::water::DeclaredWater>>>,
+    /// Declared water whose surface a script moved (`water.setLevel`) since
+    /// the driver last asked.
+    water_changed: Rc<RefCell<Vec<u32>>>,
     /// Scatter sources scripts declared — resolved into
     /// drawable instances by the driver, never into scene nodes.
     scatter_sources: scatter_api::Sources,

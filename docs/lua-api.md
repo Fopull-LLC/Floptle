@@ -30,7 +30,7 @@ each group, and meant to be searched.
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 36
 - [pathfinding — nav.*](#pathfinding--nav) — 26
-- [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 11
+- [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 14
 - [weather — wind](#weather--wind) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 12
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 38
@@ -3260,6 +3260,10 @@ water.flowAt(point) → vec3, the water's velocity there in m/s: a river's curre
 
 water.isUnderwater(point) — the yes/no, for when you don't need the depth. Takes x,y,z or a vec3 or a node: if water.isUnderwater(node) then stamina = stamina - dt end
 
+### `water.levelOf`
+
+water.levelOf(id) → the level now: a lake's radius, the mean of a heightfield's wet points, a sim's mean surface where it is wet. nil for no such water, or none of it wet.
+
 ### `water.removeVolume`
 
 water.removeVolume(id) → true if there was such water. Takes away what water.addVolume declared.
@@ -3267,6 +3271,14 @@ water.removeVolume(id) → true if there was such water. Takes away what water.a
 ### `water.setFrozen`
 
 water.setFrozen(node, true) — freeze a water volume. Freezing is a STATE, not a second system: the same node with a flag flipped, and both the physics (no buoyancy, no drag) and the look follow from it. A world that thaws is one call back.
+
+### `water.setLevel`
+
+water.setLevel(id, level) → true if there was such water. Moves the surface of water water.addVolume declared, in place: the id, look, density, drag, current and depth stay, the physics floats things on the new level from the next tick and water.surface draws it on the next call. A lake's `level` is its surface's radius from its parent's centre; a heightfield's wet points all go to `level` (dry ones stay dry); a sim's held points go to `level` (and, if it has not filled yet, the level it fills to). Cheap enough to call every frame while a lake drains or a pool fills.
+
+### `water.setLevels`
+
+water.setLevels(id, levels) → true if there was such water. A heightfield's surface heights, one per point as water.addVolume took them (false for dry ground), the same count; nothing else about it changes.
 
 ### `water.surface`
 

@@ -380,6 +380,9 @@ end
 | `water.flowAt(x, y, z)` | the water's velocity there, m/s; zero in still water. |
 | `water.addVolume{...}` | declare a lake or a heightfield of water no node carries; returns an id. |
 | `water.surface(id [, {cells}])` | its surface as the arrays `mesh.build` takes, in the parent's frame. |
+| `water.setLevel(id, level)` | move its surface in place: a lake's radius, a heightfield's or a sim's held level. |
+| `water.setLevels(id, levels)` | a heightfield's levels, one per point. |
+| `water.levelOf(id)` | its level now. |
 | `water.removeVolume(id)` | take it away again. |
 
 A lake on a round world is part of a sphere about the planet's centre, and only
@@ -433,6 +436,24 @@ end
 `water.falls([id])` lists every place simulated water pours off a drop of more
 than 1.5 m, in the world, refreshed as the water flows: where a game puts its
 waterfall sheets and mist, and takes them away when a fall runs dry.
+
+A declared volume's level can move without removing and adding it again:
+`water.setLevel(id, level)` gives a lake a new surface radius, puts every wet
+point of a heightfield at `level` (`water.setLevels` sets them one by one), and
+holds a sim's held points at `level`, so the sim's water flows in or out there.
+The id and everything else about the volume stay, the physics floats things on
+the new level from the next tick, and the call is cheap enough to make every
+frame while a pool fills or a lake drains through a breach. `water.levelOf(id)`
+reads it back.
+
+```lua
+-- A pit beside the lake seeps full over a minute and a half.
+local pit = water.addVolume{ shape = "lake", parent = "Planet", center = pitCentre, reach = 6, depth = 4 }
+function update(node, dt)
+  local l = water.levelOf(pit)
+  if l < fullRadius then water.setLevel(pit, math.min(fullRadius, l + dt * 0.03)) end
+end
+```
 
 Water rides whatever it lies on **tick by tick**: a Water Volume node, or a
 volume declared with a `parent`, is put where its node is for every fixed

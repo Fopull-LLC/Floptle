@@ -2994,12 +2994,14 @@ impl ScriptHost {
             Rc::new(RefCell::new(Vec::new()));
         let water_freeze: Rc<RefCell<Vec<(u32, bool)>>> = Rc::new(RefCell::new(Vec::new()));
         let water_declared: Rc<RefCell<Vec<floptle_core::water::DeclaredWater>>> = Rc::default();
+        let water_changed: Rc<RefCell<Vec<u32>>> = Rc::default();
         crate::water_api::install_water_api(
             &lua,
             crate::water_api::WaterShared {
                 volumes: water_volumes.clone(),
                 freeze: water_freeze.clone(),
                 declared: water_declared.clone(),
+                changed: water_changed.clone(),
                 next_id: Rc::default(),
                 colliders: colliders.clone(),
                 sim_origin: sim_origin.clone(),
@@ -3612,6 +3614,7 @@ impl ScriptHost {
             water_volumes,
             water_freeze,
             water_declared,
+            water_changed,
             scatter_sources,
             scatter_owners,
             scatter_settled,
@@ -4253,6 +4256,16 @@ impl ScriptHost {
         if let Some(sim) = self.water_declared.borrow_mut().iter_mut().find(|w| w.id == id).and_then(|w| w.simulated.as_mut()) {
             sim.falls = falls;
         }
+    }
+
+    /// Declared water a script moved the surface of (`water.setLevel`)
+    /// since the last ask, by id, each once: the solver takes its new
+    /// surface for the next tick.
+    pub fn take_water_changed(&self) -> Vec<u32> {
+        let mut ids = std::mem::take(&mut *self.water_changed.borrow_mut());
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 
     /// Drop every declared water — a scene switch, like [`Self::clear_weather`].

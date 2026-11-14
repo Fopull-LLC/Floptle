@@ -58,6 +58,9 @@ pub(crate) struct WaterSims {
 struct WaterSim {
     grid: floptle_field::water::WaterGrid,
     water: floptle_field::water::ShallowWater,
+    /// The level its held points are held at, and those points.
+    level: f32,
+    held: Vec<usize>,
     /// The level edit the ground was last read against.
     seen_edits: u64,
 }
@@ -134,6 +137,7 @@ impl crate::Editor {
                 }
                 // The sea or the lake beyond the patch: its level held along
                 // the edge, wherever the ground there is under it.
+                let mut held = Vec::new();
                 if spec.hold_edges {
                     for j in 0..g.rows {
                         for i in 0..g.columns {
@@ -141,13 +145,22 @@ impl crate::Editor {
                             let edge = i == 0 || j == 0 || i + 1 == g.columns || j + 1 == g.rows;
                             if edge && grid.ground[c] < level {
                                 water.hold_level(c, level);
+                                held.push(c);
                             }
                         }
                     }
                 }
-                self.water_sims.sims.insert(w.id, WaterSim { grid, water, seen_edits: edits });
+                self.water_sims.sims.insert(w.id, WaterSim { grid, water, level, held, seen_edits: edits });
             }
             let Some(s) = self.water_sims.sims.get_mut(&w.id) else { continue };
+            // `water.setLevel`: what is held is held at the new level, and
+            // water flows in or out there until the rest follows.
+            if spec.level != s.level {
+                s.level = spec.level;
+                for &c in &s.held {
+                    s.water.hold_level(c, spec.level);
+                }
+            }
             // Ground dug or filled since: read it again where it changed, and
             // wake the water there.
             if edits != s.seen_edits {
