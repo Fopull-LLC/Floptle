@@ -3627,8 +3627,8 @@ impl PhysicsWorld {
         self.bodies[bi].vel += g * dt;
         if !self.water.is_empty() {
             let b = &self.bodies[bi];
-            let r = b.bounding_radius();
-            if let Some(a) = crate::water::buoyancy_accel(&self.water, b.com(), r, b.mass, b.vel, g, dt) {
+            let (p, r) = b.water_sphere();
+            if let Some(a) = crate::water::buoyancy_accel(&self.water, p, r, b.mass, b.vel, g, dt) {
                 self.bodies[bi].vel += a * dt;
             }
         }
@@ -4128,13 +4128,10 @@ impl PhysicsWorld {
             // torquing.
             if !self.water.is_empty() {
                 let b = &self.bodies[bi];
-                let (_, _, r) = b.sample_centers();
-                // A box body has no sphere radius; use its bounding sphere so
-                // a crate still displaces something.
-                let r = if r > 0.0 { r } else { b.bounding_radius() };
+                let (p, r) = b.water_sphere();
                 if let Some(a) = crate::water::buoyancy_accel(
                     &self.water,
-                    b.pos,
+                    p,
                     r,
                     b.mass,
                     b.vel,
@@ -7967,5 +7964,156 @@ mod settle_tests {
         let slept = slept.expect("the crate rocking in place never fell asleep");
         assert!(slept < 360, "the crate rocking in place slept only at step {slept}");
         assert_eq!(woke, 0, "asleep, the crate was awake again for {woke} steps");
+    }
+}
+
+/// What floats, and that turning has no say in it: a body that does not
+/// rotate displaces the water one that does displaces.
+#[cfg(test)]
+mod water_float_tests {
+    use super::*;
+    use crate::gravity::GravityField;
+    use crate::water::{WaterShape, WaterVolume};
+
+    const G: Vec3 = Vec3::new(0.0, -9.81, 0.0);
+    const DT: f32 = 1.0 / 60.0;
+
+    /// A sea 100 m deep with its surface at y = 0, and nothing else.
+    fn sea() -> PhysicsWorld {
+        let mut w = PhysicsWorld::new(GravityField::uniform(G));
+        w.water.volumes.push(WaterVolume {
+            shape: WaterShape::Box { center: Vec3::new(0.0, -50.0, 0.0), half: Vec3::new(100.0, 50.0, 100.0), rot: Quat::IDENTITY },
+            density: 1000.0,
+            drag: 1.0,
+            angular_drag: 1.0,
+            frozen: false,
+            entity: 7,
+            carry: Default::default(),
+        });
+        w
+    }
+
+    /// One body of each shape, each half as dense as the water against the
+    /// sphere that stands in for it, so each should float about half sunk.
+    /// The hull and the polygon are lopsided on purpose: their centres of
+    /// mass are not their nodes.
+    fn shapes() -> Vec<(&'static str, Body)> {
+        let wedge = crate::hull::Hull::from_points(&[
+            Vec3::new(-0.2, -0.3, -0.4),
+            Vec3::new(1.0, -0.3, -0.4),
+            Vec3::new(-0.2, -0.3, 0.6),
+            Vec3::new(1.0, -0.3, 0.6),
+            Vec3::new(-0.2, 0.7, -0.4),
+            Vec3::new(-0.2, 0.7, 0.6),
+        ])
+        .expect("a wedge is a hull");
+        let outline = floptle_core::outline::Outline::convex(&[[-0.3, -0.3], [0.9, -0.3], [-0.3, 0.9]]);
+        let mut all = vec![
+            ("sphere", Body::sphere(Vec3::ZERO, 0.5)),
+            ("capsule", Body::capsule(Vec3::ZERO, 0.4, 1.8)),
+            ("box", Body::boxx(Vec3::ZERO, Vec3::new(0.5, 0.4, 0.6))),
+            ("polygon", Body::polygon(Vec3::ZERO, outline, 0.25)),
+            ("hull", Body::hull(Vec3::ZERO, wedge)),
+        ];
+        for (name, b) in &mut all {
+            b.feet = false;
+            // A capsule that does not rotate is sized by its own radius (see
+            // `Body::water_sphere`), and is made to float as that.
+            let r = if *name == "capsule" { b.radius } else { b.bounding_radius() };
+            b.mass = 500.0 * 4.0 / 3.0 * core::f32::consts::PI * r * r * r;
+        }
+        all
+    }
+
+    /// Drops `body` from 2 m above the sea and returns its height each tick
+    /// for twenty seconds.
+    fn drop_in(mut body: Body, rotates: bool) -> Vec<f32> {
+        let mut w = sea();
+        body.pos = Vec3::new(0.0, 2.0, 0.0);
+        body.prev_pos = body.pos;
+        body.rotates = rotates;
+        let bi = w.add_body(body);
+        (0..1200)
+            .map(|_| {
+                w.step(DT);
+                w.bodies[bi].pos.y
+            })
+            .collect()
+    }
+
+    /// Where a body floats: its height over the last two seconds of a drop,
+    /// the middle of what is left of its bobbing.
+    fn draft(ys: &[f32]) -> f32 {
+        let last = &ys[ys.len() - 120..];
+        last.iter().sum::<f32>() / last.len() as f32
+    }
+
+    /// **A box that does not rotate floats where one that does floats.** Its
+    /// buoyancy was sized from the two-centimetre skin its corners carry for
+    /// collision, a sphere displacing a few grams, and it sank at full
+    /// gravity. Same draft once settled, and the same path down to it, which
+    /// is the drag.
+    #[test]
+    fn a_box_that_does_not_rotate_floats_at_the_draft_of_one_that_does() {
+        let (_, body) = shapes().into_iter().find(|(n, _)| *n == "box").unwrap();
+        let still = drop_in(body, false);
+        let turning = drop_in(body, true);
+        let (a, b) = (draft(&still), draft(&turning));
+        assert!(b.abs() < 0.2, "fixture: the rotating box floats at y {b}");
+        assert!((a - b).abs() < 0.01, "the box that does not rotate floats at y {a}, the one that does at y {b}");
+        let apart = still.iter().zip(&turning).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(apart < 0.02, "on the way down the two boxes were {apart} m apart: not the same drag");
+    }
+
+    /// **Every shape floats without rotating.** Each is half the water's
+    /// density, so each comes to rest at the surface. A sphere, a box and a
+    /// hull rest where their rotating twins rest. Two differ from their
+    /// twins, as they always have, and are held to that here:
+    ///
+    /// - a polygon is centred on its node where a rotating one is centred on
+    ///   its centre of mass, so a lopsided outline floats higher or lower by
+    ///   the distance between the two;
+    /// - a capsule is a character, sized by its own radius where a tumbling
+    ///   one is sized by its length, and is only asked to float.
+    #[test]
+    fn every_shape_floats_without_rotating() {
+        for (name, body) in shapes() {
+            let reach = body.bounding_radius();
+            let y = draft(&drop_in(body, false));
+            assert!(y > -reach && y < reach, "the {name} that does not rotate ended at y {y}: it is not at the surface");
+            if name == "capsule" {
+                continue;
+            }
+            let off_centre = if name == "polygon" { body.com_local().y } else { 0.0 };
+            let t = draft(&drop_in(body, true)) + off_centre;
+            assert!((y - t).abs() < 0.01, "the {name} that does not rotate floats at y {y}, the one that does at y {t}");
+        }
+    }
+
+    /// **The water a rotating body feels is its bounding sphere at its
+    /// centre of mass**, to the bit, every tick of a drop into a sea: the
+    /// speed it ends a step with is the speed it began with, plus gravity,
+    /// plus the push and drag of that sphere, and nothing else.
+    #[test]
+    fn a_rotating_body_feels_the_water_of_its_bounding_sphere_to_the_bit() {
+        for (name, mut body) in shapes() {
+            let mut w = sea();
+            body.pos = Vec3::new(0.0, 2.0, 0.0);
+            body.prev_pos = body.pos;
+            body.rotates = true;
+            let bi = w.add_body(body);
+            let mut wet = 0;
+            for tick in 0..240 {
+                let b = &w.bodies[bi];
+                let fell = b.vel + G * DT;
+                let push = crate::water::buoyancy_accel(&w.water, b.com(), b.bounding_radius(), b.mass, fell, G, DT);
+                wet += push.is_some() as usize;
+                let want = fell + push.unwrap_or(Vec3::ZERO) * DT;
+                w.step(DT);
+                let got = w.bodies[bi].vel;
+                assert_eq!(got.to_array().map(f32::to_bits), want.to_array().map(f32::to_bits), "the rotating {name}, tick {tick}: {got} against {want}");
+            }
+            assert!(wet > 100, "fixture: the {name} was in the water for only {wet} ticks");
+        }
     }
 }
