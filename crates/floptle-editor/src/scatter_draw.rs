@@ -537,7 +537,15 @@ pub(crate) fn build_instances_with(
     // One ray over budget is allowed now and then when a ray alone is more
     // than the budget; otherwise a ray starts only if it is expected to fit.
     let slow_turn = *frame % SLOW_RAY_EVERY == 0;
+    // A source that is gone takes its settled chunks with it. A game changes
+    // how far a field reaches by declaring it again, and every chunk of the
+    // old one stayed resolved until the scene ended: memory that grew with
+    // each change, walked again whenever a later source swept.
+    let swept = sweeps.len();
     sweeps.retain(|id, _| sources.iter().any(|s| s.id == *id));
+    if sweeps.len() != swept {
+        resolved.retain(|(id, _), _| sources.iter().any(|s| s.id == *id));
+    }
     // Shared across sources, because it is a frame budget. A source that eats
     // it all is fully resident afterwards and stops asking, so the next source
     // gets the next frame's — it converges rather than starving anyone.
@@ -1342,6 +1350,32 @@ end
             dying: None,
             marks: Default::default(),
         }
+    }
+
+    /// **A source that is gone leaves no chunks behind.** A field declared
+    /// again at another distance is a new source: the old one's settled
+    /// chunks go when it does, instead of staying resolved for the rest of
+    /// the scene.
+    #[test]
+    fn a_source_that_is_gone_leaves_no_chunks_behind() {
+        let mut cache = ScatterCache { settle_all: true, ..Default::default() };
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        let mut build = |cache: &mut ScatterCache, s: &ScatterSource| {
+            let mut out = Vec::new();
+            build_instances(
+                cache, std::slice::from_ref(s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
+                &floptle_render::Frustum::everything(), 20_000, &mut out,
+            );
+            out.len()
+        };
+        let far = src();
+        assert!(build(&mut cache, &far) > 0, "nothing drew");
+        let held = cache.len();
+        let near = ScatterSource { id: 2, bands: vec![Band { asset: "a".into(), distance: 25.0 }], ..src() };
+        assert!(build(&mut cache, &near) > 0, "the field declared again drew nothing");
+        assert!(cache.chunks.keys().all(|(id, _)| *id == 2), "the old source's chunks are still held");
+        assert!(cache.len() < held, "the nearer field holds as many chunks as the far one did: {} vs {held}", cache.len());
     }
 
     /// **A source's tint and glow reach every prop it draws.** Scatter drew

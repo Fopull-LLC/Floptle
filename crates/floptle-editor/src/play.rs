@@ -1150,7 +1150,7 @@ impl Editor {
             // The cap and the governor are the run's, like the settings above.
             self.frame_cap = 0.0;
             self.dyn_res = None;
-            self.set_texture_quality(0);
+            self.set_texture_quality_now(0);
             // Map geometry lives outside the scene doc too — and unlike terrain
             // it has no in-Play authoring path, so a restore here is purely a
             // guard against a script (or a stray Map-tab click) mutating the

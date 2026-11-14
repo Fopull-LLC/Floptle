@@ -35,6 +35,15 @@ use crate::Editor;
 /// goes up every frame however long it takes.
 const UPLOAD_BUDGET_MS: f32 = 4.0;
 
+/// How long a frame spends putting pictures read again for a new texture
+/// quality on the GPU. At least one goes up every frame however long it
+/// takes.
+const REQUALITY_UPLOAD_MS: f32 = 2.0;
+
+/// How many pictures may be read again ahead of their upload at once, so a
+/// game with hundreds of textures holds a few decoded, not all of them.
+const REQUALITY_AHEAD: usize = 4;
+
 /// How many images decode at once: half the machine's threads less the one
 /// building shaders, at least one and at most three. The rest are the game's.
 #[cfg(not(target_arch = "wasm32"))]
@@ -465,6 +474,13 @@ pub(crate) struct Warm {
     failed: HashSet<String>,
     /// A project material's images and shader, by the path it was asked for.
     materials: HashMap<String, Vec<(String, PreloadKind)>>,
+    /// Loaded pictures still to be read again at the texture quality now
+    /// set (`app.setTextureQuality`), by path, with the id each keeps.
+    requality_waiting: VecDeque<(String, floptle_render::TexId)>,
+    /// …the ones being read and filtered on a worker…
+    requality_jobs: Vec<(String, floptle_render::TexId, Job<Option<floptle_render::PreparedTexture>>)>,
+    /// …and the ones ready, waiting their turn to upload, oldest first.
+    requality_ready: VecDeque<(String, floptle_render::TexId, floptle_render::PreparedTexture)>,
     /// Images and shaders put in use by warming, so far: what a test counts.
     pub(crate) installed: u64,
     /// Every image decode, warmed or not, on any thread: what a test counts
@@ -494,6 +510,14 @@ impl Warm {
     }
 }
 
+impl Warm {
+    /// How many loaded pictures have yet to reach the texture quality now
+    /// set: still to be read again, being read, or waiting to upload.
+    pub(crate) fn requality_pending(&self) -> usize {
+        self.requality_waiting.len() + self.requality_jobs.len() + self.requality_ready.len()
+    }
+}
+
 impl Default for Warm {
     fn default() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
@@ -506,6 +530,9 @@ impl Default for Warm {
             decoding: HashMap::new(),
             uploads: VecDeque::new(),
             compiling: HashMap::new(),
+            requality_waiting: VecDeque::new(),
+            requality_jobs: Vec::new(),
+            requality_ready: VecDeque::new(),
             nothing: HashSet::new(),
             failed: HashSet::new(),
             materials: HashMap::new(),
@@ -720,6 +747,7 @@ impl Editor {
                 }
             }
         }
+        self.advance_texture_requality(&mut inline);
         let t = floptle_core::profile::Span::new();
         while let Some((path, want, data)) = self.warm.uploads.pop_front() {
             // A frame that drew it already loaded it: nothing to do but answer.
@@ -749,6 +777,138 @@ impl Editor {
         });
         if let Some((rel, done)) = landed {
             self.land_warm_shader(&rel, done);
+        }
+    }
+
+    /// The texture quality changed: every mipmapped picture already loaded
+    /// from a file is to be read again and put back under its own id at the
+    /// new quality. Queued here and done a few a frame
+    /// ([`Self::advance_texture_requality`]); a change made while an earlier
+    /// one is still under way starts over from what is loaded now.
+    pub(crate) fn begin_texture_requality(&mut self) {
+        let mut smooth: Vec<(String, floptle_render::TexId)> = self
+            .texture_registry
+            .iter()
+            .filter(|(p, _)| {
+                self.texture_registry_setting.get(*p).is_some_and(|s| s.filter == crate::assets::FilterMode::SmoothMipmaps)
+            })
+            .map(|(p, id)| (p.clone(), *id))
+            .collect();
+        // In a fixed order, so two runs change the same picture on the same
+        // frame.
+        smooth.sort_by(|a, b| a.0.cmp(&b.0));
+        self.warm.requality_jobs.clear();
+        self.warm.requality_ready.clear();
+        self.warm.requality_waiting = smooth.into();
+    }
+
+    /// The read and filter of one picture for the texture quality now set,
+    /// as work a thread can run: `None` from it for a picture with no file
+    /// to read again (one a script made keeps what it has). `None` here when
+    /// the picture is no longer loaded as it was queued.
+    fn requality_work(
+        &self,
+        path: &str,
+        id: floptle_render::TexId,
+    ) -> Option<impl FnOnce() -> Option<floptle_render::PreparedTexture> + Send + 'static + use<>> {
+        if self.texture_registry.get(path) != Some(&id) {
+            return None;
+        }
+        let sampling = self.texture_registry_setting.get(path)?.to_sampling();
+        let max = self.gpu.as_ref()?.device.limits().max_texture_dimension_2d;
+        let drop = self.raster.as_ref()?.texture_quality();
+        let file = self.resolve_asset_path(path);
+        let name = path.to_string();
+        Some(move || {
+            let data = crate::project::decode_texture_file(&file, max, &name)?;
+            Some(floptle_render::PreparedTexture::new(data, sampling, drop))
+        })
+    }
+
+    /// Put one picture read again for the new quality under its id, unless
+    /// it was unloaded or loaded afresh since it was queued: a fresh load
+    /// took the new quality on its own.
+    fn land_requality(&mut self, path: &str, id: floptle_render::TexId, prepared: &floptle_render::PreparedTexture) {
+        if self.texture_registry.get(path) != Some(&id) {
+            return;
+        }
+        let upload = floptle_core::profile::Span::new();
+        if let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) {
+            raster.replace_texture_prepared(gpu, id, prepared);
+        }
+        self.note_asset(path, "assetUpload", upload.ms());
+    }
+
+    /// A frame's share of bringing the loaded pictures to a new texture
+    /// quality: collect what the workers finished, upload within
+    /// [`REQUALITY_UPLOAD_MS`], and start reading the next few. Reading and
+    /// filtering a picture is tens of milliseconds, so it is a worker's; all
+    /// of them done on the frame the setting changed stopped a game for
+    /// seconds. Until its turn a picture draws at the quality it had.
+    fn advance_texture_requality(&mut self, inline: &mut usize) {
+        if self.warm.requality_pending() == 0 {
+            return;
+        }
+        let mut done = Vec::new();
+        self.warm.requality_jobs.retain_mut(|(path, id, job)| match job.poll(inline) {
+            None => true,
+            Some(out) => {
+                done.push((std::mem::take(path), *id, out.flatten()));
+                false
+            }
+        });
+        for (path, id, out) in done {
+            if let Some(prepared) = out {
+                self.warm.requality_ready.push_back((path, id, prepared));
+            }
+        }
+        let t = floptle_core::profile::Span::new();
+        while let Some((path, id, prepared)) = self.warm.requality_ready.pop_front() {
+            self.land_requality(&path, id, &prepared);
+            if t.ms() >= REQUALITY_UPLOAD_MS {
+                break;
+            }
+        }
+        while self.warm.requality_jobs.len() + self.warm.requality_ready.len() < REQUALITY_AHEAD {
+            let Some((path, id)) = self.warm.requality_waiting.pop_front() else { break };
+            let Some(work) = self.requality_work(&path, id) else { continue };
+            match start(&self.warm.images, work) {
+                Some(job) => self.warm.requality_jobs.push((path, id, job)),
+                // No worker to give it to: this frame's one piece, done here.
+                None => {
+                    self.requality_here(&path, id);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Read one picture again and put it back, here and now.
+    fn requality_here(&mut self, path: &str, id: floptle_render::TexId) {
+        let Some(work) = self.requality_work(path, id) else { return };
+        if let Some(prepared) = work() {
+            self.land_requality(path, id, &prepared);
+        }
+    }
+
+    /// Bring every loaded picture to the texture quality now set before
+    /// going on, however long it takes: for Stop, which puts the project's
+    /// quality back at once, and for a single picture (`floptle shot`),
+    /// which has no later frames for the change to finish over.
+    pub(crate) fn finish_texture_requality(&mut self) {
+        if self.warm.requality_pending() == 0 {
+            return;
+        }
+        for (path, id, prepared) in std::mem::take(&mut self.warm.requality_ready) {
+            self.land_requality(&path, id, &prepared);
+        }
+        for (path, id, job) in std::mem::take(&mut self.warm.requality_jobs) {
+            if let Some(prepared) = job.wait().flatten() {
+                self.land_requality(&path, id, &prepared);
+            }
+        }
+        for (path, id) in std::mem::take(&mut self.warm.requality_waiting) {
+            self.requality_here(&path, id);
         }
     }
 

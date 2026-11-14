@@ -9,7 +9,7 @@ use floptle_core::{CelestialBody, Matter, Name, ScriptInst, Scripts};
 /// `radius` will stand, and a driver whose `update` makes the spherecast a
 /// crew member's ground check does. The world starts cold: Play streams it
 /// in from its recipe.
-fn arrival_scene(tag: &str, radius: f64) -> Option<(crate::Editor, floptle_core::Entity, std::path::PathBuf)> {
+pub(crate) fn arrival_scene(tag: &str, radius: f64) -> Option<(crate::Editor, floptle_core::Entity, std::path::PathBuf)> {
     let mut ed = crate::offscreen::test_editor_with_gpu()?;
     let dir = std::env::temp_dir().join(format!("floptle_arrival_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -80,20 +80,20 @@ fn arrival_scene(tag: &str, radius: f64) -> Option<(crate::Editor, floptle_core:
 /// One frame of the game as a build runs it, with the draw into an
 /// offscreen target (a headless device has no swapchain to draw into), and
 /// the frame folded into the profiler.
-struct Frames {
+pub(crate) struct Frames {
     color: wgpu::Texture,
     depth: wgpu::Texture,
 }
 
 impl Frames {
-    fn new(ed: &crate::Editor) -> Self {
+    pub(crate) fn new(ed: &crate::Editor) -> Self {
         let gpu = ed.gpu.as_ref().unwrap();
         let (color, depth) = crate::viewports::offscreen_textures(gpu, 320, 180, "arrival", wgpu::TextureUsages::COPY_SRC);
         Self { color, depth }
     }
 
     /// The frame's wall-clock milliseconds.
-    fn frame(&self, ed: &mut crate::Editor) -> f64 {
+    pub(crate) fn frame(&self, ed: &mut crate::Editor) -> f64 {
         let t = std::time::Instant::now();
         let _ = ed.player_frame(false);
         let (cv, dv) = (self.color.create_view(&Default::default()), self.depth.create_view(&Default::default()));
@@ -107,7 +107,7 @@ impl Frames {
     }
 }
 
-fn describe(r: &floptle_core::profile::FrameRecord) -> String {
+pub(crate) fn describe(r: &floptle_core::profile::FrameRecord) -> String {
     let mut buckets = r.buckets.clone();
     buckets.sort_by(|a, b| b.1.total_cmp(&a.1));
     let mut parts = r.parts.clone();

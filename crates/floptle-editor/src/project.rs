@@ -152,33 +152,31 @@ impl Editor {
     /// Bring the textures to texture quality `q` (`app.setTextureQuality`):
     /// the raster cuts mipmapped pictures from now on, and every mipmapped
     /// texture already loaded from a file is read again and put back under
-    /// its own id, so what draws with it changes on the next frame. A model's
-    /// own pictures take the quality when a model is next loaded. Reading the
-    /// files again is the cost, once, on the frame the setting changes.
+    /// its own id, so what draws with it changes without anything being
+    /// bound again. A model's own pictures take the quality when a model is
+    /// next loaded.
+    ///
+    /// The loaded textures change over the frames that follow, a few a
+    /// frame, each read and filtered on a worker
+    /// ([`Self::begin_texture_requality`]): read again on the frame the
+    /// setting changed, a game with a few hundred textures stopped for
+    /// seconds whenever its settings screen, or its own automatic quality
+    /// drop, moved this. [`Self::set_texture_quality_now`] is the same with
+    /// nothing left for later.
     pub(crate) fn set_texture_quality(&mut self, q: u32) {
         let Some(raster) = self.raster.as_mut() else { return };
         if raster.texture_quality() == q.min(2) {
             return;
         }
         raster.set_texture_quality(q);
-        let Some(max) = self.gpu.as_ref().map(|g| g.device.limits().max_texture_dimension_2d) else { return };
-        let smooth: Vec<(String, TexId)> = self
-            .texture_registry
-            .iter()
-            .filter(|(p, _)| {
-                self.texture_registry_setting.get(*p).is_some_and(|s| s.filter == crate::assets::FilterMode::SmoothMipmaps)
-            })
-            .map(|(p, id)| (p.clone(), *id))
-            .collect();
-        for (path, id) in smooth {
-            let file = self.resolve_asset_path(&path);
-            // A texture a script made (a capture, gpu:N) has no file to read
-            // again, and keeps what it has.
-            let Some(data) = decode_texture_file(&file, max, &path) else { continue };
-            if let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) {
-                raster.replace_texture(gpu, id, &data);
-            }
-        }
+        self.begin_texture_requality();
+    }
+
+    /// [`Self::set_texture_quality`], finished before it returns: every
+    /// loaded texture is at quality `q` afterwards.
+    pub(crate) fn set_texture_quality_now(&mut self, q: u32) {
+        self.set_texture_quality(q);
+        self.finish_texture_requality();
     }
 
     /// Give each newly extracted texture the filter its model draws it with,
@@ -4159,8 +4157,9 @@ pub(crate) fn decode_texture_file(file: &Path, max: u32, path: &str) -> Option<f
 mod texture_quality_tests {
     /// **Texture quality cuts what the GPU holds, and a script sets it.**
     /// `app.setTextureQuality("Medium")` halves a smooth texture's sides, a
-    /// quarter of its bytes, on the frame it is asked for, under the same id;
-    /// a pixel-art texture is left whole, and Stop brings everything back.
+    /// quarter of its bytes, over the frames after it is asked for, under the
+    /// same id; a pixel-art texture is left whole, and Stop brings everything
+    /// back at once.
     #[test]
     fn a_script_sets_the_texture_quality_and_the_gpu_holds_less() {
         let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
@@ -4190,11 +4189,19 @@ mod texture_quality_tests {
         ed.apply_app_requests();
         let said: String = ed.script_host.instance_env(e.index(), "menu").unwrap().get("said").unwrap();
         assert_eq!(said, "Medium");
+        // Read again on a worker and put back by the frames that follow.
+        for _ in 0..2000 {
+            if ed.warm.requality_pending() == 0 {
+                break;
+            }
+            ed.pump_warm();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         let medium = bytes(&ed);
         assert_eq!(whole - medium, mip_chain(1024) - mip_chain(512), "Medium did not cut the smooth texture to a quarter, alone: {whole} -> {medium}");
         assert_eq!(ed.ensure_texture("big.png"), Some(big), "the texture changed its id");
 
-        ed.set_texture_quality(0);
+        ed.set_texture_quality_now(0);
         assert_eq!(bytes(&ed), whole, "High did not bring the texture back whole");
         let _ = std::fs::remove_dir_all(&dir);
     }
