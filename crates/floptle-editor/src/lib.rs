@@ -318,6 +318,7 @@ mod templates;
 mod terrain_edit;
 #[cfg(feature = "editor-ui")]
 mod terrain_ui;
+mod terrain_far;
 mod terrain_water;
 mod tile_edit;
 #[cfg(feature = "editor-ui")]

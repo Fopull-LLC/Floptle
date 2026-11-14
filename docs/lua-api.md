@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 79
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 38
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 39
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 30
 - [weather — wind](#weather--wind) — 6
@@ -3131,6 +3131,10 @@ terrain.stats([id]) → what the terrains hold in memory, in bytes: { total=, fi
 ### `terrain.surfaceBelow`
 
 terrain.surfaceBelow(points, dirs [, maxDist [, opts]]) → dists [, flags] — how far along a direction the ground's surface is, for thousands of points in one call, read off the ground's own field (a flood front, scatter, building footprints). points: a buffer of f32 x, y, z triples or a list of vec3s. dirs: one vec3 for all, one per point (buffer or list), or { toward = vec3 } for each point's way to a planet's centre. Each answer is positive below the point, negative when it is in the ground (the surface above), NaN when there is none within maxDist (default 1000) or the ground is not made yet. Buffer points answer as a buffer of f32s, into opts.out when that buffer is big enough (no garbage a frame); list points as a list. opts.flags = true adds a second answer: 0 made ground, 1 stand-in ground that may move (terrain.ready), 2 not made. e.g. local d = terrain.surfaceBelow(cells, { toward = planet.pos }, 50, { out = buf })
+
+### `terrain.viewReady`
+
+terrain.viewReady(id) → how much of the ground of the terrain with id `id` that the camera can see is drawn at the detail it will stay at, from 0 to 1. A planet the camera was just put near streams its ground in over seconds, nearest first, and draws a ball at the bottom of its ground under what has not arrived; a probe, a screenshot or a cutscene that wants the finished picture waits for 1. A body drawn as its far ball reads 1. nil when no terrain with that id is in the world. e.g. if terrain.viewReady(7) == 1 then takeShot() end
 
 ### `terrain.warm`
 

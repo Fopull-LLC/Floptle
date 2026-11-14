@@ -338,6 +338,15 @@ pub(crate) struct TerrainRender {
     /// it ([`crate::terrain_water::impostor_water_cap`]): infinite for a body
     /// with no such sea, `None` until asked or when its water changes.
     pub impostor_cap: Option<f32>,
+    /// The lowest of a round body's ground, in the field's units
+    /// ([`crate::terrain_far::ground_floor`]): what its streaming backstop
+    /// grows to from afar. `None` until asked, and again when its field is
+    /// planned anew.
+    pub floor: Option<f32>,
+    /// The share of the body's ground in the camera's view that is drawn at
+    /// the detail it will stay at, from its last coverage scan: what
+    /// `terrain.viewReady` reports. `None` before its first scan.
+    pub view_share: Option<f32>,
     /// The meshes of the chunks drawn at the coarsest level, kept so they can
     /// be drawn [`FAR_GROUP`]³ to a draw ([`Self::groups`]).
     pub far: HashMap<[i32; 3], floptle_field::ChunkMesh>,
@@ -1946,8 +1955,15 @@ impl Editor {
                     render.empty.clear();
                     render.free_all(raster);
                     render.born.clear();
+                    // A ball is all there is to draw, and it is drawn.
+                    render.view_share = Some(1.0);
                     scanned.push(e);
                     continue;
+                }
+                // Read once a body is near enough to stream, and again when
+                // its field is planned anew.
+                if render.floor.is_none() || structural {
+                    render.floor = Some(crate::terrain_far::ground_floor(&terrain.field));
                 }
             } else {
                 render.impostor = false;
@@ -2108,7 +2124,23 @@ impl Editor {
                 continue;
             }
             scanned.push(e);
+            // How much of the ground in view is drawn as it will stay, for
+            // `terrain.viewReady`: in the field's frame and units, a chunk
+            // wholly behind the body's floor out of sight.
+            let eye = cl * chunk_units;
+            let floor_r = render.floor.unwrap_or(0.0);
+            let (mut in_view, mut final_in_view) = (0usize, 0usize);
             for coord in terrain.field.chunk_coords() {
+                let mid = (Vec3::new(coord[0] as f32, coord[1] as f32, coord[2] as f32) + Vec3::splat(0.5)) * chunk_units;
+                if !crate::terrain_far::behind_ball(mid - eye, chunk_units * 1.3, -eye, floor_r) {
+                    in_view += 1;
+                    let done = render.empty.contains(&coord)
+                        || render.slots.get(&coord).is_some_and(|&(_, cur)| {
+                            let want = if dug(coord) { 0 } else { lod_for(dist_of(coord), cur, rings) };
+                            want == cur && !render.stale.contains(&coord) && !render.pending.contains_key(&coord)
+                        });
+                    final_in_view += usize::from(done);
+                }
                 match render.slots.get(&coord) {
                     None => {
                         if render.pending.contains_key(&coord)
@@ -2170,6 +2202,7 @@ impl Editor {
                     }
                 }
             }
+            render.view_share = Some(if in_view == 0 { 1.0 } else { final_in_view as f32 / in_view as f32 });
         }
 
         for (e, p) in premeshed {
@@ -2377,23 +2410,7 @@ pub(crate) fn push_terrain_instances(
     // fully hidden behind a solid ball (center c, radius big_r) the camera sits
     // outside of? Exact point-behind-sphere against a conservatively shrunk
     // ball (R − rc) — a chunk that peeks past the limb never culls.
-    let occluded = |p: Vec3, rc: f32, c: Vec3, big_r: f32| -> bool {
-        let r_eff = big_r - rc;
-        if r_eff <= 0.0 || c.length_squared() <= big_r * big_r {
-            return false; // occluder too small, or camera inside it (caves)
-        }
-        let vlen = p.length().max(1e-6);
-        let dir = p / vlen;
-        let tc = c.dot(dir); // sphere center's depth along the chunk ray
-        if tc <= 0.0 {
-            return false; // occluder behind the camera relative to this ray
-        }
-        let d2 = c.length_squared() - tc * tc;
-        if d2 >= r_eff * r_eff {
-            return false; // ray misses the shrunk ball
-        }
-        vlen > tc + (r_eff * r_eff - d2).sqrt() // chunk past the FAR surface
-    };
+    let occluded = crate::terrain_far::behind_ball;
     for (&e, render) in terrain_render {
         // A body a game hid (or switched off) draws nothing of its own: a game
         // drawing its own far worlds hides the engine's.
@@ -2436,12 +2453,25 @@ pub(crate) fn push_terrain_instances(
         // Occluder radius: the ball it already declares as being wholly inside
         // itself, which is exactly the property needed here. It can never poke
         // through real ground, and real ground hides it the moment it lands.
-        if !render.pending.is_empty()
-            && let Some(cb) = world.get::<floptle_core::CelestialBody>(e)
-            && cb.occluder_radius > 0.0
-        {
+        // From afar it is the ground's floor instead (`terrain_far`): the
+        // Occluder ball drew a planet as a rock a fraction of its size until
+        // its limb streamed in.
+        let backstop = match world.get::<floptle_core::CelestialBody>(e) {
+            Some(cb) if !render.pending.is_empty() || render.waiting > 0 => {
+                let ts = f64::from(wt.scale.x.max(1e-6));
+                let far = render.floor.and_then(|f| {
+                    crate::terrain_far::backstop_radius(cb.occluder_radius * ts, f64::from(f) * ts, (wt.translation - cam_world).length())
+                });
+                match far {
+                    Some(r) => Some(r as f32 / 0.85),
+                    None if cb.occluder_radius > 0.0 => Some((cb.occluder_radius as f32 * wt.scale.x.max(1e-6)) / 0.85),
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(scale) = backstop {
             let rel = (wt.translation - cam_world).as_vec3();
-            let scale = (cb.occluder_radius as f32 * wt.scale.x.max(1e-6)) / 0.85;
             let model = Mat4::from_scale_rotation_translation(
                 Vec3::splat(scale),
                 Quat::IDENTITY,
@@ -4665,9 +4695,32 @@ impl Editor {
         self.script_host.set_terrain_busy(busy);
         let unmade = self.terrain_unmade_regions();
         self.script_host.set_terrain_unmade(unmade);
+        let view = self.terrain_view_shares();
+        self.script_host.set_terrain_view_ready(view);
         let in_use = self.terrain_save_slot_in_use();
         self.script_host.set_terrain_save_dir_in_use(in_use);
         self.publish_slot_materials();
+    }
+
+    /// Per terrain id, the share of its ground in the camera's view drawn at
+    /// the detail it stays at (`terrain.viewReady`): a body put away cold
+    /// reads 1 while it is drawn as its far ball and 0 while it is coming
+    /// in, and a resident one 0 until its first coverage scan.
+    pub(crate) fn terrain_view_shares(&self) -> HashMap<u32, f32> {
+        let mut out = HashMap::new();
+        for (e, m) in self.world.query::<Matter>() {
+            let Matter::Terrain { id, .. } = m else { continue };
+            let r = self.terrain_render.get(&e);
+            let share = if self.terrains.contains_key(&e) {
+                r.and_then(|r| r.view_share).unwrap_or(0.0)
+            } else if self.terrain_cold.contains_key(&e) {
+                if r.is_some_and(|r| r.impostor) { 1.0 } else { 0.0 }
+            } else {
+                continue;
+            };
+            out.insert(*id, share);
+        }
+        out
     }
 
     /// Could anything still read or write the save slot? A terrain body in the

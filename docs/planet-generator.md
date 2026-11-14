@@ -94,6 +94,21 @@ A level that changes (a tide, a lake declared mid-game) is not applied in the fr
 
 A terrain with no water declared on it and no level set is meshed exactly as it always was. Simulated water and heightfields (`shape = "sim"`, `"heightfield"`) set no level on their own, because their surface is not one height: give the terrain a level by hand where one fits.
 
+## While a planet's ground arrives
+
+A planet the camera has just been put near draws its ground as it is meshed, nearest first: the ground facing the camera lands in a second or two, and the chunks along its rim many seconds later on a big world. Under what has not arrived, it draws one shaded ball in its ground's colour, so space never shows through it:
+
+- **Near the ground** the ball is the body's Occluder, the ball it declares wholly inside itself (`occluderRadius`), so it never stands out of a valley the player is looking along. A body with no Occluder draws no ball there.
+- **From afar** the ball grows to the bottom of the planet's ground, read once from its field when it starts streaming. Its silhouette is where the ground's is, within the ground's own height, from the first frame, so a sea, an atmosphere or a ring drawn at the planet's surface meets it at once.
+- **In between** the ball grows with the camera's height, from 120 m to 480 m above the bottom of the ground, so it never jumps.
+
+The ball is drawn only while ground is still to come. To wait for the finished picture (a screenshot, a probe, a cutscene opening on a planet), read `terrain.viewReady(id)`: the share of the planet's ground in view of the camera that is drawn at the detail it will stay at, which reaches 1 once it is.
+
+```lua
+-- Hold the cutscene's first shot until the world under it has arrived.
+if terrain.viewReady(home) < 1 then return end
+```
+
 ## Surface materials by climate
 
 `biomes` is a list of rules. For every patch of surface, the first rule whose ranges all match paints it with that rule's `slot` and `color`. A range left out does not constrain. Ground that no rule matches falls back to `surfaceA` and `surfaceB`, as before. Deeper layers (`subsoil`, `strata`, `deep`, pockets and seams) are unchanged.

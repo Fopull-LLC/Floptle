@@ -3340,6 +3340,7 @@ impl ScriptHost {
         let terrain_impostors: crate::terrain_api::ImpostorCalls = Rc::default();
         let terrain_water_levels: crate::terrain_api::WaterLevelCalls = Rc::default();
         let terrain_unmade: Rc<RefCell<Vec<crate::terrain_api::UnmadeRegion>>> = Rc::default();
+        let terrain_view: crate::terrain_api::TerrainViewShares = Rc::default();
         let terrain_dropped: Rc<std::cell::Cell<u64>> = Rc::default();
         let terrain_edit_feed: Rc<RefCell<crate::terrain_api::EditFeed>> = Rc::default();
         let terrain_prepare: crate::terrain_api::PrepareCalls = Rc::default();
@@ -3359,6 +3360,7 @@ impl ScriptHost {
                 busy: terrain_busy.clone(),
                 save_dir_in_use: terrain_save_dir_in_use.clone(),
                 unmade: terrain_unmade.clone(),
+                view: terrain_view.clone(),
                 prepare: terrain_prepare.clone(),
                 paths: paths.clone(),
                 copies: terrain_copies.clone(),
@@ -3595,6 +3597,7 @@ impl ScriptHost {
             terrain_busy,
             terrain_save_dir_in_use,
             terrain_unmade,
+            terrain_view,
             terrain_slots,
             terrain_dropped,
             terrain_edit_feed,
@@ -5110,6 +5113,13 @@ impl ScriptHost {
     /// [`Self::set_terrain_busy`].
     pub fn set_terrain_unmade(&self, regions: Vec<crate::terrain_api::UnmadeRegion>) {
         *self.terrain_unmade.borrow_mut() = regions;
+    }
+
+    /// Publish, per terrain id, the share of its ground in the camera's view
+    /// drawn at the detail it stays at, for `terrain.viewReady`. Each frame,
+    /// beside [`Self::set_terrain_unmade`].
+    pub fn set_terrain_view_ready(&self, shares: std::collections::HashMap<u32, f32>) {
+        *self.terrain_view.borrow_mut() = shares;
     }
 
     /// Publish the palette slots' Materials for `terrain.slotMaterial`, one
