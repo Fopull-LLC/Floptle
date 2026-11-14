@@ -481,6 +481,8 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field lowpass number? Muffle this sound alone above that many Hz (behind a wall); 0 = off.
 ---@field group string? The voice group it counts against (see `audio.limit`).
 ---@field priority integer? Which sound gives way when its group is full: the lowest goes first (default 0).
+---@field airAbsorption number? How fast distance dulls it: past minDistance its cutoff falls as 20 kHz / (1 + k × metres); 0 = off.
+---@field lowpassFalloff {near: number, far: number}? A low-pass that closes with distance: `near` Hz at minDistance to `far` Hz at maxDistance.
 
 ---The sound system: fire-and-forget playback + mixer control. Positions and
 ---following make it spatial; pass no position for flat 2D (UI, music).

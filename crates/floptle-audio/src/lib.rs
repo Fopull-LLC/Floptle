@@ -52,7 +52,7 @@ pub use clip::{Clip, ClipRef};
 pub use level::VoiceLeveler;
 pub use effects::{EffectDesc, EqBand, EqBandKind};
 pub use mixer::{EffectSlot, MixerDesc, TrackDesc, MASTER};
-pub use source::{AudioSource, AuxSend, EndBehavior, Falloff, PlayParams, SpatialMode};
+pub use source::{AudioSource, AuxSend, EndBehavior, Falloff, LowpassFalloff, PlayParams, SpatialMode};
 pub use spatial::Listener;
 pub use stream::{StreamRef, StreamRing, STREAM_RATE};
 pub use voice::{VoiceId, VoiceStatus};

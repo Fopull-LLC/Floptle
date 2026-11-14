@@ -257,9 +257,38 @@ playing fades the extras out. `audio.groupCount("splash")` is how many voices
 the group is playing, as the mixer last counted them (a sound asked for this
 frame shows up a frame or so later). A limit holds until Play stops. A play
 session can name up to 64 groups; a sound in a group past that plays
-ungrouped. Sounds
-with no group are never counted and never replaced, so a game that names no
-groups plays exactly as before.
+ungrouped. Sounds with no group are never counted and never replaced, so a
+game that names no groups plays exactly as before.
+
+### Distance dulls a sound: `airAbsorption` and `lowpassFalloff`
+
+Far away, a sound loses its highs before it loses its loudness: thunder
+rumbles, a distant waterfall hisses less than a near one. Two `audio.play`
+options make the mixer do that from the distance it already knows, every
+few milliseconds, as the sound or the listener moves:
+
+```lua
+audio.play("audio/waterfall.ogg", fallNode, {
+  loop = true, maxDistance = 400,
+  airAbsorption = 0.02,                        -- past minDistance: 20 kHz / (1 + k × metres)
+})
+
+audio.play("audio/horn.ogg", x, y, z, {
+  lowpassFalloff = { near = 12000, far = 600 }, -- Hz at minDistance → Hz at maxDistance
+})
+```
+
+- `airAbsorption = k`: inside `minDistance` nothing is cut; past it the
+  cutoff falls as `20000 / (1 + k × metres past minDistance)`. 0.02 dulls a
+  sound across a field (about 4 kHz at 200 m), 0.2 is thick fog or rain.
+- `lowpassFalloff = {near = Hz, far = Hz}`: `near` at `minDistance`, `far`
+  at `maxDistance`, and evenly in pitch in between (halfway along the range
+  is the geometric mean, which is how the ear hears it).
+
+With both, or with a sound's own `lowpass` (`s:setLowpass`) as well, the
+lowest cutoff wins: one filter on the sound, never two stacked. Only a sound
+in the world has a distance: a flat sound (no position, or `mode = "Flat"`)
+is never dulled by either. Both are off unless named.
 
 ### The Audio Source component
 

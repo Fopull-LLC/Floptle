@@ -151,6 +151,24 @@ pub struct PlayParams {
     /// Which sound gives way when its group is full: the lowest goes first.
     #[serde(skip_serializing_if = "is_zero_i32")]
     pub priority: i32,
+    /// Air absorption: how fast distance dulls this sound. Past
+    /// `min_distance` its cutoff falls as `20 kHz / (1 + k × metres)`, so
+    /// 0.02 is a sound across a field, 0.2 one through thick fog. 0 = off.
+    /// Only a sound placed in the world has a distance.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub air_absorption: f32,
+    /// A low-pass that closes with distance: `near` Hz at `min_distance`,
+    /// `far` Hz at `max_distance`, gliding evenly in pitch between them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lowpass_falloff: Option<LowpassFalloff>,
+}
+
+/// A distance low-pass curve: the cutoff at a sound's `min_distance` and at
+/// its `max_distance` ([`PlayParams::lowpass_falloff`]).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LowpassFalloff {
+    pub near: f32,
+    pub far: f32,
 }
 
 fn is_zero(x: &f32) -> bool {
@@ -195,6 +213,8 @@ impl Default for PlayParams {
             lowpass: 0.0,
             group: String::new(),
             priority: 0,
+            air_absorption: 0.0,
+            lowpass_falloff: None,
         }
     }
 }

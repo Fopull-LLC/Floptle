@@ -1309,3 +1309,45 @@ end
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A sound can be dulled by its distance.** `airAbsorption` and
+/// `lowpassFalloff` reach the play parameters; a sound that names neither
+/// carries neither; a malformed curve is refused with the shape it takes.
+#[test]
+fn distance_lowpass_options_reach_the_engine() {
+    let dir = std::env::temp_dir().join("floptle_script_test_distance_lowpass");
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "far",
+        "function start(node)\n\
+         \x20 audio.play('audio/wave.ogg', 1, 2, 3, { airAbsorption = 0.05 })\n\
+         \x20 audio.play('audio/wave.ogg', 1, 2, 3, { lowpassFalloff = { near = 8000, far = 400 } })\n\
+         \x20 audio.play('audio/ding.ogg')\n\
+         \x20 for _, bad in ipairs({ { lowpassFalloff = 400 }, { lowpassFalloff = { near = 8000 } },\n\
+         \x20     { lowpassFalloff = { near = 8000, far = 0 } }, { airAbsorption = -1 } }) do\n\
+         \x20   local ok, e = pcall(audio.play, 'audio/a.ogg', 0, 0, 0, bad)\n\
+         \x20   print(tostring(ok) .. ' ' .. tostring(e))\n\
+         \x20 end\n\
+         end\n",
+    );
+    let (mut world, _) = world_with_script("far");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.1, 0.1);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let said = host.drain_logs().into_iter().map(|l| l.msg).collect::<Vec<_>>();
+    assert_eq!(said.len(), 4, "{said:?}");
+    assert!(said.iter().all(|l| l.starts_with("false")), "a malformed option was taken: {said:?}");
+    assert!(said[0].contains("{near = Hz, far = Hz}") && said[1].contains("`far` is missing"), "{said:?}");
+    assert!(said[2].contains("far") && said[3].contains("airAbsorption"), "{said:?}");
+
+    let cmds = host.take_audio_commands();
+    let params = |i: usize| match &cmds[i] {
+        AudioCmd::Play { params, .. } => params.clone(),
+        c => panic!("{c:?}"),
+    };
+    assert_eq!((params(0).air_absorption, params(0).lowpass_falloff), (0.05, None));
+    assert_eq!(params(1).lowpass_falloff, Some(floptle_audio::LowpassFalloff { near: 8000.0, far: 400.0 }));
+    assert_eq!((params(2).air_absorption, params(2).lowpass_falloff), (0.0, None), "a sound that names neither");
+    assert_eq!(cmds.len(), 3, "a refused play still queued: {cmds:?}");
+}

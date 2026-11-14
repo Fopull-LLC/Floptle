@@ -131,6 +131,25 @@ voice that had just ended.
   `audio.groupCount`.
 - Limits live in the core and are cleared by `reset` (Play stopped).
 
+## The per-voice low-pass
+
+Each voice has one `LowPass` (two one-poles, 12 dB an octave, coefficient
+gliding across a block so a change never clicks). Its cutoff is worked out
+per block in `render_block`, beside the gain, by `voice_cutoff`: the lowest
+non-zero of
+
+- `PlayParams::lowpass` (`audio.play{lowpass=}`, `s:setLowpass`);
+- the distance cutoff, `spatial::distance_cutoff`, from `air_absorption`
+  (`20 kHz / (1 + k × (d − min_distance))`) and `lowpass_falloff` (`near` at
+  `min_distance` to `far` at `max_distance`, geometric in between).
+
+Distance applies only to a voice in the world: positioned and not `Flat`
+(`world_distance`). A voice with none of these set gets the same cutoff
+every block, so its filter does exactly what it did before. The lowest
+cutoff, not a filter per source, keeps the cost at one filter per voice; the
+track's bus low-pass (`TrackDesc::lowpass`) is a separate filter after the
+effect chain and stacks in series with it.
+
 ## Real-time rules (keep these)
 
 - The callback never locks/allocates on the steady path. Status publishing

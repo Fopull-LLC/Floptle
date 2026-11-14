@@ -25,7 +25,8 @@ pub(crate) struct AudioBridges {
 /// Every key an `audio.play` options table reads. Anything else is refused.
 pub(crate) const PLAY_KEYS: &[&str] = &[
     "volume", "pitch", "pan", "minDistance", "maxDistance", "mode", "falloff", "track",
-    "endBehavior", "loop", "sends", "lowpass", "group", "priority",
+    "endBehavior", "loop", "sends", "lowpass", "group", "priority", "airAbsorption",
+    "lowpassFalloff",
 ];
 
 /// Read a play-options table into `PlayParams`, refusing anything it does not
@@ -101,6 +102,30 @@ fn parse_params(opts: Option<&Table>) -> mlua::Result<PlayParams> {
     }
     if let Some(v) = num("priority") {
         p.priority = v.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+    }
+    if let Some(v) = crate::opts::opt_num(t, CALL, "airAbsorption", 0.0, 1.0e6)? {
+        p.air_absorption = v as f32;
+    }
+    match t.raw_get::<Value>("lowpassFalloff")? {
+        Value::Nil => {}
+        Value::Table(c) => {
+            check_keys(&c, &["near", "far"], "audio.play lowpassFalloff")?;
+            let hz = |k: &str| -> mlua::Result<f32> {
+                match crate::opts::opt_num(&c, CALL, k, 1.0, 1.0e6)? {
+                    Some(v) => Ok(v as f32),
+                    None => Err(mlua::Error::runtime(format!(
+                        "{CALL}: `lowpassFalloff` is {{near = Hz, far = Hz}}, and `{k}` is missing"
+                    ))),
+                }
+            };
+            p.lowpass_falloff = Some(floptle_audio::LowpassFalloff { near: hz("near")?, far: hz("far")? });
+        }
+        v => {
+            return Err(mlua::Error::runtime(format!(
+                "{CALL}: `lowpassFalloff` is {{near = Hz, far = Hz}}, got {}",
+                v.type_name()
+            )));
+        }
     }
     Ok(p)
 }
