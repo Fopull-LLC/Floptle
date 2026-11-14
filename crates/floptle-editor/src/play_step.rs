@@ -446,6 +446,7 @@ impl Editor {
     }
 
     pub(crate) fn play_step(&mut self, dt: f32, game_focused: bool) {
+        self.publish_water_worlds();
         // **`app.*` is driven from inside the step, not around it.** There are
         // two hosts that run gameplay — the windowed frame and `floptle run`'s
         // headless loop — and a settings API wired into only one of them is a

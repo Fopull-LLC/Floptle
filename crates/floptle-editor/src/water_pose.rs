@@ -100,6 +100,18 @@ impl crate::Editor {
         self.water_sims.posers = posers;
     }
 
+    /// Tell the scripts which nodes are round worlds, before they run: a
+    /// river declared on a celestial body lies round it, and one declared
+    /// anywhere else lies flat.
+    pub(crate) fn publish_water_worlds(&self) {
+        let names: Vec<&str> = self
+            .world
+            .query::<floptle_core::CelestialBody>()
+            .filter_map(|(e, _)| self.world.get::<floptle_core::Name>(e).map(|n| n.0.as_str()))
+            .collect();
+        self.script_host.set_water_worlds(names.iter().copied());
+    }
+
     /// Hand the scripts what this tick's physics saw of water: what entered
     /// or left it (`water.splashes`) and what is in it (`water.wet`).
     pub(crate) fn publish_water_crossings(&mut self) {

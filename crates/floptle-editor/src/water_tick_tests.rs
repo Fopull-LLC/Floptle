@@ -506,3 +506,117 @@ end
     assert!(deepest[1] > deepest[0] + 0.1, "the slam's ball sank to {}, the other's to {}", deepest[1], deepest[0]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A river rides the node it lies on, tick by tick.** A ribbon declared
+/// on a node that is no world (so it lies flat in the node's frame), turned a quarter about +Y and lifted 5 m every tick, two ticks
+/// a frame: `water.at` in `fixedUpdate` finds the river 50 m down its
+/// channel where the node has carried it (along the world's −Z, the node's
+/// +X), half a metre under its eased surface, its current running down the
+/// channel as the node has turned it; the solver's river is at the node; and
+/// a ball waiting where the river comes to rest is carried down the channel.
+#[test]
+fn a_ribbon_is_posed_with_its_parent_every_tick() {
+    let (mut ed, dir) = project(
+        "ribbon",
+        r#"
+local id, n = nil, 0
+function fixedUpdate(node, dt)
+  local bed = find("Bed")
+  if not id then
+    id = water.addVolume{ shape = "ribbon", parent = "Bed", halfWidth = 3, depth = 4, current = 2,
+                          points = { { pos = vec3(0, 0, 0) }, { pos = vec3(100, -2, 0) } } }
+    return
+  end
+  n = n + 1
+  local w = water.at(bed.x, bed.y - 1.5, bed.z - 50)
+  local off = water.at(bed.x + 3.2, bed.y - 1.5, bed.z - 50)
+  log(string.format("R %d %.3f %.3f %s", n, w and w.depth or -1, w and w.flow.z or 0, tostring(off == nil)))
+  if n <= 40 then bed.y = bed.y + 5 end
+end
+"#,
+    );
+    let bed = node(&mut ed, "Bed", DVec3::ZERO);
+    ed.world.get_mut::<Transform>(bed).unwrap().rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+    // In the channel 20 m down it, 5 cm under where the lifting leaves its
+    // surface: 40 ticks of 5 m. Nothing pulls on anything in this scene, so
+    // the ball waits there for the river to come up to it.
+    let ball = node(&mut ed, "Ball", DVec3::new(0.0, 199.55, -20.0));
+    ed.world.insert(ball, RigidBody { radius: 0.1, mass: 3.6, ..Default::default() });
+    camera(&mut ed, DVec3::new(0.0, 200.0, 30.0));
+    ed.toggle_play();
+    for f in 0..200 {
+        ed.play_step(2.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        if f == 0 {
+            continue;
+        }
+        let at = floptle_core::world_transform(&ed.world, bed).translation;
+        let sim = ed.sim.as_ref().unwrap();
+        let river = sim.world.water.volumes.iter().find_map(|v| match &v.shape {
+            floptle_physics::WaterShape::Declared { water, .. } => Some(water.frame),
+            _ => None,
+        });
+        let frame = river.expect("the river is in the solver");
+        assert!((frame.origin - at).length() < 1e-3, "frame {f}: the solver's river is at {}, its node at {at}", frame.origin);
+    }
+    ed.drain_script_logs();
+    let lines: Vec<String> = ed.console.entries.iter().filter_map(|e| e.msg.strip_prefix("R ").map(str::to_string)).collect();
+    assert!(lines.len() >= 100, "{lines:?}");
+    for l in &lines[2..] {
+        let part: Vec<&str> = l.split(' ').collect();
+        let (depth, flow): (f64, f64) = (part[1].parse().unwrap(), part[2].parse().unwrap());
+        assert!((depth - 0.5).abs() < 1e-3, "water.at in fixedUpdate read another tick's river: {l}");
+        assert!((flow + 2.0).abs() < 1e-2, "the current runs {flow} m/s along z, the channel runs 2 m/s along -z: {l}");
+        assert_eq!(part[3], "true", "there is water past the bank: {l}");
+    }
+    // The river came up round the ball and has carried it down the channel.
+    let b = floptle_core::world_transform(&ed.world, ball).translation;
+    assert!(b.z < -24.0 && b.z > -34.0, "the ball is {} m down the channel; it went in at 20", -b.z);
+    assert!((b.y - (200.0 + b.z / 50.0)).abs() < 0.15, "the ball is at {}, the river's surface there at {}", b.y, 200.0 + b.z / 50.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A river lies round a world and flat anywhere else, from the first
+/// frame.** Declared in a game's first `update`, before any tick has run,
+/// with nothing said about `flat`: the one on the planet is round (its
+/// surface 101 m from the planet's centre all the way along, up the radial),
+/// the one on no parent is flat, and each can be told otherwise.
+#[test]
+fn a_ribbon_is_round_on_a_world_and_flat_off_it() {
+    let (mut ed, dir, _) = round_world(
+        "ribbon_up",
+        r#"
+local made = false
+function update(node, dt)
+  if made then return end
+  made = true
+  local function on(a, r) return vec3(math.cos(a) * r, 0, math.sin(a) * r) end
+  local round = { { pos = on(0, 101) }, { pos = on(0.3, 101) }, { pos = on(0.6, 101) } }
+  local level = { { pos = vec3(0, 300, 0) }, { pos = vec3(40, 300, 0) } }
+  water.addVolume{ shape = "ribbon", parent = "Planet", halfWidth = 2, depth = 1, points = round }
+  water.addVolume{ shape = "ribbon", halfWidth = 2, depth = 1, points = level }
+  water.addVolume{ shape = "ribbon", parent = "Planet", flat = true, halfWidth = 2, depth = 1, points = round }
+  water.addVolume{ shape = "ribbon", flat = false, halfWidth = 2, depth = 1, points = level }
+  local w = water.at(on(0.15, 100.5))
+  log(string.format("UP %.3f %.3f", w and w.depth or -1, w and (w.up.x * math.cos(0.15) + w.up.z * math.sin(0.15)) or 0))
+end
+"#,
+    );
+    ed.toggle_play();
+    ed.play_step(1.0 / 60.0, true);
+    assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    let flat: Vec<bool> = ed
+        .script_host
+        .declared_water()
+        .iter()
+        .map(|w| match &w.surface {
+            floptle_core::water::Surface::Ribbon { course, .. } => course.flat,
+            _ => panic!("a ribbon"),
+        })
+        .collect();
+    assert_eq!(flat, [false, true, true, false], "on the planet, on nothing, on the planet told flat, on nothing told round");
+    ed.drain_script_logs();
+    let line = ed.console.entries.iter().find_map(|e| e.msg.strip_prefix("UP ").map(str::to_string)).expect("the script logged");
+    assert_eq!(line, "0.500 1.000", "half a metre under a surface 101 m out, up along the radial");
+    let _ = std::fs::remove_dir_all(&dir);
+}
