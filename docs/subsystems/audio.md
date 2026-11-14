@@ -174,6 +174,16 @@ effect chain and stacks in series with it.
 - `Globals`-style struct pairs don't exist here, but `MixerDesc`/`MixerDsp`
   must stay behaviorally in sync: a desc field without an `apply` mapping is
   a knob that silently does nothing.
+- The one place the callback ever sleeps is the `Pacer`, and only on a device
+  that takes audio faster than real time: ALSA's null PCM in a headless or CI
+  run, or a dummy sink. Such a device never blocks, so the callback ran in a
+  loop and held a core at 99%. The pacer counts the frames handed over against
+  the wall clock. Past a quarter of a second ahead, it sleeps back to half
+  that. A real device only takes what its buffer holds, never comes near the
+  lead, and is never made to wait. A device that fell behind (a stall, a
+  suspend) starts counting afresh rather than being owed a burst.
+  `tests/output_cpu_probe.rs` measures it by hand: 2.96 s of CPU over 3 s on
+  the null PCM before, 0.15 s after.
 
 ## Future
 

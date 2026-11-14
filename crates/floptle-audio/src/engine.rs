@@ -139,6 +139,64 @@ fn renderer(
     }
 }
 
+/// How far ahead of the wall clock an output may take audio before the
+/// callback waits. A real device takes only what its buffer holds (tens of
+/// milliseconds), so it never comes near this; a device that swallows audio
+/// as fast as it is made (ALSA's null PCM in a headless or CI run, a dummy
+/// sink) reaches it at once and is then held to real time.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const PACE_LEAD: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Holds an output to real time when its device does not.
+///
+/// A callback-driven output is paced by its device: the callback runs when
+/// the device wants more. A device that never blocks (the null PCM accepts
+/// every write at once) runs the callback in a loop, and the mixer held a
+/// core at 99% for the whole session. This counts the frames handed over
+/// against the time since the first, and asks the callback to wait out
+/// whatever runs more than [`PACE_LEAD`] ahead.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct Pacer {
+    rate: f64,
+    start: Option<std::time::Instant>,
+    frames: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Pacer {
+    pub(crate) fn new(sample_rate: u32) -> Self {
+        Self { rate: sample_rate.max(1) as f64, start: None, frames: 0 }
+    }
+
+    /// `frames` more were handed over, `elapsed` since the first callback:
+    /// how long to wait so the output is never more than [`PACE_LEAD`]
+    /// ahead. Past it, the wait goes back to half the lead, so a device that
+    /// never blocks wakes its thread a few times a second, not every
+    /// callback. A device that fell behind (a stall, a suspend) is taken as
+    /// starting afresh, so it is never owed a burst to catch up.
+    pub(crate) fn wait(&mut self, frames: usize, elapsed: std::time::Duration) -> Option<std::time::Duration> {
+        let lead = PACE_LEAD.as_secs_f64();
+        let now = elapsed.as_secs_f64();
+        if (self.frames as f64 / self.rate) < now - lead {
+            // Behind by more than the lead: count from here.
+            self.frames = (now * self.rate) as u64;
+        }
+        self.frames += frames as u64;
+        let ahead = self.frames as f64 / self.rate - now;
+        // Down to half the lead, not to the lead: one wait every eighth of a
+        // second rather than a short one every callback.
+        (ahead > lead).then(|| std::time::Duration::from_secs_f64(ahead - lead * 0.5))
+    }
+
+    /// [`Pacer::wait`] against the wall clock, sleeping it out.
+    fn pace(&mut self, frames: usize) {
+        let start = *self.start.get_or_insert_with(std::time::Instant::now);
+        if let Some(d) = self.wait(frames, start.elapsed()) {
+            std::thread::sleep(d);
+        }
+    }
+}
+
 impl AudioEngine {
     /// Open the default output device. Fails cleanly on headless machines —
     /// callers treat audio as optional.
@@ -163,11 +221,15 @@ impl AudioEngine {
         let status = Arc::new(Status::new());
         let status_cb = Arc::clone(&status);
         let mut render = renderer(rx, status_cb, sample_rate, channels);
+        let mut pacer = Pacer::new(sample_rate);
 
         let stream = device
             .build_output_stream(
                 config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| render(data),
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    render(data);
+                    pacer.pace(data.len() / channels.max(1));
+                },
                 |e| log::warn!("audio stream error: {e}"),
                 None,
             )
@@ -500,5 +562,75 @@ mod tests {
         }
         mix(256);
         assert_eq!(eng.group_counts(), vec![("water".to_string(), 3)], "the old cap of two outlived the reset");
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod pacer_tests {
+    use super::{PACE_LEAD, Pacer};
+    use std::time::Duration;
+
+    const RATE: u32 = 48_000;
+    const BLOCK: usize = 480; // 10 ms
+
+    /// **A device that takes audio in real time is never made to wait.** It
+    /// fills its buffer up front (here 100 ms at once), then asks for 10 ms
+    /// every 10 ms, a little early or late; the pacer never sleeps.
+    #[test]
+    fn a_real_time_device_never_waits() {
+        let mut p = Pacer::new(RATE);
+        for _ in 0..10 {
+            assert_eq!(p.wait(BLOCK, Duration::ZERO), None, "the up-front fill was held back");
+        }
+        for k in 1..2_000u64 {
+            let jitter = if k % 3 == 0 { 4 } else { 0 };
+            let at = Duration::from_millis(k * 10 - jitter);
+            assert_eq!(p.wait(BLOCK, at), None, "a real-time device waited at block {k}");
+        }
+    }
+
+    /// **A device that never blocks is held to real time.** The null PCM
+    /// takes every block at once: whatever runs past the lead is slept out,
+    /// so after a second of wall clock no more than a second and the lead
+    /// has been mixed.
+    #[test]
+    fn a_device_that_never_blocks_is_held_to_real_time() {
+        let mut p = Pacer::new(RATE);
+        let mut now = Duration::ZERO;
+        let mut mixed = 0usize;
+        // Capped, so a pacer that never waits fails here rather than spins.
+        for _ in 0..1_000 {
+            if now >= Duration::from_secs(1) {
+                break;
+            }
+            mixed += BLOCK;
+            if let Some(d) = p.wait(BLOCK, now) {
+                now += d;
+            }
+        }
+        let ahead = mixed as f64 / RATE as f64 - now.as_secs_f64();
+        assert!(ahead <= PACE_LEAD.as_secs_f64() + BLOCK as f64 / RATE as f64, "mixed {ahead:.3} s ahead of the clock");
+        assert!(ahead >= PACE_LEAD.as_secs_f64() * 0.5 - 0.02, "held back more than it needed: {ahead:.3} s ahead");
+    }
+
+    /// **A stall is not paid back in a burst.** A device that stopped asking
+    /// for two seconds (a suspend) and then never blocks is held to the lead
+    /// from where it resumed, not let run two seconds ahead to catch up.
+    #[test]
+    fn a_stall_is_not_paid_back_in_a_burst() {
+        let mut p = Pacer::new(RATE);
+        for k in 0..100u64 {
+            p.wait(BLOCK, Duration::from_millis(k * 10));
+        }
+        let resumed = Duration::from_secs(3);
+        let mut free = 0usize;
+        for _ in 0..1_000 {
+            if p.wait(BLOCK, resumed).is_some() {
+                break;
+            }
+            free += BLOCK;
+        }
+        let burst = free as f64 / RATE as f64;
+        assert!(burst <= PACE_LEAD.as_secs_f64() + 0.02, "{burst:.2} s mixed at once after a stall");
     }
 }
