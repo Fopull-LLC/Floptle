@@ -186,6 +186,8 @@ mod assembly_script_tests;
 #[cfg(test)]
 mod arrival_tests;
 #[cfg(test)]
+mod quality_change_tests;
+#[cfg(test)]
 mod tick_overload_tests;
 #[cfg(test)]
 mod underwater_look_tests;
@@ -3024,6 +3026,10 @@ struct Editor {
     /// is in them.
     follow_keys: Vec<u32>,
     follow_cursor: usize,
+    /// Static pieces that have moved this play session, by node index: not
+    /// ground that stays put, so a scatter prop set to settle on static
+    /// ground passes through them (see `scatter_draw::settles_on`).
+    moved_statics: std::collections::HashSet<u32>,
     /// This frame's projected mesh-collider wireframe segments (screen space).
     mesh_wire_gizmo: Vec<(Vec2, Vec2)>,
     /// This frame's projected particle-emitter gizmo: the selected track's birth shape,

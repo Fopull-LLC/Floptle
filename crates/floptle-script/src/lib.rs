@@ -394,6 +394,7 @@ pub mod ui_make;
 pub mod vm;
 mod view_api;
 pub mod water_api;
+mod water_ribbon;
 mod weather_api;
 
 pub(crate) use api::install_handle_api;
@@ -1030,6 +1031,9 @@ pub struct ScriptHost {
     water_sim_cmds: Rc<RefCell<Vec<floptle_core::water::SimCmd>>>,
     /// What tiled sims' held groups gave, waiting for `water.exchanged`.
     water_exchanged: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>>,
+    /// What they gave to fill the ground under newly held points, waiting
+    /// for `water.filled`.
+    water_filled: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>>,
     /// Water entries and exits waiting for `water.splashes`.
     water_splashes: Rc<RefCell<std::collections::VecDeque<floptle_physics::splash::Splash>>>,
     /// The physics clock and when each node was last in water.
@@ -1045,6 +1049,9 @@ pub struct ScriptHost {
     water_swell_writes: Rc<RefCell<water_api::SwellWrites>>,
     /// `water.bindSwell`: the water a node's shader reads its swell from.
     water_swell_binds: Rc<RefCell<HashMap<u32, water_api::SwellSource>>>,
+    /// The nodes that are round worlds, by name: what a river declared on
+    /// one lies round.
+    water_worlds: Rc<RefCell<std::collections::HashSet<String>>>,
     /// Scatter sources scripts declared — resolved into
     /// drawable instances by the driver, never into scene nodes.
     scatter_sources: scatter_api::Sources,
@@ -1055,6 +1062,8 @@ pub struct ScriptHost {
     scatter_settled: scatter_api::Settled,
     /// The points bending props away, by the script that set them.
     scatter_interactors: scatter_api::Interactors,
+    /// Props scripts asked to be dropped onto the ground again.
+    scatter_resettles: scatter_api::Resettles,
     /// The winds scripts declared (`weather.*`) and the clock they blow by.
     weather: weather_api::WeatherShared,
     /// The last source id handed out — where a rebuild's own sources start.

@@ -405,15 +405,16 @@ end
 | `water.setFrozen(node, on)` | freeze or thaw a volume. |
 | `water.volumes()` | every water node in the scene. |
 | `water.flowAt(x, y, z)` | the water's velocity there, m/s; zero in still water. |
-| `water.addVolume{...}` | declare a lake or a heightfield of water no node carries; returns an id. |
+| `water.addVolume{...}` | declare a lake, a heightfield, a river or simulated water no node carries; returns an id. |
 | `water.surface(id [, {cells, colors, fixed, buffers, tile}])` | its surface as the arrays `mesh.build` takes, in the parent's frame. `colors` adds depth, flow and foam per vertex; `fixed` keeps every grid point a vertex, ready for `mesh.update`. |
 | `water.surfaceChanged(id)` | whether the surface moved since `water.surface(id)` last took it. |
-| `water.setLevel(id, level)` | move its surface in place: a lake's radius, a heightfield's or a sim's held level. |
+| `water.setLevel(id, level)` | move its surface in place: a lake's radius, a heightfield's or a sim's held level, a river's first point's height. |
 | `water.setLevels(id, levels)` | a heightfield's levels, one per point. |
 | `water.levelOf(id)` | its level now. |
 | `water.hold(id, cells, level [, group])` / `water.release(id, cells)` | hold a sim's points at a level, or let them go. |
 | `water.exchanged(id)` | what each group of held points gave the water since the last ask, m³. |
-| `water.tiles(id)` | a tiled sim's wet tiles, each with a serial that changes when its water does. |
+| `water.filled(id)` | what each group gave to fill the ground under newly held points, m³, kept out of `exchanged`. |
+| `water.tiles(id)` | a tiled sim's wet tiles, each with a serial that moves when its surface really has. |
 | `water.state(id)` | a tiled sim's wet points, for a save (`addVolume{ state = ... }` starts from it). |
 | `water.addWater(id, at, m3)` / `water.setSpring(id, at, rate)` | add or take water at a point; a spring changed while it runs. |
 | `water.splashes()` | what entered or left water since the last call. |
@@ -495,6 +496,16 @@ lake costs nothing a step), wake when water beside them moves, when their
 ground is dug, or when a script holds or adds water in them, and are
 dropped once dry.
 
+"Still" is a tolerance, `stillDepth`, half a millimetre unless you say. A
+tile sleeps once its surface has stayed within a quarter of it for a second
+with nothing in it moving faster than a millimetre a second: a lake held at its level, a pool
+that has found its own, a channel that has filled. Sleeping moves no water,
+so the volume is exactly what it was. A sleeping tile wakes when the surface
+beside it stands more than twice the tolerance off its own, when a held
+level moves, when water is added, or when its ground is dug. A river that
+keeps running stays awake, as it should. Holding points as they are already
+held wakes nothing, so a script can call `water.hold` every frame.
+
 ```lua
 local trench = water.addVolume{ shape = "sim", parent = "Planet", center = beach, cell = 1.25, size = 200,
   level = false,                                   -- start dry
@@ -513,10 +524,28 @@ local gave = water.exchanged(trench)[2] or 0       -- m³ the sea gave since the
   `cells` is a list of points in the parent's frame (the point under each),
   or `{i, j}` columns and rows from the patch's corner, counted from 0.
   `water.setLevel(id, level)` moves every held point to `level`.
+  A held point is where water comes from or goes to outside the patch: it
+  gives or takes at the speed the head across it drives, and a stream that
+  runs into one ends there, so a lake held at a few points stands still
+  round them.
 - `water.exchanged(id)` is what each group of held points gave the water
   since the last ask, m³ (negative: what it took). A lake held at its level
   is a finite reservoir: a breach drains it by what left, and the water
   stops at the sill.
+- `water.filled(id)` is what each group gave to fill the ground under newly
+  held points, counted apart. Points held over dry ground pour until the
+  ground below their level is full: a sim started dry with a lake's points
+  held fills the lake's whole footprint from them. That is the water
+  reaching the state the holds describe, not anything happening to the lake,
+  so it is kept out of `exchanged`: from when a free point is first held,
+  what its group gives lands in `filled`, until the group comes to rest (a
+  second in which it gave next to nothing, or in which what it gave did not
+  stay on the patch, as with a held source feeding a stream that runs off
+  the edge). After that everything is `exchanged`. Moving a held point's
+  level does not start a fill again, so a lake lowered by what it gave keeps
+  reading as exchange. A breach opened while a group is still filling is
+  counted in `filled` with the rest; hold later points in a group of their
+  own to keep the two apart. The two together are everything the group gave.
 - `solver = "swe"` (the default) moves the water with momentum: a breach
   sends a surge down a channel, a wave runs up a beach. `solver = "pipes"`
   is the cheaper model without momentum, for calm water that only has to find
@@ -524,6 +553,15 @@ local gave = water.exchanged(trench)[2] or 0       -- m³ the sea gave since the
   Manning roughness of 0.012) whatever `roughness` says, which is what lets a
   shore come to rest. A film thinner than 1 mm reads as dry ground, and one
   thinner than half that stays where it is.
+- A channel runs at the depth Manning's formula gives it: for a flow of `q`
+  m² a second per metre of width down a slope `S` over a bed of roughness
+  `n`, a depth of `(q·n / √S)^(3/5)`, to within a few percent at any cell
+  size (0.5 m² a second down 1 in 100 runs 0.32 m deep over `roughness =
+  0.03`, and 0.19 m deep over the smooth bed it gets when no roughness is
+  given). Standing water is also damped, so that a lake comes to rest instead
+  of rocking for hours: a slosh loses a fifth of its speed a second, and so
+  does water drifting over a surface flatter than 1 in 2,000. Water running
+  steadily down a slope is left to its bed's drag alone.
 - `budget` is the most a frame spends stepping it, in milliseconds (1 by
   default). Past it the water runs slow for a moment; the frame does not.
   `perf.counts()` reports `waterAwake` (points in tiles that are moving),
@@ -535,11 +573,103 @@ local gave = water.exchanged(trench)[2] or 0       -- m³ the sea gave since the
   changes it, or at 0 takes it away.
 - `minDepth` (1 mm) is the least depth that moves and reads as water, and
   `soak` (metres a second) soaks away films thinner than `soakBelow` (1 cm),
-  so a drained channel dries instead of holding a film for good.
+  so a drained channel dries instead of holding a film for good. Only a
+  film soaks: the thin edge of a pool, level with deeper or held water
+  within 64 points of it, is part of the pool and stays, so a lake does not
+  drain through its shore.
+- `stillDepth` (0.0005, half a millimetre; 0 to 0.1) is the surface change
+  that counts: what a tile's water must stay within to sleep, and what its
+  surface must move by for its serial to move. Raise it for a coarse sim
+  whose mesh is expensive to rebuild.
 - `water.tiles(id)` lists the tiles holding water, each `{ key, serial, i,
-  j }`; a tile's `serial` changes only when its water does, so a game
-  rebuilds only the tiles that moved: `water.surface(id, { tile = key })` is
-  one tile's surface, wet points only, and `water.surface(id)` all of them.
+  j }`. A tile's `serial` moves only when its surface has moved by more than
+  `stillDepth` somewhere in the tile, or its flow by more than 5 cm/s, since
+  the serial last moved, so a game rebuilds only the tiles that really
+  changed and none for water creeping the last fraction of a millimetre to
+  its level. What `water.at`, `water.depthAt` and `water.state` read is
+  always the water's own, whatever the serial says.
+  `water.surface(id, { tile = key })` is one tile's surface, wet points
+  only, and `water.surface(id)` all of them.
+
+### A river as a ribbon
+
+A `shape = "ribbon"` volume is a river laid down as a line of points: the
+cheap, authorable river, next to a sim for water that has to find its own
+way. Each point is on the water's surface in the middle of the channel, in
+the parent's frame, with how far the banks are, how deep it is and how fast
+it runs there:
+
+```lua
+local river = water.addVolume{ shape = "ribbon", parent = "Planet", points = {
+  { pos = spring, halfWidth = 2, depth = 0.8, current = 2.5 },   -- narrow and quick
+  { pos = ford,   halfWidth = 5, depth = 0.5, current = 1.2 },
+  { pos = pool,   halfWidth = 9, depth = 4,   current = 0.3 },   -- wide, deep and slow
+  { pos = mouth,  halfWidth = 6, depth = 2,   current = 0.8 },
+} }
+mesh.build(water.surface(river, { colors = true }))   -- on a node at the parent's origin
+```
+
+- **Between points** the centreline is a smooth curve through every point,
+  and the surface height, half-width, depth and current are eased from one
+  point's value to the next without ever leaving the range between them: a
+  river does not run uphill between two points, and with two points the
+  values run straight from one to the other. Up to 4,096 points.
+- **`curve = "straight"`** joins the points with straight lines instead, and
+  every value runs straight from one point to the next. The curve swings a
+  little wide going into a sharp turn (about 3 m on a right angle between
+  points 40 m apart); straight lines never leave the line between two
+  points, so a river traced point by point down a channel stays in it. Each
+  corner is whole: the outside is rounded, the water running round it, and
+  the inside banks meet at a point.
+- **`current`** is metres a second along the channel towards the next point
+  (negative runs back towards the first), following every bend and the
+  river's slope. `water.flowAt` and `water.at(...).flow` answer with it, and
+  drag carries what floats down the channel at it.
+- **`halfWidth`, `depth` and a number `current` on the volume** are what a
+  point that gives none of its own takes, so a river of one width is written
+  once: `{ shape = "ribbon", halfWidth = 4, depth = 2, current = 1, points =
+  { { pos = a }, { pos = b } } }`. A `vec3` `current` is, as for every
+  shape, a current everywhere on top.
+- **The bed** is a gentle U by default (`bed = "u"`): the full `depth` in the
+  middle, three quarters of it halfway to a bank and nothing at the bank, so
+  the water shallows to the shore and `colors` shade it so. `bed = "flat"` is
+  the same depth from bank to bank: a canal. Below the bed (and half a metre
+  of slack for ground that is a little lower than the shape says) there is
+  no water, so a cave under a river is dry. Give no `depth` at all and the
+  river has no bed.
+- **In or out** is decided by the nearest place on the centreline: a point
+  is in the river when that place is no further off than the half-width
+  there. A bend is whole: no wedge of dry ground on the outside of a turn,
+  no strip counted twice on the inside. The river ends square at its first
+  and last points.
+- **Flat, or round a world: it follows the parent.** With no `parent`, or
+  on a node that is not a world (a ship, a building, a level's root), the
+  river lies flat in the parent's frame: up is the parent's +Y and a height
+  is a `y`. On a parent that is a celestial body it lies round the body: the
+  points are positions about the body's centre, as a lake's `center` is, up
+  is each point's own radial and a height is a distance from the centre.
+  `flat = true` or `flat = false` says which whatever it lies on; say it for
+  a body a script made in the same frame it declares the river, which is
+  not yet known to be a world.
+- **`water.surface(id [, { cells, colors, fixed, buffers }])`** is a strip
+  down the channel over exactly the water `water.at` answers for, `cells`
+  columns of triangles from bank to bank (4 by default). Its `uvs` are
+  metres: u down the channel from the first point, so a shader scrolls its
+  ripples along the flow by `uv.x - time * speed`, and v across from the
+  middle. `colors` are r = the depth over the bed (metres / 16), g and b =
+  the current as flow along the parent's x and z, a = foam where the
+  current outruns its waves. The strip's vertices are always the same ones,
+  so `mesh.update` takes a new one as it stands.
+- **`water.setLevel(id, level)`** raises or lowers the whole river: its level
+  (what `water.levelOf` reads) is its first point's height, and every point
+  moves by the same amount, so it keeps its slope.
+
+A smooth river that turns tighter than it is wide (a centreline that curves
+in less than its half-width) still floats things correctly, but its strip
+folds over itself on the inside of the turn; space the points so the bend is
+wider than the channel, or make it `curve = "straight"`. Finding the water at a point looks only at the few pieces of the
+river near it, so a river of thousands of points costs a floating body what a
+short one does.
 
 `water.falls([id])` lists every place simulated water pours off a drop of more
 than 1.5 m, in the world, refreshed as the water flows: where a game puts its
@@ -547,8 +677,9 @@ waterfall sheets and mist, and takes them away when a fall runs dry.
 
 A declared volume's level can move without removing and adding it again:
 `water.setLevel(id, level)` gives a lake a new surface radius, puts every wet
-point of a heightfield at `level` (`water.setLevels` sets them one by one), and
-holds a sim's held points at `level`, so the sim's water flows in or out there.
+point of a heightfield at `level` (`water.setLevels` sets them one by one),
+holds a sim's held points at `level`, so the sim's water flows in or out there,
+and moves a river's every point by what brings its first to `level`.
 The id and everything else about the volume stay, the physics floats things on
 the new level from the next tick, and the call is cheap enough to make every
 frame while a pool fills or a lake drains through a breach. `water.levelOf(id)`
@@ -658,6 +789,9 @@ water.setSwell(seaNode, { { amplitude = 0.5, wavelength = 30 } })   -- on a Wate
 - **The swell rides the water's level.** `water.setLevel`, a heightfield's
   levels and a sim's surface move the still surface; the waves stand on it.
   They do not shoal: a wave is as high in the shallows as in the deep.
+- **A ribbon carries no swell.** A river's surface slopes and turns with its
+  course, so there is no plane or sphere to lay waves on: `waves` on a
+  `shape = "ribbon"` volume, and `water.setSwell` on one, are refused by name.
 
 **Drawing it.** The mesh stays flat and the shader moves it. `water.surface`
 gives the still surface, as before, and a surface shader on it reads the
@@ -754,6 +888,23 @@ is dropped rather than left hanging in the air over a canyon.
 
 **Digging the ground out from under one re-settles it**, because placement was
 never remembered in the first place.
+
+A prop keeps the height it settled at, so what it may land on matters:
+`settleOn` says. `"static"`, the default, lands on terrain and on anything that
+stays put (a building, a floor, a static body) and drops through anything a
+body moves or that has moved since play began: a parked rover, a lift, the
+player, a crate a script carried. `"terrain"` drops through everything but
+terrain, roofs included. `"all"` lands on the first collider of any kind, as
+every prop did before the choice existed. When a game knows the ground under
+some props has changed, `scatter.resettle(id, instanceId)` or
+`scatter.resettle(id, point, radius)` drops them again where they stand: same
+id, same roll, no remove and restore. A static piece that moves for the first
+time re-drops the props round where it stood by itself.
+
+```lua
+scatter.create{ asset = "rock.glb", settleOn = "terrain", ... }
+scatter.resettle(rocks, pad.pos, 12)     -- the ship took off: drop what was on it
+```
 
 LOD bands **cross-dissolve** rather than switching — the pop at a band boundary
 is the thing everyone notices about scatter and nothing else about it. The last
@@ -866,6 +1017,7 @@ end
 | `scatter.near(id, point, radius)` | instances around a point, nearest first: `{id, distance, pos, scale, param, up, yaw}` |
 | `scatter.remove(id, instanceId)` | remove one, permanently |
 | `scatter.restore(id [, instanceId])` | put one back, or all of them (regrowth) |
+| `scatter.resettle(id, instanceId)` / `scatter.resettle(id, point, radius)` | drop props onto the ground again where they stand, keeping their ids |
 | `scatter.removed(id)` | the ids this source has lost — **this** is what you save |
 | `scatter.cost(id)` | what it asks for per frame: `{chunks, props, far, chunkSize, perChunk}` |
 | `scatter.destroy(id)` | drop the whole source |

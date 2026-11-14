@@ -472,7 +472,11 @@ For water the engine simulates (`shape = "sim"`) these are the solver's own:
 its depth, its velocity, and foam where the flow runs faster than its own
 waves (a Froude number past about 1) and at the lip and foot of every fall.
 For a lake or a heightfield the depth is measured down to the ground and the
-flow is the volume's `current`. In the shader:
+flow is the volume's `current`. For a river (`shape = "ribbon"`) the depth is
+its bed's, shallowing to the banks, the flow is its current down the channel
+at each point, and `uv` is metres down the channel (`uv.x`) and across it
+from the middle (`uv.y`), so ripples scroll along the flow by `uv.x`. In the
+shader:
 
 ```
 let depth = vertexColor.r * 16

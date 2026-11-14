@@ -199,6 +199,23 @@ impl Raster {
         }
     }
 
+    /// [`Self::repool_replaced`] for a picture whose levels were worked out
+    /// ahead ([`super::PreparedTexture`]): written into its layer as they
+    /// are when they are the layer's size and depth, and otherwise the
+    /// picture leaves the pools.
+    pub(crate) fn repool_replaced_levels(&mut self, gpu: &Gpu, id: TexId, levels: &[(u32, u32, Vec<u8>)]) {
+        let Some(at) = self.pools.of_tex.get(&id.0).copied() else { return };
+        self.pools.layers.retain(|_, l| *l != at);
+        self.pools.resampled.retain(|(from, _), _| *from != at);
+        let key = self.pools.pools[at.pool as usize].key;
+        let fits = levels.first().is_some_and(|l| (l.0, l.1) == (key.width, key.height)) && levels.len() as u32 == key.mip_count;
+        if fits {
+            super::write_levels(gpu, &self.pools.pools[at.pool as usize].texture, at.layer, levels);
+        } else {
+            self.pools.of_tex.remove(&id.0);
+        }
+    }
+
     /// [`Self::pool_texture`] for a picture the renderer holds only on the
     /// GPU: one a material file or an override brought, registered without
     /// its pixels kept. Its texture is copied into a layer, every mip level,

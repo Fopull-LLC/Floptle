@@ -60,6 +60,8 @@ impl crate::Editor {
             Surface::Lake { radius, .. } => Lay::Round { radius: *radius },
             Surface::Grid(_) => Lay::Flat { level: 0.0 },
             Surface::Tiles(t) => t.patch.radius.map_or(Lay::Flat { level: 0.0 }, |radius| Lay::Round { radius }),
+            // A ribbon carries no swell, so `w.swell` was `None` above.
+            Surface::Ribbon { .. } => return None,
         });
         let r = w.frame.rot;
         Some(Laid { swell, origin: w.frame.origin, rot: DQuat::from_xyzw(r.x as f64, r.y as f64, r.z as f64, r.w as f64), lay })

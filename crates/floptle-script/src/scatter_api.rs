@@ -32,6 +32,10 @@ pub type Settled = Rc<RefCell<std::collections::HashMap<(u32, u64), (glam::DVec3
 /// overwrite each other.
 pub type Interactors = Rc<RefCell<std::collections::HashMap<(u32, String), Vec<floptle_core::scatter::Interactor>>>>;
 
+/// Props scripts asked to be dropped onto the ground again
+/// (`scatter.resettle`), by source id, for the driver to take each frame.
+pub type Resettles = Rc<RefCell<Vec<(u32, floptle_core::scatter::Resettle)>>>;
+
 /// The most points one script may set. A point is tested against every prop
 /// drawn, so this is a frame cost, not a memory one.
 pub const MAX_INTERACTORS: usize = 32;
@@ -100,7 +104,7 @@ fn color_opt(opts: &mlua::Table, key: &str) -> Option<[f32; 3]> {
 pub(crate) const CREATE_KEYS: &[&str] = &[
     "asset", "lod", "range", "seed", "center", "radius", "halfX", "halfZ", "align", "perChunk",
     "chunk", "scaleMin", "scaleMax", "fade", "density", "densityRows", "parent", "tint", "emissive",
-    "emissiveStrength", "bend", "appear", "castShadow", "shadowDistance", "shadowFade",
+    "emissiveStrength", "bend", "appear", "castShadow", "shadowDistance", "shadowFade", "settleOn",
 ];
 
 /// The keys a `scatter.setTint` look reads.
@@ -281,6 +285,7 @@ pub(crate) fn install_scatter_api(
     scene: Rc<RefCell<crate::SceneMirror>>,
     settled: Settled,
     interactors: Interactors,
+    resettles: Resettles,
 ) {
     use floptle_core::scatter::{Align, Band, Region, ScatterSource};
     let Ok(t) = lua.create_table() else { return };
@@ -408,6 +413,25 @@ pub(crate) fn install_scatter_api(
                 .as_deref()
                 .and_then(|a| scene.try_borrow().ok().and_then(|sc| anchor_frame(&sc, a)))
                 .unwrap_or_default();
+            // What its props may land on: ground that stays put unless the
+            // source says otherwise.
+            let settle_on = match opts.get::<Value>("settleOn")? {
+                Value::Nil => floptle_core::scatter::SettleOn::default(),
+                Value::String(v) => {
+                    let v = v.to_str()?;
+                    floptle_core::scatter::SettleOn::from_name(&v).ok_or_else(|| {
+                        mlua::Error::RuntimeError(format!(
+                            "scatter.create: settleOn = \"{v}\" is not one of \"terrain\", \"static\", \"all\""
+                        ))
+                    })?
+                }
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "scatter.create: settleOn must be \"terrain\", \"static\" or \"all\", not a {}",
+                        other.type_name()
+                    )));
+                }
+            };
             let src = ScatterSource {
                 id,
                 seed: num(&opts, "seed", 1.0) as u64,
@@ -448,6 +472,7 @@ pub(crate) fn install_scatter_api(
                 leaving: std::collections::HashMap::new(),
                 dying: None,
                 marks: Default::default(),
+                settle_on,
             };
             // Say what this costs, here, while the two numbers that decided it
             // are still on screen. The alternative is what
@@ -574,6 +599,63 @@ pub(crate) fn install_scatter_api(
             }
         }) {
             let _ = t.set("restore", f);
+        }
+    }
+
+    // scatter.resettle(sourceId, instanceId) / scatter.resettle(sourceId, point,
+    // radius) → whether anything was queued. Drops props onto the ground
+    // again where they stand: the same id and the same roll, landing on
+    // whatever is under them now. For a game that knows something a prop
+    // came to rest on has gone (a crate it carried off, a wall it knocked
+    // down) and wants the prop down, without cutting it and putting it back.
+    {
+        let s = sources.clone();
+        let q = resettles.clone();
+        if let Ok(f) = lua.create_function(move |_, (id, at, radius): (u32, Value, Option<f64>)| {
+            use floptle_core::scatter::Resettle;
+            let ask = match &at {
+                Value::Integer(_) | Value::Number(_) => {
+                    if radius.is_some() {
+                        return Err(mlua::Error::RuntimeError(
+                            "scatter.resettle: an instance id takes no radius; give a point to resettle round one".into(),
+                        ));
+                    }
+                    let inst = match at {
+                        Value::Integer(i) => i as f64,
+                        Value::Number(n) => n,
+                        _ => unreachable!(),
+                    };
+                    Resettle::Id(inst as u64)
+                }
+                v => {
+                    let Some(center) = crate::math_api::vec3_of(v) else {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "scatter.resettle: expected an instance id or a point (vec3), not a {}",
+                            v.type_name()
+                        )));
+                    };
+                    let radius = match radius {
+                        Some(r) if r.is_finite() && r > 0.0 => r,
+                        _ => {
+                            return Err(mlua::Error::RuntimeError(
+                                "scatter.resettle: a point needs a radius above 0".into(),
+                            ));
+                        }
+                    };
+                    Resettle::Near { center, radius }
+                }
+            };
+            let v = s.borrow();
+            let Some(src) = v.iter().find(|s| s.id == id && s.dying.is_none()) else { return Ok(false) };
+            if let Resettle::Id(inst) = ask
+                && src.removed.contains(&inst)
+            {
+                return Ok(false);
+            }
+            q.borrow_mut().push((id, ask));
+            Ok(true)
+        }) {
+            let _ = t.set("resettle", f);
         }
     }
 
@@ -970,7 +1052,13 @@ mod tests {
     }
 
     fn host_with_interactors() -> (Lua, Sources, Logs, Interactors) {
+        let (lua, sources, logs, points, _) = host_with_resettles();
+        (lua, sources, logs, points)
+    }
+
+    fn host_with_resettles() -> (Lua, Sources, Logs, Interactors, Resettles) {
         let lua = Lua::new();
+        let resettles = Resettles::default();
         let sources: Sources = Rc::new(RefCell::new(Vec::new()));
         let logs: Logs = Rc::new(RefCell::new(Vec::new()));
         let points = Interactors::default();
@@ -984,8 +1072,60 @@ mod tests {
             Rc::default(),
             Rc::default(),
             points.clone(),
+            resettles.clone(),
         );
-        (lua, sources, logs, points)
+        (lua, sources, logs, points, resettles)
+    }
+
+    /// A source settles on ground that stays put unless it asks otherwise,
+    /// and says so plainly when it asks for something that is not a choice.
+    #[test]
+    fn a_source_says_what_its_props_settle_on() {
+        use floptle_core::scatter::SettleOn;
+        let (lua, sources) = host();
+        lua.load(
+            r#"scatter.create{ asset = "a" }
+               scatter.create{ asset = "a", settleOn = "terrain" }
+               scatter.create{ asset = "a", settleOn = "static" }
+               scatter.create{ asset = "a", settleOn = "all" }"#,
+        )
+        .exec()
+        .expect("every choice is taken");
+        let got: Vec<SettleOn> = sources.borrow().iter().map(|s| s.settle_on).collect();
+        assert_eq!(got, [SettleOn::Static, SettleOn::Terrain, SettleOn::Static, SettleOn::All]);
+        let bad = lua.load(r#"scatter.create{ asset = "a", settleOn = "rocks" }"#).exec();
+        assert!(bad.is_err_and(|e| e.to_string().contains("settleOn")), "a name that is not a choice was taken");
+        let bad = lua.load(r#"scatter.create{ asset = "a", settleOn = true }"#).exec();
+        assert!(bad.is_err_and(|e| e.to_string().contains("settleOn")), "a boolean was taken");
+        assert_eq!(sources.borrow().len(), 4, "a refused source was still declared");
+    }
+
+    /// `scatter.resettle` queues one prop by id, or every prop round a point,
+    /// for the driver; it queues nothing for a source that is not there or a
+    /// prop that was cut, and refuses a point with no radius.
+    #[test]
+    fn resettle_queues_a_prop_or_a_place_for_the_driver() {
+        use floptle_core::scatter::Resettle;
+        let (lua, _, _, _, queue) = host_with_resettles();
+        lua.load(r#"src = scatter.create{ asset = "a" }"#).exec().unwrap();
+        let ok: bool = lua.load("return scatter.resettle(src, 42)").eval().unwrap();
+        assert!(ok, "a prop of a live source was not queued");
+        let ok: bool = lua.load("return scatter.resettle(src, { x = 1, y = 2, z = 3 }, 4)").eval().unwrap();
+        assert!(ok, "a place in a live source was not queued");
+        assert_eq!(
+            *queue.borrow(),
+            [(1, Resettle::Id(42)), (1, Resettle::Near { center: glam::DVec3::new(1.0, 2.0, 3.0), radius: 4.0 })]
+        );
+        queue.borrow_mut().clear();
+        let none: bool = lua.load("return scatter.resettle(99, 42)").eval().unwrap();
+        assert!(!none, "a source that does not exist queued a resettle");
+        lua.load("scatter.remove(src, 7)").exec().unwrap();
+        let cut: bool = lua.load("return scatter.resettle(src, 7)").eval().unwrap();
+        assert!(!cut, "a cut prop was queued to land again");
+        assert!(queue.borrow().is_empty(), "something was queued that should not have been");
+        for bad in ["scatter.resettle(src, { x = 0, y = 0, z = 0 })", "scatter.resettle(src, { x = 0, y = 0, z = 0 }, 0)", "scatter.resettle(src, 3, 2)", "scatter.resettle(src, \"x\")"] {
+            assert!(lua.load(bad).exec().is_err(), "{bad} was taken");
+        }
     }
 
     /// A script's interactor points replace its last list, and an empty list
@@ -1158,6 +1298,7 @@ mod tests {
                     "asset" => "asset = \"tree.glb\"".to_string(),
                     "lod" => "lod = {}".to_string(),
                     "align" => "align = \"world\"".to_string(),
+                    "settleOn" => "settleOn = \"all\"".to_string(),
                     "center" => "center = { x = 0, y = 0, z = 0 }".to_string(),
                     other => format!("{other} = 1"),
                 })

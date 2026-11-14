@@ -43,6 +43,7 @@ pub mod tile;
 pub mod time;
 pub mod transform;
 pub mod water;
+pub mod water_ribbon;
 
 pub use ecs::{Change, ChangeCursor, ChangeKind, Entity, World};
 pub use layers::Layers;

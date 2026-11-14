@@ -77,6 +77,9 @@ pub(crate) struct WaterShared {
     /// What each tiled sim's held groups have given since `water.exchanged`
     /// last asked, m³, by volume and group.
     pub exchanged: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>>,
+    /// What they gave to fill the ground under newly held points since
+    /// `water.filled` last asked, the same way.
+    pub filled: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>>,
     /// Water entries and exits since `water.splashes` last asked, oldest
     /// first, at most 64.
     pub splashes: Rc<RefCell<std::collections::VecDeque<floptle_physics::splash::Splash>>>,
@@ -84,6 +87,9 @@ pub(crate) struct WaterShared {
     pub wet: Rc<RefCell<(f64, std::collections::HashMap<u32, f64>)>>,
     /// Each body of water's slam (`water.setSlam`), by the water's entity.
     pub slam: Rc<RefCell<std::collections::HashMap<u32, f32>>>,
+    /// The nodes that are round worlds, by name, refreshed by the driver
+    /// before scripts run: a ribbon declared on one lies round it.
+    pub worlds: Rc<RefCell<std::collections::HashSet<String>>>,
     pub next_id: Rc<std::cell::Cell<u32>>,
     /// The level, lent for the frame, so `water.surface` can tell which of a
     /// lake's sphere lies in its basin and which runs under the ground.
@@ -203,7 +209,8 @@ fn surface_stamp(surface: &Surface) -> u64 {
                 h.write_u32(f[1].to_bits());
             }
         }
-        // A tile's serial moves whenever its water does.
+        // A tile's serial moves when its surface has, by more than the sim's
+        // `stillDepth`.
         Surface::Tiles(t) => {
             let mut tiles: Vec<(u32, u64)> = t.tiles.iter().map(|(k, l)| (*k, l.serial)).collect();
             tiles.sort_unstable();
@@ -211,6 +218,11 @@ fn surface_stamp(surface: &Surface) -> u64 {
                 h.write_u32(k);
                 h.write_u64(serial);
             }
+        }
+        // A course never changes once declared; only its lift does.
+        Surface::Ribbon { course, lift } => {
+            h.write_u64(course.stamp);
+            h.write_u64(lift.to_bits());
         }
     }
     h.finish()
@@ -442,7 +454,7 @@ pub(crate) struct SurfaceColors<'a> {
     pub current: glam::Vec3,
 }
 
-fn surface_color(depth: f64, flow: [f64; 2], foam: f64) -> [f32; 4] {
+pub(crate) fn surface_color(depth: f64, flow: [f64; 2], foam: f64) -> [f32; 4] {
     let lane = |v: f64| (0.5 + (v / COLOR_FLOW).clamp(-1.0, 1.0) * 0.5) as f32;
     [(depth / COLOR_DEPTH).clamp(0.0, 1.0) as f32, lane(flow[0]), lane(flow[1]), foam.clamp(0.0, 1.0) as f32]
 }
@@ -606,6 +618,7 @@ pub(crate) fn surface_mesh_with(
             m.index_capacity = g.columns.saturating_sub(1) * g.rows.saturating_sub(1) * 6;
         }
         Surface::Tiles(t) => tiles_mesh(&mut m, t, None, look),
+        Surface::Ribbon { course, lift } => crate::water_ribbon::ribbon_mesh(&mut m, course, *lift, cells, look),
     }
     m
 }
@@ -704,7 +717,8 @@ fn push_quads(out: &mut Vec<u32>, index: &[u32], columns: usize, rows: usize) {
 pub(crate) const VOLUME_KEYS: &[&str] = &[
     "shape", "parent", "center", "radius", "reach", "origin", "cell", "columns", "rows", "levels", "flow",
     "density", "drag", "angularDrag", "current", "depth", "tint", "visibility", "underwater", "level",
-    "roughness", "springs", "holdEdges", "size", "depths", "held", "solver", "flat", "budget", "state", "minDepth", "soak", "soakBelow",
+    "roughness", "springs", "holdEdges", "size", "depths", "held", "solver", "flat", "budget", "state", "minDepth", "soak", "soakBelow", "stillDepth",
+    "points", "halfWidth", "bed", "curve",
     "waves",
 ];
 
@@ -716,7 +730,7 @@ pub const MAX_TILED_SIDE: usize = 4096;
 pub const MAX_SIM_POINTS: usize = 128 * 128;
 
 /// A `water.addVolume` options table as the water it declares.
-fn declared_from(opts: &Table, id: u32) -> mlua::Result<DeclaredWater> {
+fn declared_from(opts: &Table, id: u32, worlds: &std::collections::HashSet<String>) -> mlua::Result<DeclaredWater> {
     const CALL: &str = "water.addVolume";
     crate::opts::check_keys(opts, VOLUME_KEYS, CALL)?;
     let err = |m: &str| mlua::Error::RuntimeError(format!("{CALL}: {m}"));
@@ -820,7 +834,14 @@ fn declared_from(opts: &Table, id: u32) -> mlua::Result<DeclaredWater> {
             let origin = vec("origin").unwrap_or(glam::DVec3::ZERO);
             Surface::Grid(std::sync::Arc::new(HeightGrid { x0: origin.x, z0: origin.z, cell, columns, rows, levels, flow }))
         }
-        other => return Err(err(&format!("`shape` is \"lake\", \"heightfield\" or \"sim\", not \"{other}\""))),
+        // A river: a line of points down its channel.
+        "ribbon" => {
+            // It lies round a world it is declared on, and flat anywhere
+            // else, unless it says which itself.
+            let on_world = matches!(opts.get::<Value>("parent")?, Value::String(n) if worlds.contains(&*n.to_str()?));
+            crate::water_ribbon::ribbon_from(opts, CALL, on_world)?
+        }
+        other => return Err(err(&format!("`shape` is \"lake\", \"heightfield\", \"sim\" or \"ribbon\", not \"{other}\""))),
     };
     let anchor = match opts.get::<Value>("parent")? {
         Value::Nil => None,
@@ -838,6 +859,8 @@ fn declared_from(opts: &Table, id: u32) -> mlua::Result<DeclaredWater> {
         angular_drag: num("angularDrag").unwrap_or(1.0).max(0.0) as f32,
         current: vec("current").unwrap_or(glam::DVec3::ZERO).as_vec3(),
         floor: match num("depth") {
+            // A ribbon's `depth` is its channel's, shaped from bank to bank.
+            _ if shape == "ribbon" => f64::INFINITY,
             Some(d) if d > 0.0 => d,
             Some(_) => return Err(err("`depth` is how far below the surface the bed lies, in metres, more than 0")),
             None => f64::INFINITY,
@@ -847,6 +870,12 @@ fn declared_from(opts: &Table, id: u32) -> mlua::Result<DeclaredWater> {
         swell: None,
         time: 0.0,
     };
+    // A river's surface slopes and turns with its course: nothing to lay
+    // waves on. Said here rather than left to float things on a flat river
+    // a game believes has waves.
+    if !waves.is_empty() && matches!(water.surface, Surface::Ribbon { .. }) {
+        return Err(err("a ribbon carries no swell: `waves` are for a lake, a heightfield or a sim"));
+    }
     water.swell = water.swell_of(&waves);
     Ok(water)
 }
@@ -992,6 +1021,10 @@ fn tiled_from(opts: &Table, call: &str) -> mlua::Result<(Surface, floptle_core::
     let min_depth = num("minDepth").unwrap_or(1e-3).max(1e-5) as f32;
     let soak = num("soak").unwrap_or(0.0).max(0.0) as f32;
     let soak_below = num("soakBelow").unwrap_or(0.01).max(0.0) as f32;
+    let still_depth = num("stillDepth").unwrap_or(5e-4);
+    if !(0.0..=0.1).contains(&still_depth) {
+        return Err(err("`stillDepth` is the surface change that counts, in metres: 0 to 0.1 (0.0005 by default)"));
+    }
     let spec = SimSpec {
         level: level as f32,
         roughness: roughness as f32,
@@ -1010,6 +1043,7 @@ fn tiled_from(opts: &Table, call: &str) -> mlua::Result<(Surface, floptle_core::
             min_depth,
             soak,
             soak_below,
+            still_depth: still_depth as f32,
         }),
     };
     let surface = Surface::Tiles(std::sync::Arc::new(TiledSurface { patch, tiles: Default::default() }));
@@ -1059,6 +1093,7 @@ fn level_of(w: &DeclaredWater) -> Option<f64> {
             (!wet.is_empty()).then(|| wet.iter().sum::<f64>() / wet.len() as f64)
         }
         Surface::Tiles(t) => t.mean_level(),
+        Surface::Ribbon { course, lift } => Some(course.level() + lift),
     }
 }
 
@@ -1212,7 +1247,7 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
         let s = shared.clone();
         if let Ok(f) = lua.create_function(move |_, opts: Table| {
             let id = s.next_id.get().wrapping_add(1).max(1);
-            let mut w = declared_from(&opts, id)?;
+            let mut w = declared_from(&opts, id, &s.worlds.borrow())?;
             w.time = s.clock.get();
             s.next_id.set(id);
             s.declared.borrow_mut().push(w);
@@ -1239,6 +1274,11 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
                 Some(SwellSource::Declared(id)) => {
                     let mut d = s.declared.borrow_mut();
                     let Some(w) = d.iter_mut().find(|w| w.id == id) else { return Ok(false) };
+                    if !waves.is_empty() && matches!(w.surface, Surface::Ribbon { .. }) {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "{CALL}: a ribbon carries no swell: waves are for a lake, a heightfield or a sim"
+                        )));
+                    }
                     w.swell = w.swell_of(&waves);
                     w.time = s.clock.get();
                     s.changed.borrow_mut().push(id);
@@ -1381,6 +1421,7 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
                     let up = t.patch.locate(local).map_or(t.patch.up, |(_, _, _, up)| up);
                     (w.frame.to_world(up) - w.frame.origin).normalize_or_zero()
                 }
+                Surface::Ribbon { course, .. } => (w.frame.to_world(course.up_at(local)) - w.frame.origin).normalize_or_zero(),
             };
             let under = |local: glam::DVec3| -> bool {
                 if cols.is_empty() {
@@ -1392,6 +1433,8 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
                     Surface::Lake { reach, .. } => reach.max(10.0),
                     Surface::Grid(g) => (g.cell * g.columns.max(g.rows) as f64).max(10.0),
                     Surface::Tiles(t) => (t.patch.cell * t.patch.columns.max(t.patch.rows) as f64).max(10.0),
+                    // A river is drawn where it was laid, ground or no.
+                    Surface::Ribbon { .. } => return false,
                 };
                 let from = (at + up * height - origin).as_vec3();
                 floptle_physics::raycast_colliders(&cols, from, -up.as_vec3(), height as f32 - 0.01, !0).is_some()
@@ -1425,6 +1468,12 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
                     let mut m = SurfaceMesh { positions: Vec::new(), normals: Vec::new(), uvs: Vec::new(), indices: Vec::new(), colors: Vec::new(), index_capacity: 0 };
                     tiles_mesh(&mut m, t, Some(key), &look);
                     m
+                }
+                // A river's `cells` count from bank to bank, a few by default.
+                (Surface::Ribbon { .. }, _) => {
+                    let across = opts.as_ref().and_then(|o| o.get::<Option<f64>>("cells").ok().flatten());
+                    let across = across.map_or(crate::water_ribbon::CELLS_ACROSS, |c| c.round().clamp(2.0, 64.0) as usize);
+                    surface_mesh_with(&w.surface, across, &under, &look)
                 }
                 _ => surface_mesh_with(&w.surface, cells, &under, &look),
             };
@@ -1542,6 +1591,9 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
                 }
                 // Tiled water is always a sim's.
                 (Surface::Tiles(_), None) => return Ok(false),
+                // A river keeps its slope: every point rises or falls by
+                // what brings its first point to `level`.
+                (Surface::Ribbon { course, lift }, None) => *lift = level - course.level(),
             }
             s.changed.borrow_mut().push(id);
             Ok(true)
@@ -1649,8 +1701,29 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
         }
     }
 
+    // water.filled(id) → { [group] = m³ }: what each group gave to fill the
+    // ground under newly held cells, from when they were first held until
+    // the group came to rest, since the last ask. Counted apart from
+    // water.exchanged, so a lake started dry from held points does not read
+    // as a lake draining.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |lua, id: u32| {
+            let out = lua.create_table()?;
+            if let Some(groups) = s.filled.borrow_mut().remove(&id) {
+                for (g, v) in groups {
+                    out.raw_set(g, v)?;
+                }
+            }
+            Ok(out)
+        }) {
+            let _ = t.set("filled", f);
+        }
+    }
+
     // water.tiles(id) → { { key, serial, i, j }, ... }: a tiled sim's tiles
-    // holding water, each with a serial that changes when its water does.
+    // holding water, each with a serial that moves when its surface has
+    // moved by more than `stillDepth`.
     {
         let s = shared.clone();
         if let Ok(f) = lua.create_function(move |lua, id: u32| {
@@ -1924,9 +1997,11 @@ mod tests {
             changed: Rc::default(),
             sim_cmds: Rc::default(),
             exchanged: Rc::default(),
+            filled: Rc::default(),
             splashes: Rc::default(),
             wet: Rc::default(),
             slam: Rc::default(),
+            worlds: Rc::default(),
             next_id: Rc::default(),
             colliders: Rc::default(),
             sim_origin: Rc::default(),
@@ -2367,6 +2442,7 @@ mod tests {
             let sim = d[0].simulated.as_ref().unwrap();
             let t = sim.tiled.as_ref().expect("a tiled sim");
             assert!(!t.fill && !t.pipes);
+            assert_eq!(t.still_depth, 5e-4, "the surface change that counts is half a millimetre unless `stillDepth` says");
             assert_eq!((t.patch.columns, t.patch.rows), (513, 513));
             assert_eq!(t.patch.radius, Some(800.0));
             assert_eq!(t.held, vec![floptle_core::water::HeldCell { i: 256, j: 256, level: 801.0, group: 4 }]);
@@ -2390,6 +2466,13 @@ mod tests {
         let (given, again): (f64, bool) =
             lua.load(format!("local e = water.exchanged({id}) return e[4], next(water.exchanged({id})) == nil")).eval().unwrap();
         assert!(given == -2.5 && again, "{given} {again}");
+        // What filled the ground under newly held points is counted apart.
+        shared.filled.borrow_mut().entry(id).or_default().insert(4, 40.0);
+        let (fill, exchanged, again): (f64, bool, bool) = lua
+            .load(format!("local e = next(water.exchanged({id})) == nil local f = water.filled({id}) return f[4], e, next(water.filled({id})) == nil"))
+            .eval()
+            .unwrap();
+        assert!(fill == 40.0 && exchanged && again, "{fill} {exchanged} {again}");
         // A tile of water as the engine hands it back.
         let mut level = vec![f32::NAN; floptle_core::water::TILE * floptle_core::water::TILE];
         for c in [0, 1, floptle_core::water::TILE, floptle_core::water::TILE + 1] {

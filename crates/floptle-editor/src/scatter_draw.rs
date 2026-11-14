@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use floptle_core::math::{DVec3, Mat4, Vec3, Vec4};
-use floptle_core::scatter::{self, Align, ChunkKey, Instance, ScatterSource};
+use floptle_core::scatter::{self, Align, ChunkKey, Instance, ScatterSource, SettleOn};
 use floptle_render::{instance_of_mat, InstanceRaw, MaterialParams, MeshId, TexId};
 
 /// One chunk's instances, already dropped onto the surface.
@@ -156,21 +156,53 @@ impl ScatterCache {
     /// dig tool kept the rocks round it flickering.
     pub(crate) fn invalidate_near(&mut self, sources: &[ScatterSource], p: DVec3, radius: f64) {
         for src in sources {
-            // `p` is where the ground changed, in the world. The chunks are
-            // keyed in the source's own frame.
-            let pl = src.frame.to_local(p);
-            let reach = radius + RESETTLE_MARGIN;
-            for key in scatter::chunks_under(src, pl, radius) {
-                let Some(chunk) = self.chunks.get_mut(&(src.id, key)) else { continue };
-                let near: std::collections::HashSet<_> =
-                    chunk.instances.iter().filter(|i| (i.pos - pl).length() <= reach).map(|i| i.id).collect();
-                if near.is_empty() {
-                    continue;
+            self.queue_near(src, p, radius, RESETTLE_MARGIN);
+        }
+    }
+
+    /// Queue every resident prop of `src` standing within `radius + margin`
+    /// of world point `p` to be dropped onto the ground again.
+    fn queue_near(&mut self, src: &ScatterSource, p: DVec3, radius: f64, margin: f64) {
+        // `p` is where the ground changed, in the world. The chunks are keyed
+        // in the source's own frame.
+        let pl = src.frame.to_local(p);
+        let reach = radius + margin;
+        for key in scatter::chunks_under(src, pl, radius) {
+            let Some(chunk) = self.chunks.get_mut(&(src.id, key)) else { continue };
+            let near: std::collections::HashSet<_> =
+                chunk.instances.iter().filter(|i| (i.pos - pl).length() <= reach).map(|i| i.id).collect();
+            if near.is_empty() {
+                continue;
+            }
+            let queued: std::collections::HashSet<_> = chunk.resettle.iter().map(|i| i.id).collect();
+            chunk.resettle.extend(
+                scatter::chunk_instances(src, key).into_iter().filter(|i| near.contains(&i.id) && !queued.contains(&i.id)),
+            );
+        }
+    }
+
+    /// Drop props of one source onto the ground again, in place
+    /// (`scatter.resettle`): the same id and the same roll, each moving to
+    /// whatever is under it now in its turn, and staying drawn where it was
+    /// till then. A prop with nothing under it any more goes, as one whose
+    /// ground was dug away does. Props in no resident chunk need nothing:
+    /// they settle afresh when their chunk next arrives.
+    pub(crate) fn resettle(&mut self, sources: &[ScatterSource], source: u32, what: scatter::Resettle) {
+        let Some(src) = sources.iter().find(|s| s.id == source) else { return };
+        match what {
+            scatter::Resettle::Near { center, radius } => self.queue_near(src, center, radius, 0.0),
+            scatter::Resettle::Id(id) => {
+                for (&(sid, key), chunk) in self.chunks.iter_mut() {
+                    if sid != source || !chunk.instances.iter().any(|i| i.id == id) {
+                        continue;
+                    }
+                    if !chunk.resettle.iter().any(|i| i.id == id)
+                        && let Some(i) = scatter::chunk_instances(src, key).into_iter().find(|i| i.id == id)
+                    {
+                        chunk.resettle.push(i);
+                    }
+                    return;
                 }
-                let queued: std::collections::HashSet<_> = chunk.resettle.iter().map(|i| i.id).collect();
-                chunk.resettle.extend(
-                    scatter::chunk_instances(src, key).into_iter().filter(|i| near.contains(&i.id) && !queued.contains(&i.id)),
-                );
             }
         }
     }
@@ -181,9 +213,90 @@ impl ScatterCache {
 
 }
 
+/// The first surface under a settling prop, among those `on` lets it rest on:
+/// `(distance, normal)`, from sim-frame `o`.
+///
+/// The ground's own answer: the same hit as a plain ray, but a terrain chunk
+/// is never meshed for collision on a prop's account (see `ground_cast`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ground_ray(
+    physics: &floptle_physics::PhysicsWorld,
+    world: &floptle_core::World,
+    moved: &std::collections::HashSet<u32>,
+    memo: &std::cell::RefCell<HashMap<u32, bool>>,
+    o: Vec3,
+    dir: Vec3,
+    max: f32,
+    on: SettleOn,
+) -> Option<(f32, Vec3)> {
+    let hit = match on {
+        SettleOn::All => physics.raycast_ground(o, dir, max),
+        _ => physics.raycast_ground_where(o, dir, max, &|c| settles_on(on, c, world, moved, memo)),
+    };
+    hit.map(|h| (h.distance, Vec3::from(h.normal)))
+}
+
+/// Whether a prop of a source set to `on` may come to rest on collider `c`.
+///
+/// Terrain is always ground. Under [`SettleOn::Static`] so is a collider that
+/// belongs to no node (level geometry), or to a node that stays put: one that
+/// is not, and does not ride, a dynamic or kinematic body (a vehicle, an
+/// assembly, a character, anything the solver moves), and that nothing has
+/// moved since play began (`moved`: a script or an animation re-posing it).
+/// A prop keeps the height it lands at, so landing on any of those leaves it
+/// in the air once the thing it landed on goes. Static bodies, Collidable
+/// buildings and floors stay ground; a planet carrying its buildings round its
+/// orbit is not a move.
+pub(crate) fn settles_on(
+    on: SettleOn,
+    c: &floptle_physics::AnchoredCollider,
+    world: &floptle_core::World,
+    moved: &std::collections::HashSet<u32>,
+    memo: &std::cell::RefCell<HashMap<u32, bool>>,
+) -> bool {
+    match on {
+        SettleOn::All => true,
+        SettleOn::Terrain => c.is_terrain(),
+        SettleOn::Static => c.is_terrain() || c.eid.is_none_or(|eid| stays_put(eid, world, moved, memo)),
+    }
+}
+
+/// Whether node `eid` is ground that stays put (see [`settles_on`]).
+fn stays_put(
+    eid: u32,
+    world: &floptle_core::World,
+    moved: &std::collections::HashSet<u32>,
+    memo: &std::cell::RefCell<HashMap<u32, bool>>,
+) -> bool {
+    if moved.contains(&eid) {
+        return false;
+    }
+    if let Some(&known) = memo.borrow().get(&eid) {
+        return known;
+    }
+    let still = world.entity_at(eid).is_none_or(|e| !rides_a_body(world, e));
+    memo.borrow_mut().insert(eid, still);
+    still
+}
+
+/// Whether `e`, or a node it hangs under, is a body the solver moves.
+fn rides_a_body(world: &floptle_core::World, e: floptle_core::Entity) -> bool {
+    let mut cur = e;
+    // Bounded, so a parent loop a broken scene file made cannot hang a frame.
+    for _ in 0..64 {
+        if world.get::<floptle_core::RigidBody>(cur).is_some_and(|rb| rb.mode != floptle_core::BodyMode::Static) {
+            return true;
+        }
+        let Some(floptle_core::Parent(p)) = world.get::<floptle_core::Parent>(cur).copied() else { return false };
+        cur = p;
+    }
+    false
+}
+
 /// Drop an instance onto the real surface under it.
 ///
-/// `ground` casts a ray and answers the distance to the first surface, if any.
+/// `ground` casts a ray and answers the distance to the first surface, if any,
+/// among the surfaces the source's [`SettleOn`] lets its props rest on.
 /// A prop with no ground under it is dropped rather than left floating at the
 /// region's nominal height — a tree hanging in the air over a canyon reads as a
 /// bug, and a missing tree reads as a canyon.
@@ -194,7 +307,7 @@ impl ScatterCache {
 fn settle(
     src: &ScatterSource,
     mut inst: Instance,
-    ground: &mut impl FnMut(DVec3, Vec3, f32) -> Option<(f32, Vec3)>,
+    ground: &mut impl FnMut(DVec3, Vec3, f32, SettleOn) -> Option<(f32, Vec3)>,
 ) -> Option<Instance> {
     // Start above and cast down along the region's own up — which on a planet
     // is radial, so this works at the equator and at the pole alike.
@@ -203,7 +316,7 @@ fn settle(
     let up = inst.up;
     let from = inst.pos + up.as_dvec3() * LIFT as f64;
     let (dist, normal) =
-        ground(f.to_world(from), f.dir_to_world(-up), LIFT * 2.5)?;
+        ground(f.to_world(from), f.dir_to_world(-up), LIFT * 2.5, src.settle_on)?;
     inst.pos = from - up.as_dvec3() * dist as f64;
     if src.align == Align::Surface {
         // The real normal, not the region's idealised one: a tree on a hillside
@@ -378,6 +491,7 @@ pub(crate) fn push_scatter(
     protos: &HashMap<String, Vec<BakedPart>>,
     proto_radius: &HashMap<String, f32>,
     cache: &mut ScatterCache,
+    moved: &std::collections::HashSet<u32>,
     publish: bool,
     eye: DVec3,
     frustum: &floptle_render::Frustum,
@@ -397,12 +511,12 @@ pub(crate) fn push_scatter(
         return 0;
     }
     let before = out.len();
-    let mut ground = |from: DVec3, dir: Vec3, max: f32| {
+    // Which nodes ride a body, worked out once a frame per node a ray meets.
+    let memo = std::cell::RefCell::new(HashMap::new());
+    let mut ground = |from: DVec3, dir: Vec3, max: f32, on: SettleOn| {
         let sim = sim?;
         let o = (from - sim.world.origin).as_vec3();
-        // The ground's own answer: the same hit, but a terrain chunk is never
-        // meshed for collision on a prop's account (see `ground_cast`).
-        sim.world.raycast_ground(o, dir, max).map(|h| (h.distance, Vec3::from(h.normal)))
+        ground_ray(&sim.world, world, moved, &memo, o, dir, max, on)
     };
     // Baked before the frame's GPU borrow (see
     // `bake_scatter_prototypes`), and given its materials once a frame
@@ -468,7 +582,7 @@ pub(crate) fn build_instances(
     budget: usize,
     out: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
 ) {
-    build_instances_with(cache, sources, eye, mesh_of, radius_of, ground, frustum, budget, out, &mut |e, _| e);
+    build_instances_with(cache, sources, eye, mesh_of, radius_of, &mut |a, b, c, _| ground(a, b, c), frustum, budget, out, &mut |e, _| e);
 }
 
 /// Everything visible from `eye`, packed as instanced draws.
@@ -492,7 +606,7 @@ pub(crate) fn build_instances_with(
     eye: DVec3,
     mesh_of: &mut impl FnMut(&str) -> Option<Vec<Part>>,
     radius_of: &mut impl FnMut(&str) -> Option<f32>,
-    ground: &mut impl FnMut(DVec3, Vec3, f32) -> Option<(f32, Vec3)>,
+    ground: &mut impl FnMut(DVec3, Vec3, f32, SettleOn) -> Option<(f32, Vec3)>,
     frustum: &floptle_render::Frustum,
     budget: usize,
     out: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
@@ -537,7 +651,15 @@ pub(crate) fn build_instances_with(
     // One ray over budget is allowed now and then when a ray alone is more
     // than the budget; otherwise a ray starts only if it is expected to fit.
     let slow_turn = *frame % SLOW_RAY_EVERY == 0;
+    // A source that is gone takes its settled chunks with it. A game changes
+    // how far a field reaches by declaring it again, and every chunk of the
+    // old one stayed resolved until the scene ended: memory that grew with
+    // each change, walked again whenever a later source swept.
+    let swept = sweeps.len();
     sweeps.retain(|id, _| sources.iter().any(|s| s.id == *id));
+    if sweeps.len() != swept {
+        resolved.retain(|(id, _), _| sources.iter().any(|s| s.id == *id));
+    }
     // Shared across sources, because it is a frame budget. A source that eats
     // it all is fully resident afterwards and stops asking, so the next source
     // gets the next frame's — it converges rather than starving anyone.
@@ -1340,8 +1462,35 @@ end
             shadow_fade: 0.0,
             leaving: HashMap::new(),
             dying: None,
+            settle_on: Default::default(),
             marks: Default::default(),
         }
+    }
+
+    /// **A source that is gone leaves no chunks behind.** A field declared
+    /// again at another distance is a new source: the old one's settled
+    /// chunks go when it does, instead of staying resolved for the rest of
+    /// the scene.
+    #[test]
+    fn a_source_that_is_gone_leaves_no_chunks_behind() {
+        let mut cache = ScatterCache { settle_all: true, ..Default::default() };
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        let mut build = |cache: &mut ScatterCache, s: &ScatterSource| {
+            let mut out = Vec::new();
+            build_instances(
+                cache, std::slice::from_ref(s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
+                &floptle_render::Frustum::everything(), 20_000, &mut out,
+            );
+            out.len()
+        };
+        let far = src();
+        assert!(build(&mut cache, &far) > 0, "nothing drew");
+        let held = cache.len();
+        let near = ScatterSource { id: 2, bands: vec![Band { asset: "a".into(), distance: 25.0 }], ..src() };
+        assert!(build(&mut cache, &near) > 0, "the field declared again drew nothing");
+        assert!(cache.chunks.keys().all(|(id, _)| *id == 2), "the old source's chunks are still held");
+        assert!(cache.len() < held, "the nearer field holds as many chunks as the far one did: {} vs {held}", cache.len());
     }
 
     /// **A source's tint and glow reach every prop it draws.** Scatter drew
@@ -1633,7 +1782,7 @@ end
     fn a_prop_with_no_ground_under_it_is_dropped() {
         let s = src();
         let inst = scatter::chunk_instances(&s, (0, 0))[0];
-        let mut nothing = |_: DVec3, _: Vec3, _: f32| None;
+        let mut nothing = |_: DVec3, _: Vec3, _: f32, _: SettleOn| None;
         assert!(settle(&s, inst, &mut nothing).is_none());
     }
 
@@ -1645,7 +1794,7 @@ end
         let inst = scatter::chunk_instances(&s, (0, 0))[0];
         let slope = Vec3::new(0.0, 0.8, 0.6).normalize();
         // Ground 12 m below the cast start, i.e. 48 m below the nominal height.
-        let mut hit = |_: DVec3, _: Vec3, _: f32| Some((12.0f32, slope));
+        let mut hit = |_: DVec3, _: Vec3, _: f32, _: SettleOn| Some((12.0f32, slope));
         let out = settle(&s, inst, &mut hit).expect("there was ground");
         assert!((out.pos.y - (inst.pos.y + 60.0 - 12.0)).abs() < 1e-4, "landed at the wrong height");
         assert!(out.up.dot(slope) > 0.999, "did not take the ground's normal");
@@ -2951,5 +3100,301 @@ end
         assert!(soon > grass * 0.4, "the grass snapped upright: {soon} a tenth of a second after leaning {grass}");
         let (_, later) = after(&mut cache, 1.1);
         assert!(later < grass * 0.05, "a second after the walker left the grass still leans {later} (from {grass})");
+    }
+
+    /// A level for the settle tests: flat terrain at y = 0, and on it a
+    /// parked vehicle (a Collidable panel under a dynamic body, top at 2), a
+    /// kinematic platform (its own collider, top at 3), a building (a
+    /// Collidable box on no body, roof at 4) and a crate a script has moved
+    /// (top at 1.5). Each stands over its own quarter of the field.
+    struct Level {
+        physics: floptle_physics::PhysicsWorld,
+        ecs: floptle_core::World,
+        moved: std::collections::HashSet<u32>,
+        /// The rover's panel and the lift, by node index.
+        movers: [u32; 2],
+    }
+
+    /// The x, z centre of each piece, and how far it reaches either way.
+    const CAR: (f64, f64) = (-10.0, -10.0);
+    const LIFT_PAD: (f64, f64) = (10.0, -10.0);
+    const HOUSE: (f64, f64) = (-10.0, 10.0);
+    const CRATE: (f64, f64) = (10.0, 10.0);
+    const HALF: f64 = 4.0;
+
+    fn level() -> Level {
+        use floptle_core::{BodyMode, Parent, RigidBody};
+        use floptle_physics::{AnchoredCollider, BoxShape};
+        let mut ecs = floptle_core::World::new();
+        let mut physics = floptle_physics::PhysicsWorld::default();
+        let t = floptle_field::Terrain::flat([96, 16, 96], [0.0, 0.0, 0.0], [24.0, 4.0, 24.0], 0.0, [0.5; 3]);
+        let ground = ecs.spawn();
+        let mut terrain = AnchoredCollider::world(Box::new(floptle_physics::ChunkTerrain::new(
+            floptle_field::ChunkField::from_dense(&t.baked, 0.5),
+        )));
+        terrain.eid = Some(ground.index());
+        physics.colliders.push(terrain);
+        let mut slab = |eid: u32, at: (f64, f64), top: f32| {
+            let mut c = AnchoredCollider::world(Box::new(BoxShape::new(
+                Vec3::new(at.0 as f32, top - 0.25, at.1 as f32),
+                Vec3::new(HALF as f32, 0.25, HALF as f32),
+                floptle_core::math::Quat::IDENTITY,
+            )));
+            c.eid = Some(eid);
+            physics.colliders.push(c);
+        };
+        // The vehicle: the body is the chassis; its panel is what collides.
+        let car = ecs.spawn();
+        ecs.insert(car, RigidBody { mode: BodyMode::Dynamic, ..Default::default() });
+        let panel = ecs.spawn();
+        ecs.insert(panel, Parent(car));
+        ecs.insert(panel, floptle_core::Collidable);
+        slab(panel.index(), CAR, 2.0);
+        let pad = ecs.spawn();
+        ecs.insert(pad, RigidBody { mode: BodyMode::Kinematic, ..Default::default() });
+        slab(pad.index(), LIFT_PAD, 3.0);
+        // The building stands on a static body's slab, as a level is built.
+        let site = ecs.spawn();
+        ecs.insert(site, RigidBody { mode: BodyMode::Static, ..Default::default() });
+        let house = ecs.spawn();
+        ecs.insert(house, Parent(site));
+        ecs.insert(house, floptle_core::Collidable);
+        slab(house.index(), HOUSE, 4.0);
+        let crate_ = ecs.spawn();
+        ecs.insert(crate_, floptle_core::Collidable);
+        slab(crate_.index(), CRATE, 1.5);
+        let moved = std::iter::once(crate_.index()).collect();
+        Level { physics, ecs, moved, movers: [panel.index(), pad.index()] }
+    }
+
+    /// Where each prop of a source landed, settled whole through `level`'s
+    /// ground query, by id.
+    fn landed_on(lv: &Level, on: SettleOn, cache: &mut ScatterCache) -> HashMap<u64, DVec3> {
+        let s = ScatterSource {
+            region: Region::Ground { center: DVec3::ZERO, half: [20.0, 20.0] },
+            per_chunk: 24,
+            chunk: 8.0,
+            align: Align::World,
+            settle_on: on,
+            ..src()
+        };
+        // Kept with the cache: a warm cache settles only what changed.
+        let landed = cache.settled_out.get_or_insert_with(Settled::default).clone();
+        cache.settle_all = true;
+        let memo = std::cell::RefCell::new(HashMap::new());
+        let mut ground = |from: DVec3, dir: Vec3, max: f32, on: SettleOn| {
+            ground_ray(&lv.physics, &lv.ecs, &lv.moved, &memo, from.as_vec3(), dir, max, on)
+        };
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
+        let mut out = Vec::new();
+        build_instances_with(
+            cache, std::slice::from_ref(&s), DVec3::new(0.0, 2.0, 0.0), &mut mesh, &mut |_: &str| None, &mut ground,
+            &floptle_render::Frustum::everything(), 20_000, &mut out, &mut |e, _| e,
+        );
+        landed.borrow().iter().map(|(&(_, id), &(p, _))| (id, p)).collect()
+    }
+
+    /// Which piece a prop at `p` stands over, if any.
+    fn over(p: DVec3) -> Option<(f64, f64)> {
+        // A hair inside the edge: a prop on the very rim may graze either.
+        [CAR, LIFT_PAD, HOUSE, CRATE].into_iter().find(|c| (p.x - c.0).abs() < HALF - 0.1 && (p.z - c.1).abs() < HALF - 0.1)
+    }
+
+    /// The heights the props over each piece landed at, and over open ground.
+    fn heights(props: &HashMap<u64, DVec3>) -> HashMap<Option<(i64, i64)>, Vec<f64>> {
+        let mut out: HashMap<Option<(i64, i64)>, Vec<f64>> = HashMap::new();
+        for p in props.values() {
+            out.entry(over(*p).map(|c| (c.0 as i64, c.1 as i64))).or_default().push(p.y);
+        }
+        out
+    }
+
+    fn key(c: (f64, f64)) -> Option<(i64, i64)> {
+        Some((c.0 as i64, c.1 as i64))
+    }
+
+    fn all_near(hs: &[f64], y: f64) -> bool {
+        !hs.is_empty() && hs.iter().all(|h| (h - y).abs() < 0.1)
+    }
+
+    /// **A prop settles on ground that stays put.** Dropped from 60 m up, the
+    /// ground ray stopped at the first collider it met: a parked rover, a
+    /// lift, the player. The prop kept that height, so when the rover drove
+    /// off the rock hung a metre up where it had been. By default a prop
+    /// passes through anything a body moves, or that has moved, and lands on
+    /// the terrain under it; a building's roof is still ground. Props on open
+    /// terrain land at exactly the height they always did.
+    #[test]
+    fn props_settle_on_ground_that_stays_put() {
+        let lv = level();
+        let all = landed_on(&lv, SettleOn::All, &mut ScatterCache::default());
+        let still = landed_on(&lv, SettleOn::Static, &mut ScatterCache::default());
+        let terrain = landed_on(&lv, SettleOn::Terrain, &mut ScatterCache::default());
+        let (ha, hs, ht) = (heights(&all), heights(&still), heights(&terrain));
+        // The fixture: props over every piece and over open ground.
+        for k in [key(CAR), key(LIFT_PAD), key(HOUSE), key(CRATE), None] {
+            assert!(ha.get(&k).is_some_and(|v| v.len() >= 2), "the fixture: too few props over {k:?}");
+        }
+        // "all" is what settling always did: the first thing under the ray.
+        assert!(all_near(&ha[&key(CAR)], 2.0), "all: not on the rover {:?}", ha[&key(CAR)]);
+        assert!(all_near(&ha[&key(LIFT_PAD)], 3.0), "all: not on the lift {:?}", ha[&key(LIFT_PAD)]);
+        assert!(all_near(&ha[&key(HOUSE)], 4.0), "all: not on the roof {:?}", ha[&key(HOUSE)]);
+        assert!(all_near(&ha[&key(CRATE)], 1.5), "all: not on the crate {:?}", ha[&key(CRATE)]);
+        // "static": through the rover, the lift and the crate to the
+        // terrain; the roof is still a roof.
+        assert!(all_near(&hs[&key(CAR)], 0.0), "static: a prop landed on a parked vehicle {:?}", hs[&key(CAR)]);
+        assert!(all_near(&hs[&key(LIFT_PAD)], 0.0), "static: a prop landed on a kinematic body {:?}", hs[&key(LIFT_PAD)]);
+        assert!(all_near(&hs[&key(CRATE)], 0.0), "static: a prop landed on a moved crate {:?}", hs[&key(CRATE)]);
+        assert!(all_near(&hs[&key(HOUSE)], 4.0), "static: a prop fell through a building's roof {:?}", hs[&key(HOUSE)]);
+        // "terrain": through everything that is not terrain.
+        for k in [key(CAR), key(LIFT_PAD), key(HOUSE), key(CRATE)] {
+            assert!(all_near(&ht[&k], 0.0), "terrain: a prop over {k:?} did not reach the terrain {:?}", ht[&k]);
+        }
+        // Every setting rolls the same props, and on open terrain each lands
+        // at exactly the height the old ray gave it.
+        assert_eq!(all.len(), still.len());
+        assert_eq!(all.len(), terrain.len());
+        for (id, p) in &all {
+            if over(*p).is_none() && [CAR, LIFT_PAD, HOUSE, CRATE].iter().all(|c| (p.x - c.0).abs() > HALF + 0.1 || (p.z - c.1).abs() > HALF + 0.1) {
+                assert_eq!(still[id], *p, "static moved a prop on open terrain");
+                assert_eq!(terrain[id], *p, "terrain moved a prop on open terrain");
+            }
+        }
+    }
+
+    /// **`scatter.resettle` drops a floating prop.** A prop that settled on
+    /// something that has since gone keeps standing where it was until it is
+    /// asked to land again; asked by id or round a point, it lands on what
+    /// is under it now, keeping its id and its roll, and the rest of the
+    /// field is left alone.
+    #[test]
+    fn resettle_drops_a_prop_whose_ground_went() {
+        let mut lv = level();
+        let mut cache = ScatterCache::default();
+        let before = landed_on(&lv, SettleOn::All, &mut cache);
+        let on_car: Vec<u64> = before.iter().filter(|(_, p)| over(**p) == Some(CAR)).map(|(id, _)| *id).collect();
+        let on_pad: Vec<u64> = before.iter().filter(|(_, p)| over(**p) == Some(LIFT_PAD)).map(|(id, _)| *id).collect();
+        assert!(on_car.len() >= 2 && on_pad.len() >= 2, "the fixture: props on the rover and the lift");
+        // The rover drives off and the lift goes down: their colliders go.
+        let gone = lv.movers;
+        lv.physics.colliders.retain(|c| !c.eid.is_some_and(|e| gone.contains(&e)));
+        // Nothing asked: the props still hang where the rover and lift were.
+        let idle = landed_on(&lv, SettleOn::All, &mut cache);
+        assert!(on_car.iter().all(|id| (idle[id].y - 2.0).abs() < 0.1), "the fixture: a prop came down by itself");
+        let s = ScatterSource { region: Region::Ground { center: DVec3::ZERO, half: [20.0, 20.0] }, per_chunk: 24, chunk: 8.0, align: Align::World, settle_on: SettleOn::All, ..src() };
+        let sources = std::slice::from_ref(&s);
+        // One by id, the lift's round its centre.
+        cache.resettle(sources, s.id, scatter::Resettle::Id(on_car[0]));
+        cache.resettle(sources, s.id, scatter::Resettle::Near { center: DVec3::new(LIFT_PAD.0, 3.0, LIFT_PAD.1), radius: HALF * 1.5 });
+        let after = landed_on(&lv, SettleOn::All, &mut cache);
+        assert!(after[&on_car[0]].y.abs() < 0.1, "the prop asked by id still floats at {}", after[&on_car[0]].y);
+        assert!((after[&on_car[0]].x - before[&on_car[0]].x).abs() < 1e-9, "a resettled prop moved sideways: not the same roll");
+        assert!((after[&on_car[1]].y - 2.0).abs() < 0.1, "a prop nobody asked about was moved");
+        for id in &on_pad {
+            assert!(after[id].y.abs() < 0.1, "a prop round the point asked still floats at {}", after[id].y);
+        }
+        // A prop on open ground near the point is re-dropped to where it was.
+        for (id, p) in &before {
+            if [CAR, LIFT_PAD, HOUSE, CRATE].iter().all(|c| (p.x - c.0).abs() > HALF + 0.1 || (p.z - c.1).abs() > HALF + 0.1) {
+                assert!((after[id] - *p).length() < 1e-6, "a prop on the ground moved when resettled");
+            }
+        }
+    }
+
+    /// **A static piece that moves takes nothing with it, and a script can
+    /// drop props again.** In play: a crate stands in a field, and the props
+    /// over it settle on its top. A script moves it; from then on it is not
+    /// ground that stays put, and the props round where it stood are dropped
+    /// again, onto the floor, by themselves. A script's `scatter.resettle`
+    /// reaches the field the same frame it asks.
+    #[test]
+    fn a_static_piece_that_moves_drops_the_props_it_carried() {
+        use floptle_core::{BodyKind, BodyMode, Collidable, Matter, RigidBody, ScriptInst, Scripts, Shape, Transform};
+        let dir = std::env::temp_dir().join(format!("floptle_scatter_settle_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/grow.lua"),
+            r#"
+local src, frame = nil, 0
+function start(node)
+  src = scatter.create{ asset = "a", seed = 3, perChunk = 24, chunk = 8, center = vec3(0, 0, 0), halfX = 20, halfZ = 20,
+    align = "world", lod = { { asset = "a", distance = 60 } } }
+end
+function update(node, dt)
+  frame = frame + 1
+  if frame >= 20 then scatter.resettle(src, vec3(-10, 0, -10), 3) end
+end
+"#,
+        )
+        .unwrap();
+        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        let floor = ed.world.spawn();
+        ed.world.insert(floor, Transform { translation: DVec3::new(0.0, -0.5, 0.0), ..Transform::IDENTITY });
+        ed.world.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [40.0, 0.5, 40.0], ..Default::default() });
+        // A cube collides at half 0.7 of its scale: 11.2 m across, top at 1.4.
+        let crate_ = ed.world.spawn();
+        ed.world.insert(crate_, Transform { translation: DVec3::new(10.0, 0.7, 10.0), scale: Vec3::new(8.0, 1.0, 8.0), ..Transform::IDENTITY });
+        ed.world.insert(crate_, Matter::Primitive { shape: Shape::Cube, color: [0.5; 3] });
+        ed.world.insert(crate_, Collidable);
+        let grow = ed.world.spawn();
+        ed.world.insert(grow, Transform::IDENTITY);
+        ed.world.insert(grow, Scripts(vec![ScriptInst { kind: "grow".into(), enabled: true, params: Vec::new(), refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]));
+        ed.toggle_play();
+        assert!(ed.playing);
+        for _ in 0..4 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        // What the frame's draw does with the play sim, settled whole.
+        let build = |ed: &mut crate::Editor| -> HashMap<u64, DVec3> {
+            let sources: Vec<ScatterSource> = ed.script_host.scatter_sources().clone();
+            assert_eq!(sources.len(), 1, "the fixture: the script declared its field");
+            let mut cache = std::mem::take(&mut ed.scatter_cache);
+            // Kept with the cache, as the draw keeps it: a warm cache settles
+            // only what changed.
+            let landed = cache.settled_out.get_or_insert_with(Settled::default).clone();
+            cache.settle_all = true;
+            {
+                let sim = ed.sim.as_ref().expect("playing");
+                let memo = std::cell::RefCell::new(HashMap::new());
+                let (world, moved) = (&ed.world, &ed.moved_statics);
+                let mut ground = |from: DVec3, d: Vec3, max: f32, on: SettleOn| {
+                    ground_ray(&sim.world, world, moved, &memo, (from - sim.world.origin).as_vec3(), d, max, on)
+                };
+                let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
+                build_instances_with(
+                    &mut cache, &sources, DVec3::new(0.0, 2.0, 0.0), &mut mesh, &mut |_: &str| None, &mut ground,
+                    &floptle_render::Frustum::everything(), 20_000, &mut Vec::new(), &mut |e, _| e,
+                );
+            }
+            ed.scatter_cache = cache;
+            landed.borrow().iter().map(|(&(_, id), &(p, _))| (id, p)).collect()
+        };
+        let on_crate = |p: &DVec3| (p.x - 10.0).abs() < 5.4 && (p.z - 10.0).abs() < 5.4;
+        let before = build(&mut ed);
+        let carried: Vec<u64> = before.iter().filter(|(_, p)| on_crate(p)).map(|(id, _)| *id).collect();
+        assert!(carried.len() >= 4, "the fixture: props over the crate");
+        for id in &carried {
+            assert!((before[id].y - 1.4).abs() < 0.05, "a crate nobody moved is ground: a prop landed at {}", before[id].y);
+        }
+        // The script moves the crate out of the field.
+        ed.world.get_mut::<Transform>(crate_).unwrap().translation = DVec3::new(100.0, 0.7, 100.0);
+        ed.play_step(1.0 / 60.0, true);
+        assert!(ed.moved_statics.contains(&crate_.index()), "a moved static piece was not marked as moved");
+        let after = build(&mut ed);
+        for id in &carried {
+            assert!(after[id].y.abs() < 0.05, "a prop the crate carried is left hanging at {}", after[id].y);
+        }
+        // The script resettles round (-10, -10) from its 20th frame on: the
+        // props there are queued for the draw the frame it asks.
+        let queued = |ed: &crate::Editor| ed.scatter_cache.chunks.values().map(|c| c.resettle.len()).sum::<usize>();
+        assert_eq!(queued(&ed), 0, "the fixture: nothing queued before the script asks");
+        for _ in 0..20 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        assert!(queued(&ed) > 0, "the script's scatter.resettle never reached the field");
+        build(&mut ed);
+        assert_eq!(queued(&ed), 0, "a queued resettle was never settled");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

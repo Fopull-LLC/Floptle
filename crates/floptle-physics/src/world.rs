@@ -143,6 +143,11 @@ impl AnchoredCollider {
         self.shape.ray_cast(o - self.offset, rd, tmax)
     }
 
+    /// Whether the collider is terrain (see [`CollisionShape::is_terrain`]).
+    pub fn is_terrain(&self) -> bool {
+        self.shape.is_terrain()
+    }
+
     /// [`CollisionShape::ground_cast`] from sim-frame `o`.
     pub fn ground_cast(&self, o: Vec3, rd: Vec3, tmax: f32) -> crate::RayAnswer {
         self.shape.ground_cast(o - self.offset, rd, tmax)
@@ -187,6 +192,13 @@ thread_local! {
     pub(crate) static REFERENCE_SWEEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Hulls a sphere cast kept to march against. Test-only.
     pub(crate) static SWEPT_HULLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Sweep every sample of a compound once any of them moves further than
+    /// half the craft's thinnest part, as the sweep chose before each sample
+    /// was judged by its own part: the reference it is compared with.
+    /// Test-only.
+    pub(crate) static SWEEP_WHOLE_CRAFT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Samples the compound sweep marched. Test-only.
+    pub(crate) static SWEPT_SAMPLES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Distances the compound rest probe asked for. Test-only.
     pub(crate) static REST_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Run the compound contact pass and rest probe the way they ran before
@@ -570,7 +582,7 @@ pub fn raycast_colliders(
     max_dist: f32,
     mask: u32,
 ) -> Option<RayHit> {
-    cast_colliders(colliders, origin, dir, max_dist, mask, &[], false)
+    cast_colliders(colliders, origin, dir, max_dist, mask, &[], false, &|_| true)
 }
 
 /// [`raycast_colliders`], passing through every collider whose node is in
@@ -584,16 +596,31 @@ pub fn raycast_colliders_excluding(
     mask: u32,
     exclude: &[u32],
 ) -> Option<RayHit> {
-    cast_colliders(colliders, origin, dir, max_dist, mask, exclude, false)
+    cast_colliders(colliders, origin, dir, max_dist, mask, exclude, false, &|_| true)
 }
 
 /// [`raycast_colliders`], asking each collider its
 /// [`ground_cast`](crate::CollisionShape::ground_cast) answer: the ray a
 /// scatter prop is dropped onto the ground with.
 pub fn raycast_ground_colliders(colliders: &[AnchoredCollider], origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
-    cast_colliders(colliders, origin, dir, max_dist, !0, &[], true)
+    cast_colliders(colliders, origin, dir, max_dist, !0, &[], true, &|_| true)
 }
 
+/// [`raycast_ground_colliders`] over only the colliders `keep` accepts: the
+/// rest are passed through as if they were not there. `keep` is asked only
+/// of colliders the ray's path crosses, so a costly answer is paid for a
+/// handful of colliders, not the level.
+pub fn raycast_ground_colliders_where(
+    colliders: &[AnchoredCollider],
+    origin: Vec3,
+    dir: Vec3,
+    max_dist: f32,
+    keep: &dyn Fn(&AnchoredCollider) -> bool,
+) -> Option<RayHit> {
+    cast_colliders(colliders, origin, dir, max_dist, !0, &[], true, keep)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cast_colliders(
     colliders: &[AnchoredCollider],
     origin: Vec3,
@@ -602,6 +629,7 @@ fn cast_colliders(
     mask: u32,
     exclude: &[u32],
     ground: bool,
+    keep: &dyn Fn(&AnchoredCollider) -> bool,
 ) -> Option<RayHit> {
     // A march stops within 0.02 of a surface, so a box grazed by that much
     // must still be marched.
@@ -633,6 +661,9 @@ fn cast_colliders(
             None => Some((0.0, max_dist)),
         };
         let Some((t0, t1)) = span else { continue };
+        if !keep(c) {
+            continue;
+        }
         let answer = if ground { c.ground_cast(origin, rd, max_dist) } else { c.ray_cast(origin, rd, max_dist) };
         match answer {
             crate::RayAnswer::March => {
@@ -1484,6 +1515,18 @@ impl PhysicsWorld {
     /// [`CollisionShape::ground_cast`]).
     pub fn raycast_ground(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
         raycast_ground_colliders(&self.colliders, origin, dir, max_dist)
+    }
+
+    /// [`Self::raycast_ground`] over only the colliders `keep` accepts (see
+    /// [`raycast_ground_colliders_where`]).
+    pub fn raycast_ground_where(
+        &self,
+        origin: Vec3,
+        dir: Vec3,
+        max_dist: f32,
+        keep: &dyn Fn(&AnchoredCollider) -> bool,
+    ) -> Option<RayHit> {
+        raycast_ground_colliders_where(&self.colliders, origin, dir, max_dist, keep)
     }
 
     /// Bring the collider broadphase up to date for queries made between
@@ -2338,8 +2381,16 @@ impl PhysicsWorld {
     /// and sphere-traces along that line against the colliders whose box the
     /// swept samples can reach. A sample already touching something only
     /// counts as hitting when it goes deeper than it started, so a craft
-    /// sliding fast along the ground it rests on is not stopped by it. Only a
-    /// move longer than [`SWEEP_FRACTION`] of the thinnest part is swept.
+    /// sliding fast along the ground it rests on is not stopped by it.
+    ///
+    /// A sample is swept when its move is longer than [`SWEEP_FRACTION`] of
+    /// its own part's thinness ([`ShapeGeom::thinness`]), the most it could end the step inside
+    /// something unswept. Judged by the thinnest part of the whole craft, one
+    /// thin plate (a fender, a chain, an aerial) had every sample of every
+    /// part marched at walking pace, so a craft creeping or rocking on the
+    /// ground paid more for its sweep than for its contacts. A craft fast
+    /// enough to carry every part past half its thickness is swept whole, as
+    /// it always was.
     fn sweep_compound(&self, ci: usize, dt: f32) -> f32 {
         // How far inside the first touch is left: enough for the contact
         // pass to see it.
@@ -2357,18 +2408,25 @@ impl PhysicsWorld {
         let to_end = end_orient * c.orient.inverse();
         // (start, move, radius) per sample.
         let mut samples: Vec<(Vec3, Vec3, f32)> = Vec::new();
-        let mut longest = 0.0f32;
+        #[cfg(test)]
+        let whole = SWEEP_WHOLE_CRAFT.with(|r| r.get()).then(|| SWEEP_FRACTION * c.thinnest());
         for si in 0..c.shapes.len() {
             let (centers, n, radius) = c.shape_samples(si);
+            let far = SWEEP_FRACTION * c.shapes[si].geom.thinness();
+            #[cfg(test)]
+            let far = whole.unwrap_or(far);
             for &p in &centers[..n] {
                 let d = end_pos + to_end * (p - c.pos) - p;
-                longest = longest.max(d.length());
-                samples.push((p, d, radius));
+                if d.length() > far {
+                    samples.push((p, d, radius));
+                }
             }
         }
-        if longest.is_nan() || longest <= SWEEP_FRACTION * c.thinnest() {
+        if samples.is_empty() {
             return 1.0;
         }
+        #[cfg(test)]
+        SWEPT_SAMPLES.with(|n| n.set(n.get() + samples.len() as u64));
         let row = self.matrix[c.layer as usize];
         let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
         let mut reach = 0.0f32;
@@ -2423,10 +2481,14 @@ impl PhysicsWorld {
             }
             // Only the threshold below reads it, and past `r - SKIN + MARGIN`
             // the threshold is `r - SKIN` whatever it is.
-            let s0 = dist(p, past(r - SKIN + MARGIN));
+            let near = past(r - SKIN + MARGIN);
+            let s0 = dist(p, near);
             if !s0.is_finite() {
                 continue;
             }
+            // Under what was asked, it is the distance itself, and the
+            // march's first question, at the same point, has its answer.
+            let mut known = (!reference && s0 < near).then_some(s0);
             let thr = (r - SKIN).min(s0 - MARGIN);
             // March in fractions of the step: each step as long as the
             // distance field allows, with a floor so a sample gliding just
@@ -2438,7 +2500,10 @@ impl PhysicsWorld {
             for _ in 0..40 {
                 // Far enough that the next step reaches `stop` is all this
                 // step needs to know: any distance past it steps to `stop`.
-                let s = dist(p + d * t, past(thr + len * (stop - t).max(0.0)));
+                let s = match known.take() {
+                    Some(s) => s,
+                    None => dist(p + d * t, past(thr + len * (stop - t).max(0.0))),
+                };
                 if s <= thr {
                     hit = Some(t);
                     break;
@@ -5318,6 +5383,28 @@ mod ray_identity_tests {
         assert_eq!(h.eid, Some(42), "the ray hit a node and would not say which");
     }
 
+    /// A ground ray told to pass a collider by goes through it to what is
+    /// below, whether that is answered exactly (a box) or marched (terrain);
+    /// told to keep everything, it stops where the plain ground ray does.
+    #[test]
+    fn a_ground_ray_passes_through_the_colliders_it_is_told_to() {
+        let t = floptle_field::Terrain::flat([24, 12, 24], [0.0, 0.0, 0.0], [12.0, 6.0, 12.0], 0.0, [0.5; 3]);
+        let terrain = tagged(Box::new(crate::ChunkTerrain::new(floptle_field::ChunkField::from_dense(&t.baked, 0.5))), 1);
+        assert!(terrain.is_terrain(), "a terrain field is terrain");
+        let roof = tagged(Box::new(BoxShape::new(Vec3::new(0.0, 3.0, 0.0), Vec3::new(2.0, 0.5, 2.0), Quat::IDENTITY)), 2);
+        assert!(!roof.is_terrain(), "a box is not terrain");
+        let cols = vec![terrain, roof];
+        let (o, d) = (Vec3::new(0.3, 5.0, 0.2), -Vec3::Y);
+        let plain = raycast_ground_colliders(&cols, o, d, 20.0).expect("the ray lands");
+        let all = raycast_ground_colliders_where(&cols, o, d, 20.0, &|_| true).expect("the ray lands");
+        assert_eq!((plain.eid, plain.distance), (all.eid, all.distance), "keeping everything changed the answer");
+        assert_eq!(plain.eid, Some(2), "the roof is the first thing under the ray");
+        let ground = raycast_ground_colliders_where(&cols, o, d, 20.0, &|c| c.is_terrain()).expect("the terrain is below");
+        assert_eq!(ground.eid, Some(1), "the ray stopped at a collider it was told to pass");
+        assert!((ground.distance - 5.0).abs() < 0.1, "landed {} below, not on the ground 5 below", ground.distance);
+        assert!(raycast_ground_colliders_where(&cols, o, d, 20.0, &|_| false).is_none(), "passing everything still hit");
+    }
+
     /// An anonymous collider — a test fixture, anything registered without a
     /// node — answers `None` rather than an entity index that means nothing.
     #[test]
@@ -6863,6 +6950,172 @@ mod narrowed_sweep_tests {
         let (ignored, kept) = sweep_all(&hulls, &[7], false);
         assert_eq!(kept, 0, "an ignored craft still had {kept} parts marched");
         assert!(ignored.iter().all(Option::is_none), "a cast that ignores the craft hit something");
+    }
+}
+
+#[cfg(test)]
+mod part_sweep_tests {
+    //! A compound's sweep marches the samples of the parts that move far
+    //! enough to need it, each judged by its own thickness: a slow craft
+    //! with one thin part pays for that part, and a fast one is swept whole
+    //! and stops where it always did.
+    use super::*;
+    use crate::compound::{Compound, CompoundShape, ShapeGeom};
+    use crate::gravity::GravityField;
+    use crate::shapes::BoxShape;
+    use floptle_core::math::Quat;
+
+    /// A thick hull with a thin plate and a ball on it: 9 + 9 + 1 samples.
+    fn craft(at: Vec3, vel: Vec3) -> Compound {
+        let part = |geom, offset, id| CompoundShape { geom, offset, rot: Quat::IDENTITY, mass: 10.0, id };
+        let mut c = Compound::new(
+            at,
+            Quat::from_rotation_z(0.3),
+            vec![
+                part(ShapeGeom::Box { half: Vec3::new(0.5, 0.25, 1.0) }, Vec3::ZERO, 1),
+                part(ShapeGeom::Box { half: Vec3::new(0.5, 0.01, 0.5) }, Vec3::new(0.0, 0.4, 0.0), 2),
+                part(ShapeGeom::Sphere { radius: 0.3 }, Vec3::new(0.0, -0.3, 0.8), 3),
+            ],
+        );
+        c.vel = vel;
+        c
+    }
+
+    /// A floor 30 cm thick, its top at `y = 0`, and nothing under it.
+    fn world() -> PhysicsWorld {
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(BoxShape::new(Vec3::new(0.0, -0.15, 0.0), Vec3::new(30.0, 0.15, 30.0), Quat::IDENTITY)));
+        w
+    }
+
+    type Pose = ([u32; 3], [u32; 4], [u32; 3]);
+
+    /// Dropped at 80 m/s, 67 cm a step, onto a floor 30 cm thick, tumbling:
+    /// each step's pose, how many samples its sweep marched, and the lowest
+    /// its centre came.
+    fn fall(whole: bool) -> (Vec<Pose>, Vec<u64>, f32) {
+        SWEEP_WHOLE_CRAFT.with(|r| r.set(whole));
+        let mut w = world();
+        let mut c = craft(Vec3::new(0.0, 12.0, 0.0), Vec3::new(3.0, -80.0, 0.0));
+        c.ang_vel = Vec3::new(1.0, 0.0, 2.0);
+        let ci = w.add_compound(c);
+        let (mut poses, mut swept) = (Vec::new(), Vec::new());
+        let mut lowest = f32::INFINITY;
+        for _ in 0..120 {
+            SWEPT_SAMPLES.with(|n| n.set(0));
+            w.step(1.0 / 120.0);
+            swept.push(SWEPT_SAMPLES.with(|n| n.get()));
+            let c = &w.compounds[ci];
+            lowest = lowest.min(c.pos.y);
+            poses.push((c.pos.to_array().map(f32::to_bits), c.orient.to_array().map(f32::to_bits), c.vel.to_array().map(f32::to_bits)));
+        }
+        SWEEP_WHOLE_CRAFT.with(|r| r.set(false));
+        (poses, swept, lowest)
+    }
+
+    /// **A fast craft does not pass through a thin floor, and is swept
+    /// exactly as it was when the whole craft was judged by its thinnest
+    /// part.** While every part moves further than half its own thickness
+    /// every sample is marched, and every step lands on the same bits: the
+    /// fall, the hit and the first of the bounce.
+    #[test]
+    fn a_fast_craft_stops_at_a_thin_floor_as_it_always_did() {
+        let (reference, _, _) = fall(true);
+        let (now, swept, lowest) = fall(false);
+        assert!(lowest > 0.0, "the craft went through the floor: its centre reached y = {lowest}");
+        // The steps it is fast for: until one marches fewer than all 19.
+        let fast = swept.iter().position(|&n| n != 19).unwrap_or(swept.len());
+        let hit = now.iter().position(|p| f32::from_bits(p.2[1]) > -40.0).expect("it never hit the floor");
+        assert!(fast > hit, "the craft was only swept whole for {fast} steps and hit at step {hit}: the fixture proves nothing");
+        let first = reference[..fast].iter().zip(&now[..fast]).position(|(a, b)| a != b);
+        assert_eq!(first, None, "a fast craft's steps differ from the whole-craft sweep's from step {first:?} (hit at {hit})");
+    }
+
+    /// **A slow craft sweeps only the parts thin enough to need it.** Sliding
+    /// at 1.5 m/s, 12 mm a step: further than half the plate's 10 mm, far
+    /// short of half the hull's 25 cm or the ball's 30. The plate's nine
+    /// samples are marched and the other ten are not; judged by the thinnest
+    /// part of the craft, all nineteen were, every step.
+    #[test]
+    fn a_slow_craft_sweeps_only_its_thin_parts() {
+        let run = |whole: bool| {
+            SWEEP_WHOLE_CRAFT.with(|r| r.set(whole));
+            let mut w = world();
+            let mut c = craft(Vec3::new(0.0, 3.0, 0.0), Vec3::ZERO);
+            c.use_gravity = false;
+            let ci = w.add_compound(c);
+            SWEPT_SAMPLES.with(|n| n.set(0));
+            let steps = 60;
+            for _ in 0..steps {
+                w.compounds[ci].vel = Vec3::new(1.5, 0.0, 0.0);
+                w.compounds[ci].ang_vel = Vec3::ZERO;
+                w.step(1.0 / 120.0);
+            }
+            SWEEP_WHOLE_CRAFT.with(|r| r.set(false));
+            SWEPT_SAMPLES.with(|n| n.get()) / steps
+        };
+        assert_eq!(run(true), 19, "judged by its thinnest part the whole craft is swept: the fixture proves nothing");
+        assert_eq!(run(false), 9, "a slow craft marched more than its thin plate's samples");
+    }
+
+    /// **A sample that starts touching marches from the distance it started
+    /// at, and stops where it did when it asked again.** A box resting on the
+    /// floor is thrown at a kerb 3 cm thick and too low for anything but its
+    /// bottom corners to meet, half a centimetre ahead of them: their first
+    /// question, how near the floor is, is also the march's first, and a
+    /// march that took a longer first stride on a wrong answer steps clean
+    /// over the kerb. Every step lands on the
+    /// bits the march lands on with every distance asked afresh and in full.
+    #[test]
+    fn a_touching_sample_marches_from_the_distance_it_started_at() {
+        let run = |reference: bool| {
+            REFERENCE_CONTACT.with(|r| r.set(reference));
+            let mut w = world();
+            w.add_collider(Box::new(BoxShape::new(Vec3::new(0.52, 0.0, 0.0), Vec3::new(0.015, 0.1, 5.0), Quat::IDENTITY)));
+            let part = CompoundShape { geom: ShapeGeom::Box { half: Vec3::new(0.5, 0.25, 0.5) }, offset: Vec3::ZERO, rot: Quat::IDENTITY, mass: 10.0, id: 1 };
+            let mut c = Compound::new(Vec3::new(0.0, 0.25, 0.0), Quat::IDENTITY, vec![part]);
+            c.vel = Vec3::new(30.0, 0.0, 0.0);
+            let ci = w.add_compound(c);
+            let mut poses: Vec<Pose> = Vec::new();
+            for _ in 0..30 {
+                w.step(1.0 / 120.0);
+                let c = &w.compounds[ci];
+                poses.push((c.pos.to_array().map(f32::to_bits), c.orient.to_array().map(f32::to_bits), c.vel.to_array().map(f32::to_bits)));
+            }
+            REFERENCE_CONTACT.with(|r| r.set(false));
+            let first_x = f32::from_bits(poses[0].0[0]);
+            (poses, first_x)
+        };
+        let (reference, ref_x) = run(true);
+        let (now, _) = run(false);
+        assert!(ref_x < 0.1, "the first step carried the box to x = {ref_x}, past the kerb: the fixture proves nothing");
+        let first = reference.iter().zip(&now).position(|(a, b)| a != b);
+        assert_eq!(first, None, "the march differs from the one that asks every distance afresh, from step {first:?}");
+    }
+
+    /// A craft with no part moving half its own thickness is not swept at
+    /// all, and one whose thin plate alone is swept still stops on the floor
+    /// it falls to rather than in it.
+    #[test]
+    fn a_thin_plate_falling_slowly_is_still_caught() {
+        let mut w = world();
+        let ci = w.add_compound(craft(Vec3::new(0.0, 1.2, 0.0), Vec3::ZERO));
+        SWEPT_SAMPLES.with(|n| n.set(0));
+        w.step(1.0 / 120.0);
+        assert_eq!(SWEPT_SAMPLES.with(|n| n.get()), 0, "a craft barely moving was swept");
+        let mut lowest = f32::INFINITY;
+        for _ in 0..240 {
+            w.step(1.0 / 120.0);
+            let c = &w.compounds[ci];
+            for si in 0..c.shapes.len() {
+                let (pts, n, r) = c.shape_samples(si);
+                for p in &pts[..n] {
+                    lowest = lowest.min(p.y - r);
+                }
+            }
+        }
+        assert!(SWEPT_SAMPLES.with(|n| n.get()) > 0, "falling at a few m/s, the plate was never swept");
+        assert!(lowest > -0.05, "a sample ended {lowest} m under the floor's top");
     }
 }
 

@@ -1821,7 +1821,7 @@ scatter = {}
 ---per instance and never while chunks build — placement has to stay a pure
 ---function of the seed, or walking away and back would regrow a different
 ---world. Density 0 generates no instance at all.
----@param opts { tint?: number[], emissive?: number[], emissiveStrength?: number, bend?: number, asset?: string, lod?: { asset: string, distance: number }[], seed?: number, center?: Vec3, radius?: number, halfX?: number, halfZ?: number, perChunk?: number, chunk?: number, align?: string, scaleMin?: number, scaleMax?: number, range?: number, fade?: number, density?: fun(x: number, y: number, z: number): number | number[], densityRows?: number }
+---@param opts { tint?: number[], emissive?: number[], emissiveStrength?: number, bend?: number, asset?: string, lod?: { asset: string, distance: number }[], seed?: number, center?: Vec3, radius?: number, halfX?: number, halfZ?: number, perChunk?: number, chunk?: number, align?: string, scaleMin?: number, scaleMax?: number, range?: number, fade?: number, density?: fun(x: number, y: number, z: number): number | number[], densityRows?: number, settleOn?: string }
 ---@return integer
 function scatter.create(opts) end
 ---Instances within `radius` of a point, nearest first. What a harvest verb aims
@@ -1861,6 +1861,14 @@ function scatter.remove(id, instanceId) end
 ---@param instanceId? integer
 ---@return integer restored
 function scatter.restore(id, instanceId) end
+---Drop instances onto the ground again where they stand, keeping their ids:
+---one by id, or every one within `radius` of `point`. For ground that changed
+---under them (a crate carried off), without remove and restore.
+---@param id integer
+---@param instanceOrPoint number|Vec3
+---@param radius? number
+---@return boolean queued
+function scatter.resettle(id, instanceOrPoint, radius) end
 ---The instance ids this source has lost. Save THIS (a handful of numbers), not
 ---every prop you ever saw.
 ---@param id integer
@@ -1969,13 +1977,23 @@ function water.flowAt(x, y, z) end
 ---and `holdEdges` make it a river; with `center` instead of `origin` it lies on
 ---a round world, each point's up its own radial, `level` a radius or `false`
 ---to start dry, ground read from the terrain's field, `size` metres across,
----stored in tiles only where water is). It floats things, slows
+---stored in tiles only where water is), or a river (`shape = \"ribbon\"`:
+---`points`, a list of `{ pos, halfWidth, depth, current }` down the channel on
+---the water's surface; between them the centreline is a smooth curve and the
+---height, width, depth and current are eased from one point's to the next;
+---`halfWidth`, `depth` and a number `current` on the volume are what a point
+---that gives none takes; `current` runs along the channel, m/s; `bed = \"u\"`,
+---the default, shallows to the banks and `\"flat\"` does not;
+---`curve = \"straight\"` joins the points with straight lines; it lies flat
+---in its parent's frame, or round its parent when that is a celestial body,
+---and `flat = true` or `false` says which). It floats things, slows
 ---them and carries them on its `current`, and
 ---`water.at` answers for it. `depth` is how far below the surface its bed lies,
 ---so a cave under a lake is dry. From inside it looks like a Water Volume node
 ---(`tint`, `visibility` to change that, `underwater = false` for none). Returns
----an id. `waves` gives it a swell, as `water.setSwell` does.
----@param opts { waves?: { amplitude?: number, wavelength?: number, direction?: number[]|Vec3, steepness?: number, speed?: number, phase?: number }[], shape?: \"lake\"|\"heightfield\"|\"sim\", level?: number|false, size?: number, depths?: number[], held?: { pos?: Vec3, cell?: integer[], level?: number, group?: integer }[], solver?: \"swe\"|\"pipes\", budget?: number, flat?: boolean, state?: { columns: integer, rows: integer, cells: number[] }, minDepth?: number, soak?: number, soakBelow?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
+---an id. `waves` gives it a swell, as `water.setSwell` does (a ribbon carries
+---none).
+---@param opts { waves?: { amplitude?: number, wavelength?: number, direction?: number[]|Vec3, steepness?: number, speed?: number, phase?: number }[], shape?: \"lake\"|\"heightfield\"|\"sim\"|\"ribbon\", points?: { pos: Vec3, halfWidth?: number, depth?: number, current?: number }[], halfWidth?: number, bed?: \"u\"|\"flat\", curve?: \"smooth\"|\"straight\", level?: number|false, size?: number, depths?: number[], held?: { pos?: Vec3, cell?: integer[], level?: number, group?: integer }[], solver?: \"swe\"|\"pipes\", budget?: number, flat?: boolean, state?: { columns: integer, rows: integer, cells: number[] }, minDepth?: number, soak?: number, soakBelow?: number, stillDepth?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3|number, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
 ---@return integer
 function water.addVolume(opts) end
 ---Every place simulated water pours off a drop of more than 1.5 m, in the
@@ -1994,6 +2012,9 @@ function water.falls(id) end
 ---about 0.5), a = foam. `fixed = true` keeps every grid point as a vertex and
 ---marks the answer `dynamic`, so it goes to `mesh.build` once and then to
 ---`mesh.update`. `buffers = true` returns buffers instead of lists.
+---A ribbon is a strip down its channel, `cells` (4) columns from bank to
+---bank, always the same vertices; its `uvs` are metres down the channel (u)
+---and across it from the middle (v).
 ---@param id integer
 ---A sim laid with a `center` is its wet points only; `tile` (a key from
 ---`water.tiles`) is one tile of it.
@@ -2022,12 +2043,19 @@ function water.hold(id, cells, level, group) end
 ---@return boolean
 function water.release(id, cells) end
 ---What each group of held points gave the water since the last ask, m³
----(negative: what it took).
+---(negative: what it took), apart from what `water.filled` counts.
 ---@param id integer
 ---@return table<integer, number>
 function water.exchanged(id) end
+---What each group of held points gave to fill the ground under newly held
+---points since the last ask, m³: counted from when a free point is first held
+---until its group comes to rest, and kept out of `water.exchanged`.
+---@param id integer
+---@return table<integer, number>
+function water.filled(id) end
 ---The tiles of a sim laid with a `center` that hold water, 32 × 32 points
----each; a tile's `serial` changes only when its water does.
+---each; a tile's `serial` moves only when its surface has moved by more than
+---`stillDepth`.
 ---@param id integer
 ---@return { key: integer, serial: integer, i: integer, j: integer }[]|nil
 function water.tiles(id) end
@@ -2101,7 +2129,8 @@ function water.bindSwell(node, water) end
 ---look, density, drag, current and depth stay, and the physics floats things on
 ---the new level from the next tick. A lake's `level` is its surface's radius
 ---from its parent's centre; a heightfield's wet points all go to `level`; a
----sim's held points go to `level`. Cheap enough to call every frame. true if
+---sim's held points go to `level`; a ribbon's every point rises or falls by
+---what brings its first point's height to `level`. Cheap enough to call every frame. true if
 ---there was such water.
 ---@param id integer
 ---@param level number
@@ -2114,7 +2143,8 @@ function water.setLevel(id, level) end
 ---@return boolean
 function water.setLevels(id, levels) end
 ---The level of water `water.addVolume` declared: a lake's radius, the mean of
----a heightfield's wet points, a sim's mean surface where it is wet. nil when
+---a heightfield's wet points, a sim's mean surface where it is wet, a
+---ribbon's first point's height. nil when
 ---there is none, or none of it is wet.
 ---@param id integer
 ---@return number|nil

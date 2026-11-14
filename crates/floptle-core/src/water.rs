@@ -29,6 +29,10 @@ pub enum Surface {
     /// on a patch of a round world or of a plane, each tile's levels shared
     /// until it changes. What a `sim` declared with `center` reads from.
     Tiles(Arc<TiledSurface>),
+    /// A river: a line of points down its channel, each with a width, a
+    /// depth and a current, and `lift` metres its whole surface has been
+    /// raised since it was declared (`water.setLevel`).
+    Ribbon { course: Arc<crate::water_ribbon::Ribbon>, lift: f64 },
 }
 
 /// Surface heights on a regular grid, and optionally the water's velocity at
@@ -403,6 +407,9 @@ pub struct TiledSpec {
     /// Films thinner than `soak_below` soak away at `soak` metres a second.
     pub soak: f32,
     pub soak_below: f32,
+    /// The surface change that counts, metres: water within it sleeps, and
+    /// a tile's serial moves only for more.
+    pub still_depth: f32,
 }
 
 /// A cell held at a level, and the group what it gives is counted in.
@@ -489,9 +496,9 @@ pub struct WaterAt {
 impl DeclaredWater {
     /// The still surface under local point `local`: how far the point is
     /// above it, the up there, the water's own flow, and what a swell is
-    /// laid on. `Err` carries the up where this water has no surface over
+    /// laid on (`None` for a ribbon, which carries none). `Err` carries the up where this water has no surface over
     /// the point.
-    fn still(&self, local: DVec3) -> Result<(f64, DVec3, DVec3, Lay), DVec3> {
+    fn still(&self, local: DVec3) -> Result<(f64, DVec3, DVec3, Option<Lay>), DVec3> {
         let current = self.current.as_dvec3();
         match &self.surface {
             Surface::Lake { radius, axis, reach } => {
@@ -502,10 +509,10 @@ impl DeclaredWater {
                 if angle * radius > *reach {
                     return Err(up);
                 }
-                Ok((r - radius, up, current, Lay::Round { radius: *radius }))
+                Ok((r - radius, up, current, Some(Lay::Round { radius: *radius })))
             }
             Surface::Grid(g) => match g.sample(local.x, local.z) {
-                Some((level, f)) => Ok((local.y - level, DVec3::Y, current + DVec3::new(f[0], 0.0, f[1]), Lay::Flat { level })),
+                Some((level, f)) => Ok((local.y - level, DVec3::Y, current + DVec3::new(f[0], 0.0, f[1]), Some(Lay::Flat { level }))),
                 None => Err(DVec3::Y),
             },
             Surface::Tiles(t) => {
@@ -519,10 +526,22 @@ impl DeclaredWater {
                             Some(r) => Lay::Round { radius: r + level },
                             None => Lay::Flat { level: t.patch.centre.dot(t.patch.up) + level },
                         };
-                        Ok((height - level, up, current + a * f[0] + b * f[1], lay))
+                        Ok((height - level, up, current + a * f[0] + b * f[1], Some(lay)))
                     }
                     None => Err(up),
                 }
+            }
+            // A river's surface slopes and turns with its course: there is
+            // no one plane or sphere to lay waves on, so a ribbon carries no
+            // swell.
+            Surface::Ribbon { course, lift } => {
+                let Some(hit) = course.locate(local) else { return Err(course.up_at(local)) };
+                let above = hit.height - (hit.level + lift);
+                // Under the channel's bed is the ground, or a cave in it.
+                if -above > hit.bed + crate::water_ribbon::BED_SLACK {
+                    return Err(hit.up);
+                }
+                Ok((above, hit.up, current + hit.flow, None))
             }
         }
     }
@@ -539,12 +558,12 @@ impl DeclaredWater {
             Err(up) => return dry(up),
         };
         // The waves on it move the surface, lean it and stir the water.
-        let (above, normal_local, flow_local, wave) = match &self.swell {
-            Some(swell) => {
+        let (above, normal_local, flow_local, wave) = match (&self.swell, lay) {
+            (Some(swell), Some(lay)) => {
                 let o = swell.over(local, lay, self.time);
                 (o.above, o.normal, flow_local + o.flow, o.height)
             }
-            None => (above, up_local, flow_local, 0.0),
+            _ => (above, up_local, flow_local, 0.0),
         };
         // Below the bed is rock, or a cave in it: not this water.
         if -above > self.floor {
@@ -583,12 +602,14 @@ impl DeclaredWater {
     }
 
     /// The waves `waves` make on this water's surface: laid about a lake's
-    /// own middle, a round patch's, or +Y on a flat one.
+    /// own middle, a round patch's, or +Y on a flat one. `None` for a
+    /// ribbon, whose surface is no plane or sphere to lay them on.
     pub fn swell_of(&self, waves: &[Wave]) -> Option<Arc<Swell>> {
         let axis = match &self.surface {
             Surface::Lake { axis, .. } => *axis,
             Surface::Grid(_) => DVec3::Y,
             Surface::Tiles(t) => t.patch.up,
+            Surface::Ribbon { .. } => return None,
         };
         Swell::new(waves, axis).map(Arc::new)
     }
@@ -608,6 +629,7 @@ impl DeclaredWater {
                     None => Lay::Flat { level: t.patch.centre.dot(t.patch.up) + level },
                 })
             }
+            Surface::Ribbon { .. } => None,
         }
     }
 }

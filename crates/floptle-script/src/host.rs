@@ -3009,6 +3009,7 @@ impl ScriptHost {
         let water_changed: Rc<RefCell<Vec<u32>>> = Rc::default();
         let water_sim_cmds: Rc<RefCell<Vec<floptle_core::water::SimCmd>>> = Rc::default();
         let water_exchanged: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>> = Rc::default();
+        let water_filled: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>> = Rc::default();
         let water_splashes: Rc<RefCell<std::collections::VecDeque<floptle_physics::splash::Splash>>> = Rc::default();
         let water_wet: Rc<RefCell<(f64, HashMap<u32, f64>)>> = Rc::default();
         let water_slam: Rc<RefCell<HashMap<u32, f32>>> = Rc::default();
@@ -3016,6 +3017,7 @@ impl ScriptHost {
         let water_clock: Rc<std::cell::Cell<f64>> = Rc::default();
         let water_swell_writes: Rc<RefCell<crate::water_api::SwellWrites>> = Rc::default();
         let water_swell_binds: Rc<RefCell<HashMap<u32, crate::water_api::SwellSource>>> = Rc::default();
+        let water_worlds: Rc<RefCell<std::collections::HashSet<String>>> = Rc::default();
         crate::water_api::install_water_api(
             &lua,
             crate::water_api::WaterShared {
@@ -3025,9 +3027,11 @@ impl ScriptHost {
                 changed: water_changed.clone(),
                 sim_cmds: water_sim_cmds.clone(),
                 exchanged: water_exchanged.clone(),
+                filled: water_filled.clone(),
                 splashes: water_splashes.clone(),
                 wet: water_wet.clone(),
                 slam: water_slam.clone(),
+                worlds: water_worlds.clone(),
                 next_id: Rc::default(),
                 colliders: colliders.clone(),
                 sim_origin: sim_origin.clone(),
@@ -3046,6 +3050,7 @@ impl ScriptHost {
         let scatter_owners = crate::scatter_api::Owners::default();
         let scatter_settled = crate::scatter_api::Settled::default();
         let scatter_interactors = crate::scatter_api::Interactors::default();
+        let scatter_resettles = crate::scatter_api::Resettles::default();
         // The scripts' copy of the scene, made here rather than with the rest
         // of the handle layer below: a source that rides a node reads where
         // that node stands the moment it is created.
@@ -3059,6 +3064,7 @@ impl ScriptHost {
             scene_mirror.clone(),
             scatter_settled.clone(),
             scatter_interactors.clone(),
+            scatter_resettles.clone(),
         );
 
         // `weather.*` — the wind every system is moved by.
@@ -3651,6 +3657,7 @@ impl ScriptHost {
             water_changed,
             water_sim_cmds,
             water_exchanged,
+            water_filled,
             water_splashes,
             water_wet,
             water_slam,
@@ -3658,10 +3665,12 @@ impl ScriptHost {
             water_clock,
             water_swell_writes,
             water_swell_binds,
+            water_worlds,
             scatter_sources,
             scatter_owners,
             scatter_settled,
             scatter_interactors,
+            scatter_resettles,
             scatter_next_id,
             weather,
             scene_name,
@@ -4185,6 +4194,12 @@ impl ScriptHost {
         self.scatter_interactors.borrow().values().flatten().copied().collect()
     }
 
+    /// The props scripts asked to be dropped onto the ground again since the
+    /// last call (`scatter.resettle`), by source id.
+    pub fn take_scatter_resettles(&self) -> Vec<(u32, floptle_core::scatter::Resettle)> {
+        std::mem::take(&mut *self.scatter_resettles.borrow_mut())
+    }
+
     /// Every source that rides a node, as `(id, node name)`.
     pub fn anchored_scatter(&self) -> Vec<(u32, String)> {
         self.scatter_sources
@@ -4201,6 +4216,7 @@ impl ScriptHost {
         self.scatter_owners.borrow_mut().clear();
         self.scatter_settled.borrow_mut().clear();
         self.scatter_interactors.borrow_mut().clear();
+        self.scatter_resettles.borrow_mut().clear();
     }
 
     /// Every wind scripts have declared — what particles and props read.
@@ -4378,6 +4394,16 @@ impl ScriptHost {
         }
     }
 
+    /// Add what a tiled sim's held groups gave to fill the ground under
+    /// newly held points to what `water.filled` hands back, m³ by group.
+    pub fn add_water_filled(&self, id: u32, groups: &[(u16, f64)]) {
+        let mut all = self.water_filled.borrow_mut();
+        let e = all.entry(id).or_default();
+        for &(g, v) in groups {
+            *e.entry(g).or_insert(0.0) += v;
+        }
+    }
+
     /// Water entries and exits from a tick, for `water.splashes`: the last
     /// 64 are kept.
     pub fn push_water_splashes(&self, events: Vec<floptle_physics::splash::Splash>) {
@@ -4397,6 +4423,18 @@ impl ScriptHost {
         for &n in wet {
             w.1.insert(n, clock);
         }
+    }
+
+    /// Tell `water.addVolume` which nodes are round worlds (the scene's
+    /// celestial bodies), by name, before scripts run: a river declared on
+    /// one lies round it, and one declared anywhere else lies flat. Costs
+    /// nothing while the set has not changed.
+    pub fn set_water_worlds<'a>(&self, names: impl Iterator<Item = &'a str> + Clone) {
+        let mut worlds = self.water_worlds.borrow_mut();
+        if names.clone().count() == worlds.len() && names.clone().all(|n| worlds.contains(n)) {
+            return;
+        }
+        *worlds = names.map(str::to_string).collect();
     }
 
     /// `water.setSlam`'s values, by the water's entity.
