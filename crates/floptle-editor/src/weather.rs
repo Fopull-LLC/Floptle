@@ -7,7 +7,13 @@ impl crate::Editor {
     pub(crate) fn refresh_wind_frames(&mut self) {
         self.refresh_undrawn_colliders();
         self.refresh_water_frames();
-        self.step_water_sims();
+        // The engine's simulated water, named as its own part of the frame
+        // (`waterSim`) so a game can budget it apart from its scripts.
+        if self.script_host.declared_water().iter().any(|w| w.simulated.is_some()) {
+            self.timed_wait("waterSim", |ed| ed.step_water_sims());
+        } else {
+            self.step_water_sims();
+        }
         self.refresh_winds();
         // The wind particles are carried by: last frame's declarations at this
         // frame's clock, refreshed below once the anchors have moved.
@@ -196,6 +202,7 @@ impl crate::Editor {
                 }
             }
             // Substeps no longer than the grid can take stably.
+            let began = floptle_core::time::Instant::now();
             if s.water.awake_count() > 0 && dt > 0.0 {
                 let step = s.water.stable_dt(&s.grid).max(1e-3);
                 let n = ((dt / step).ceil() as usize).clamp(1, SIM_SUBSTEPS);
@@ -260,11 +267,24 @@ impl crate::Editor {
                 w.id,
                 Surface::Grid(std::sync::Arc::new(HeightGrid { levels, flow, ..(**g).clone() })),
             );
+            self.script_host.set_water_stats(
+                w.id,
+                floptle_core::water::SimStats {
+                    ms: began.elapsed().as_secs_f32() * 1000.0,
+                    awake_points: s.water.awake_count(),
+                    solved: s.water.solved_count(),
+                    wet_points: s.water.depth.iter().filter(|d| **d > SIM_DRY).count(),
+                    volume: s.water.volume(&s.grid),
+                    ..Default::default()
+                },
+            );
         }
         drop(lent);
-        let (awake, solved, tiles) = self.step_tiled_sims(dt);
+        let tiled = self.step_tiled_sims(dt);
         let simple: (usize, usize) = self.water_sims.sims.values().fold((0, 0), |(a, s), w| (a + w.water.awake_count(), s + w.water.solved_count()));
-        self.script_host.profile().borrow_mut().set_water_counts(awake * floptle_core::water::TILE * floptle_core::water::TILE + simple.0, solved + simple.1, tiles);
+        let mut profile = self.script_host.profile().borrow_mut();
+        profile.set_water_counts(tiled.awake * floptle_core::water::TILE * floptle_core::water::TILE + simple.0, tiled.solved + simple.1, tiled.tiles);
+        profile.set_water_awake_by(tiled.awake_by);
     }
 }
 
@@ -607,6 +627,50 @@ mod tests {
         assert!(pit > pool + 1.0, "the pit holds {pit} m of water against the pool's {pool}");
         let lost = (volume(&ed) - before).abs() / before;
         assert!(lost < 0.01, "{:.2}% of the water was made or lost", lost * 100.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The engine's simulated water is a part of the frame of its own.**
+    /// With a sim declared, `perf.parts()` names `waterSim` beside the
+    /// frame's phases, so a game can budget the water apart from its
+    /// scripts.
+    #[test]
+    fn simulated_water_is_named_in_perf_parts() {
+        let dir = std::env::temp_dir().join(format!("floptle-water-part-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/pond.lua"),
+            "water.addVolume{ shape = \"sim\", center = vec3(0, 0, 0), flat = true, cell = 1, size = 40, level = 0.5 }\n",
+        )
+        .unwrap();
+        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        let host = ed.world.spawn();
+        ed.world.insert(host, Transform::IDENTITY);
+        ed.world.insert(
+            host,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                kind: "pond".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+                pinned_bools: None,
+            }]),
+        );
+        ed.toggle_play();
+        ed.script_host.profile().borrow_mut().enable(true);
+        ed.end_profile_frame();
+        for _ in 0..3 {
+            ed.script_host.profile().borrow_mut().begin_frame();
+            let _ = ed.player_frame(false);
+            ed.end_profile_frame();
+        }
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        assert_eq!(ed.water_sims.tiled.len(), 1, "the pond is not simulated");
+        let p = ed.script_host.profile().borrow();
+        let r = p.recent_frames(1).next().expect("a frame");
+        assert!(r.parts.iter().any(|(n, _)| *n == "waterSim"), "waterSim is not named: {:?}", r.parts);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

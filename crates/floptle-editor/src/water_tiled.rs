@@ -27,6 +27,17 @@ pub(crate) struct TiledSim {
     level: f32,
 }
 
+/// Every tiled sim's work last frame, summed.
+#[derive(Default)]
+pub(crate) struct TiledCounts {
+    /// Tiles awake, points solved, tiles held.
+    pub awake: usize,
+    pub solved: usize,
+    pub tiles: usize,
+    /// Tiles awake by why, in `water::AWAKE_REASONS`' order.
+    pub awake_by: [usize; 6],
+}
+
 /// The longest a frame spends reading ground for new tiles, ms.
 const GROUND_MS: f32 = 2.0;
 /// The most steps a frame takes for one sim.
@@ -49,7 +60,7 @@ impl Ground<'_> {
         match self {
             Ground::Field(field, scale) => {
                 let mut out = [0.0];
-                self.field_batch(field, *scale, p, &[(i, j)], guess, &mut out);
+                self.field_batch(field, *scale, p, &[(i, j)], &[guess], &mut out);
                 out[0]
             }
             Ground::Colliders(cols, frame, origin) => {
@@ -64,11 +75,12 @@ impl Ground<'_> {
 
     /// The ground at `cells` from the terrain's field, in one batch
     /// ([`floptle_field::ChunkField::surface_below`]), each searched for down
-    /// its own up from just above `guess`.
-    fn field_batch(&self, field: &floptle_field::ChunkField, scale: f32, p: &Patch, cells: &[(usize, usize)], guess: f32, out: &mut [f32]) {
+    /// its own up from just above its own height in `starts`. A start inside
+    /// the ground finds the surface above it.
+    fn field_batch(&self, field: &floptle_field::ChunkField, scale: f32, p: &Patch, cells: &[(usize, usize)], starts: &[f32], out: &mut [f32]) {
         let s = scale.max(1e-6) as f64;
         let lift = 2.0 * field.voxel() as f64 * s;
-        let from: Vec<DVec3> = cells.iter().map(|&(i, j)| p.point(i as f64, j as f64, guess as f64 + lift) / s).collect();
+        let from: Vec<DVec3> = cells.iter().zip(starts).map(|(&(i, j), h)| p.point(i as f64, j as f64, *h as f64 + lift) / s).collect();
         let down: Vec<DVec3> = cells.iter().map(|&(i, j)| -p.up_at(i as f64, j as f64)).collect();
         let mut t = vec![0.0; cells.len()];
         let mut flags = vec![0u8; cells.len()];
@@ -76,27 +88,89 @@ impl Ground<'_> {
         for k in 0..cells.len() {
             // Ground not generated yet is a stand-in: no ground to stand
             // water on until it is.
-            out[k] = if t[k].is_finite() && flags[k] == 0 { (guess as f64 + lift - t[k] * s) as f32 } else { f32::INFINITY };
+            out[k] = if t[k].is_finite() && flags[k] == 0 { (starts[k] as f64 + lift - t[k] * s) as f32 } else { f32::INFINITY };
         }
     }
 
     /// Tile `(ti, tj)`'s ground, a row at a time; `guess` the height to
-    /// search from.
-    fn tile(&self, p: &Patch, ti: usize, tj: usize, guess: f32) -> Vec<f32> {
+    /// search from, and `known` the ground under water already on the patch
+    /// at a cell (`None` where there is none).
+    ///
+    /// Ground under a roof (a tunnel through a hill, a cave, an overhang)
+    /// is found from the side the water comes from: where the cells beside
+    /// the tile hold water, each point is searched for from the ground of
+    /// the point before it, a ring at a time inwards from that side, as
+    /// water running in from there would meet it. Searched from above, a
+    /// roof would read as the ground, and the water could not go under it.
+    fn tile(&self, p: &Patch, ti: usize, tj: usize, guess: f32, known: &dyn Fn(i64, i64) -> Option<f32>) -> Vec<f32> {
         if let Ground::Field(field, scale) = self {
             // The tile's middle first, then every point from there: the
-            // ground across a tile is nearly always within a few voxels of it.
+            // ground across a tile is nearly always within a few voxels of
+            // it. Never from above the level, which would be from above a
+            // hill whose tunnel holds the water.
             let mid = ((ti * TILE + TILE / 2).min(p.columns - 1), (tj * TILE + TILE / 2).min(p.rows - 1));
             let mut m = [0.0];
-            self.field_batch(field, *scale, p, &[mid], guess, &mut m);
-            let near = if m[0].is_finite() { m[0] } else { guess };
-            let cells: Vec<(usize, usize)> = (0..TILE * TILE).map(|c| (ti * TILE + c % TILE, tj * TILE + c / TILE)).collect();
-            let inside: Vec<(usize, usize)> = cells.iter().copied().filter(|&(i, j)| i < p.columns && j < p.rows).collect();
-            let mut got = vec![f32::INFINITY; inside.len()];
-            self.field_batch(field, *scale, p, &inside, near, &mut got);
+            self.field_batch(field, *scale, p, &[mid], &[guess], &mut m);
+            let near = if m[0].is_finite() { m[0].min(guess) } else { guess };
+            let (x0, y0) = ((ti * TILE) as i64, (tj * TILE) as i64);
+            // Which side the water comes from: the one with the most wet
+            // points beside the tile. A point `a` rings in from it and `b`
+            // along it is at `at(side, a, b)`, `a = -1` the point beside.
+            let at = |side: usize, a: i64, b: i64| -> (i64, i64) {
+                let t = TILE as i64;
+                match side {
+                    0 => (x0 + a, y0 + b),
+                    1 => (x0 + t - 1 - a, y0 + b),
+                    2 => (x0 + b, y0 + a),
+                    _ => (x0 + b, y0 + t - 1 - a),
+                }
+            };
+            let wet = |side: usize| (0..TILE as i64).filter(|&b| { let (i, j) = at(side, -1, b); known(i, j).is_some() }).count();
+            let from = (0..4).max_by_key(|&s| wet(s)).filter(|&s| wet(s) > 0);
             let mut out = vec![f32::INFINITY; TILE * TILE];
-            for (&(i, j), g) in inside.iter().zip(got) {
-                out[(j - tj * TILE) * TILE + (i - ti * TILE)] = g;
+            let inside = |(i, j): (i64, i64)| i >= 0 && j >= 0 && (i as usize) < p.columns && (j as usize) < p.rows;
+            let Some(side) = from else {
+                let cells: Vec<(usize, usize)> = (0..TILE * TILE).map(|c| (ti * TILE + c % TILE, tj * TILE + c / TILE)).filter(|&(i, j)| inside((i as i64, j as i64))).collect();
+                let mut got = vec![f32::INFINITY; cells.len()];
+                self.field_batch(field, *scale, p, &cells, &vec![near; cells.len()], &mut got);
+                for (&(i, j), g) in cells.iter().zip(got) {
+                    out[(j - tj * TILE) * TILE + (i - ti * TILE)] = g;
+                }
+                return out;
+            };
+            let local = |(i, j): (i64, i64)| (j - y0) as usize * TILE + (i - x0) as usize;
+            for a in 0..TILE as i64 {
+                let ring: Vec<(i64, i64)> = (0..TILE as i64).map(|b| at(side, a, b)).filter(|&c| inside(c)).collect();
+                // From the point before, else the ones either side of it,
+                // the lowest: the way the water would come.
+                let before = |b: i64| -> Option<f32> {
+                    let g = |b: i64| {
+                        let c = at(side, a - 1, b);
+                        if a == 0 { known(c.0, c.1) } else if (0..TILE as i64).contains(&b) && inside(c) { Some(out[local(c)]).filter(|g| g.is_finite()) } else { None }
+                    };
+                    g(b).or_else(|| [g(b - 1), g(b + 1)].into_iter().flatten().reduce(f32::min))
+                };
+                let starts: Vec<f32> = (0..TILE as i64).map(|b| at(side, a, b)).filter(|&c| inside(c)).map(|c| {
+                    let b = match side { 0 | 1 => c.1 - y0, _ => c.0 - x0 };
+                    before(b).unwrap_or(near)
+                }).collect();
+                let cells: Vec<(usize, usize)> = ring.iter().map(|&(i, j)| (i as usize, j as usize)).collect();
+                let mut got = vec![f32::INFINITY; cells.len()];
+                self.field_batch(field, *scale, p, &cells, &starts, &mut got);
+                // A miss from a neighbour's height is tried again from the
+                // tile's own start.
+                let missed: Vec<usize> = (0..cells.len()).filter(|&k| !got[k].is_finite() && starts[k] != near).collect();
+                if !missed.is_empty() {
+                    let again: Vec<(usize, usize)> = missed.iter().map(|&k| cells[k]).collect();
+                    let mut g2 = vec![f32::INFINITY; again.len()];
+                    self.field_batch(field, *scale, p, &again, &vec![near; again.len()], &mut g2);
+                    for (&k, g) in missed.iter().zip(g2) {
+                        got[k] = g;
+                    }
+                }
+                for (&c, g) in ring.iter().zip(got) {
+                    out[local(c)] = g;
+                }
             }
             return out;
         }
@@ -130,10 +204,9 @@ impl Ground<'_> {
 impl crate::Editor {
     /// Step every tiled sim one frame: make the tiles its water has reached,
     /// read the ground again where it was dug, step inside the budget, and
-    /// hand back what it reached. Returns `(tiles awake, cells solved,
-    /// tiles)` summed.
-    pub(crate) fn step_tiled_sims(&mut self, dt: f32) -> (usize, usize, usize) {
-        let mut counts = (0, 0, 0);
+    /// hand back what it reached. Returns what they did between them.
+    pub(crate) fn step_tiled_sims(&mut self, dt: f32) -> TiledCounts {
+        let mut counts = TiledCounts::default();
         let Some(sim) = self.sim.as_ref() else {
             self.water_sims.tiled.clear();
             return counts;
@@ -175,6 +248,7 @@ impl crate::Editor {
                 water.soak = t.soak;
                 water.soak_below = t.soak_below;
                 water.still_depth = t.still_depth;
+                water.fill_time = t.fill_time;
                 for &(cell, q) in &spec.springs {
                     water.set_spring(cell % p.columns, cell / p.columns, q);
                 }
@@ -212,7 +286,12 @@ impl crate::Editor {
                 }
                 TiledSim { water, seeding, pending_holds, pending_water: Vec::new(), seen_edits: edits, level: spec.level }
             });
-            // Scripts' holds, releases and water added this frame.
+            // What this sim's frame costs: everything from here to its
+            // surface handed back, ground reads and steps alike.
+            let began = floptle_core::time::Instant::now();
+            // Scripts' holds, releases and water added this frame; fills
+            // ended once this frame's holds are made.
+            let mut end_fills = Vec::new();
             for c in cmds.iter().filter(|c| c.id() == w.id) {
                 match c {
                     floptle_core::water::SimCmd::Hold { cells, level, group, .. } => {
@@ -232,6 +311,9 @@ impl crate::Editor {
                     floptle_core::water::SimCmd::Spring { cell: [i, j], rate, .. } => {
                         s.water.set_spring(*i as usize, *j as usize, *rate);
                     }
+                    floptle_core::water::SimCmd::EndFill { group, .. } => {
+                        end_fills.push(*group);
+                    }
                 }
             }
             if spec.level != s.level {
@@ -242,11 +324,11 @@ impl crate::Editor {
                 }
             }
             // Ground for the tiles the water needs, inside the frame's share.
-            let began = floptle_core::time::Instant::now();
+            let reading = floptle_core::time::Instant::now();
             let fill = t.fill.then_some(spec.level - base);
             let guess = spec.level - base;
             loop {
-                if began.elapsed().as_secs_f32() * 1000.0 > GROUND_MS {
+                if reading.elapsed().as_secs_f32() * 1000.0 > GROUND_MS {
                     break;
                 }
                 let (key, seed) = match s.seeding.pop() {
@@ -257,7 +339,17 @@ impl crate::Editor {
                     },
                 };
                 let (ti, tj) = ((key & 0xffff) as usize, (key >> 16) as usize);
-                let g = ground.tile(&p, ti, tj, guess);
+                // A tile the water has reached is read from the water's own
+                // floor beside it; one laid before the water moves, from
+                // the level.
+                let water = &s.water;
+                let beside = |i: i64, j: i64| -> Option<f32> {
+                    if seed || i < 0 || j < 0 {
+                        return None;
+                    }
+                    water.cell(i as usize, j as usize).filter(|(g, d)| g.is_finite() && *d > 0.0).map(|(g, _)| g)
+                };
+                let g = ground.tile(&p, ti, tj, guess, &beside);
                 let surface: Option<Vec<f32>> = if !seed {
                     None
                 } else if let Some(l) = fill {
@@ -295,6 +387,10 @@ impl crate::Editor {
                 }
                 !s.water.hold(i, j, level, group)
             });
+            for g in end_fills {
+                s.water.end_fill(g);
+            }
+
             // Ground dug or filled since: read again where it changed.
             if edits != s.seen_edits {
                 let seen = std::mem::replace(&mut s.seen_edits, edits);
@@ -312,7 +408,11 @@ impl crate::Editor {
                         let Some((old, _)) = s.water.cell(i, j) else { continue };
                         let at = w.frame.to_world(p.point(i as f64, j as f64, if old.is_finite() { old as f64 } else { guess as f64 }));
                         if everywhere || regions.iter().any(|(centre, r)| (at - *centre).length() < r + p.cell * 1.5) {
-                            let g = ground.at(&p, i, j, if old.is_finite() { old + 4.0 } else { guess });
+                            // From just over the old ground: a dig is under it
+                            // and a fill over it is found from inside, where
+                            // searching from higher up would find the roof
+                            // over water in a tunnel.
+                            let g = ground.at(&p, i, j, if old.is_finite() { old } else { guess });
                             s.water.set_ground(i, j, g);
                         }
                     }
@@ -320,23 +420,20 @@ impl crate::Editor {
             }
             // Water waits for its ground before it moves.
             if s.seeding.is_empty() && dt > 0.0 {
-                let began = floptle_core::time::Instant::now();
+                let stepping = floptle_core::time::Instant::now();
                 let owed = dt;
                 let step = s.water.stable_dt().max(1e-3);
                 let n = ((owed / step).ceil() as usize).clamp(1, SUBSTEPS);
                 let sub = (owed / n as f32).min(step);
                 for _ in 0..n {
                     s.water.step(sub);
-                    if began.elapsed().as_secs_f32() * 1000.0 > t.budget_ms {
+                    if stepping.elapsed().as_secs_f32() * 1000.0 > t.budget_ms {
                         break;
                     }
                 }
                 // What the budget did not run is dropped, not owed: the
                 // water runs slow for a moment rather than catching up.
             }
-            counts.0 += s.water.awake_tiles();
-            counts.1 += s.water.solved_count();
-            counts.2 += s.water.tile_count();
             let surface = s.water.surface();
             let exchanged = s.water.take_exchanged();
             let filled = s.water.take_filled();
@@ -369,6 +466,25 @@ impl crate::Editor {
                 self.script_host.add_water_filled(w.id, &filled);
             }
             self.script_host.set_water_surface(w.id, Surface::Tiles(std::sync::Arc::new(surface)));
+            let by = s.water.awake_by().as_array();
+            let stats = floptle_core::water::SimStats {
+                ms: began.elapsed().as_secs_f32() * 1000.0,
+                tiles: s.water.tile_count(),
+                awake_tiles: s.water.awake_tiles(),
+                awake_points: s.water.awake_tiles() * TILE * TILE,
+                solved: s.water.solved_count(),
+                wet_points: s.water.wet_cells(),
+                volume: s.water.volume(),
+                filling: s.water.filling_cells(None),
+                awake_by: by,
+            };
+            counts.awake += stats.awake_tiles;
+            counts.solved += stats.solved;
+            counts.tiles += stats.tiles;
+            for (sum, n) in counts.awake_by.iter_mut().zip(by) {
+                *sum += n;
+            }
+            self.script_host.set_water_stats(w.id, stats);
         }
         counts
     }
@@ -388,15 +504,61 @@ mod tests {
         let mut f = floptle_field::ChunkField::new(0.5);
         f.fill_slab(Vec3::new(-40.0, -10.0, -40.0), Vec3::new(40.0, 4.0, 40.0), 2.0, [0.5; 3]);
         let p = Patch::flat(DVec3::ZERO, 1.0, 32, 32);
-        let flat = Ground::Field(&f, 1.0).tile(&p, 0, 0, 0.0);
+        let flat = Ground::Field(&f, 1.0).tile(&p, 0, 0, 0.0, &|_, _| None);
         assert!(flat.iter().all(|g| (g - 2.0).abs() < 0.05), "flat ground reads {:?}", &flat[..8]);
         for _ in 0..6 {
             f.sculpt(floptle_field::Brush::Lower, Vec3::new(5.0, 2.0, 5.0), 3.0, 1.0, floptle_field::BrushProfile::default());
         }
-        let dug = Ground::Field(&f, 1.0).tile(&p, 0, 0, 0.0);
+        let dug = Ground::Field(&f, 1.0).tile(&p, 0, 0, 0.0, &|_, _| None);
         // Grid point (i, j) is at x = i - 15.5, z = j - 15.5.
         let at = |x: f64, z: f64| dug[((z + 15.5) as usize) * TILE + (x + 15.5) as usize];
         assert!(at(4.5, 4.5) < 1.5, "the pit reads {}", at(4.5, 4.5));
         assert!((at(-10.5, -10.5) - 2.0).abs() < 0.05, "ground far from the pit moved to {}", at(-10.5, -10.5));
+    }
+
+    /// Flat ground at 0 with a hill 6 m high over everything east of
+    /// x = -6, and a tunnel through the hill along x at z = 8, its floor
+    /// under 0 and its roof about 2.5 m up.
+    fn tunnel_field() -> floptle_field::ChunkField {
+        let mut f = floptle_field::ChunkField::new(0.5);
+        f.fill_slab(Vec3::new(-40.0, -10.0, -40.0), Vec3::new(80.0, 4.0, 40.0), 0.0, [0.5; 3]);
+        f.fill_slab(Vec3::new(-6.0, -10.0, -40.0), Vec3::new(80.0, 4.0, 40.0), 6.0, [0.5; 3]);
+        for _ in 0..4 {
+            for k in 0..=200 {
+                let x = -30.0 + k as f32 * 0.5;
+                f.sculpt(floptle_field::Brush::Lower, Vec3::new(x, 1.0, 8.0), 1.5, 1.0, floptle_field::BrushProfile::default());
+            }
+        }
+        f
+    }
+
+    /// **Water in a tunnel under a hill finds the tunnel's floor.** Read
+    /// from the level, a tile whose middle is on the hill finds the floor
+    /// under the hill's roof, not the hilltop. And where the water stands so
+    /// close under the roof that the level is inside the rock, a tile the
+    /// water has reached is read from the water's own floor beside it, so
+    /// the water runs on along the tunnel.
+    #[test]
+    fn ground_under_a_roof_is_read_from_the_water() {
+        let f = tunnel_field();
+        let p = Patch::flat(DVec3::ZERO, 1.0, 64, 32);
+        // Grid point (i, j) is at x = i - 31.5, z = j - 15.5: the tunnel is
+        // row 23 and 24, the hill east of column 25.
+        let ground = Ground::Field(&f, 1.0);
+        let east = ground.tile(&p, 1, 0, 1.0, &|_, _| None);
+        let at = |g: &[f32], i: usize, j: usize| g[j * TILE + (i - TILE)];
+        assert!(at(&east, 48, 23) < 0.5, "the tunnel's floor reads {}", at(&east, 48, 23));
+        assert!((at(&east, 48, 8) - 6.0).abs() < 0.1, "the hill beside it reads {}", at(&east, 48, 8));
+        // Water 2 m up, half a metre under the roof: the level is in the rock.
+        let west = ground.tile(&p, 0, 0, 2.0, &|_, _| None);
+        assert!(west[23 * TILE + 30] < 0.5, "the tunnel's mouth reads {}", west[23 * TILE + 30]);
+        let blind = ground.tile(&p, 1, 0, 2.0, &|_, _| None);
+        assert!(at(&blind, 48, 23) > 5.0, "read from above, the tunnel reads {}: the case this guards", at(&blind, 48, 23));
+        let wet = |i: i64, j: i64| (i == 31 && (0..32).contains(&j)).then(|| west[j as usize * TILE + 31]).filter(|g| *g < 2.0);
+        let found = ground.tile(&p, 1, 0, 2.0, &wet);
+        for i in [32, 40, 48, 63] {
+            assert!(at(&found, i, 23) < 0.5, "from the water beside it, the tunnel at column {i} reads {}", at(&found, i, 23));
+        }
+        assert!((at(&found, 48, 8) - 6.0).abs() < 0.1, "the hill beside it reads {}", at(&found, 48, 8));
     }
 }

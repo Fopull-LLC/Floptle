@@ -368,6 +368,13 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
             out.set("waterAwake", awake)?;
             out.set("waterSolved", solved)?;
             out.set("waterTiles", tiles)?;
+            // …and why their tiles are awake: a lake that should be asleep
+            // says what keeps it up.
+            let by = lua.create_table()?;
+            for (name, n) in floptle_core::water::AWAKE_REASONS.iter().zip(p.borrow().water_awake_by()) {
+                by.set(*name, n)?;
+            }
+            out.set("waterAwakeBy", by)?;
             // Sleepers woken last frame, by cause: what keeps a parked craft
             // awake, when between wakes its own readout says `settling`.
             let wakes = lua.create_table()?;

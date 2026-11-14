@@ -4359,6 +4359,12 @@ impl ScriptHost {
         self.water_surfaces.set_report(id, report);
     }
 
+    /// What simulated water `id`'s step cost this frame and what it holds,
+    /// for `water.stats`.
+    pub fn set_water_stats(&self, id: u32, stats: floptle_core::water::SimStats) {
+        self.water_surfaces.set_stats(id, stats);
+    }
+
     /// Has [`Self::set_water_report`] been called for declared water `id`?
     pub fn has_water_report(&self, id: u32) -> bool {
         self.water_surfaces.has_report(id)

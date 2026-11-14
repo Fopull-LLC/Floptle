@@ -1951,7 +1951,7 @@ function water.flowAt(x, y, z) end
 ---(`tint`, `visibility` to change that, `underwater = false` for none). Returns
 ---an id. `waves` gives it a swell, as `water.setSwell` does (a ribbon carries
 ---none).
----@param opts { waves?: { amplitude?: number, wavelength?: number, direction?: number[]|Vec3, steepness?: number, speed?: number, phase?: number }[], shape?: "lake"|"heightfield"|"sim"|"ribbon", points?: { pos: Vec3, halfWidth?: number, depth?: number, current?: number }[], halfWidth?: number, bed?: "u"|"flat", curve?: "smooth"|"straight", level?: number|false, size?: number, depths?: number[], held?: { pos?: Vec3, cell?: integer[], level?: number, group?: integer }[], solver?: "swe"|"pipes", budget?: number, flat?: boolean, state?: { columns: integer, rows: integer, cells: number[] }, minDepth?: number, soak?: number, soakBelow?: number, stillDepth?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3|number, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
+---@param opts { waves?: { amplitude?: number, wavelength?: number, direction?: number[]|Vec3, steepness?: number, speed?: number, phase?: number }[], shape?: "lake"|"heightfield"|"sim"|"ribbon", points?: { pos: Vec3, halfWidth?: number, depth?: number, current?: number }[], halfWidth?: number, bed?: "u"|"flat", curve?: "smooth"|"straight", level?: number|false, size?: number, depths?: number[], held?: { pos?: Vec3, cell?: integer[], level?: number, group?: integer }[], solver?: "swe"|"pipes", budget?: number, flat?: boolean, state?: { columns: integer, rows: integer, cells: number[] }, minDepth?: number, soak?: number, soakBelow?: number, stillDepth?: number, fillTime?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3|number, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
 ---@return integer
 function water.addVolume(opts) end
 ---Every place simulated water pours off a drop of more than 1.5 m, in the
@@ -2007,10 +2007,22 @@ function water.release(id, cells) end
 function water.exchanged(id) end
 ---What each group of held points gave to fill the ground under newly held
 ---points since the last ask, m³: counted from when a free point is first held
----until its group comes to rest, and kept out of `water.exchanged`.
+---until its fill ends (its basin stands at its level, `fillTime`, or
+---`water.endFill`), and kept out of `water.exchanged`.
 ---@param id integer
 ---@return table<integer, number>
 function water.filled(id) end
+---End the fill of a group's held points (every group's when none is given)
+---now: from here on what they give reads in `water.exchanged`.
+---@param id integer
+---@param group? integer
+---@return boolean
+function water.endFill(id, group) end
+---What a simulated volume's step cost last frame (`ms`) and what it holds;
+---`awakeBy` counts its awake tiles by why. nil before its first step.
+---@param id integer
+---@return { ms: number, tiles: integer, awakeTiles: integer, awakePoints: integer, solved: integer, wetPoints: integer, volume: number, filling: integer, awakeBy: { surface: integer, flow: integer, soak: integer, spring: integer, woken: integer, settling: integer } }|nil
+function water.stats(id) end
 ---The tiles of a sim laid with a `center` that hold water, 32 × 32 points
 ---each; a tile's `serial` moves only when its surface has moved by more than
 ---`stillDepth`.

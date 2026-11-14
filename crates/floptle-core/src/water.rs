@@ -410,6 +410,10 @@ pub struct TiledSpec {
     /// The surface change that counts, metres: water within it sleeps, and
     /// a tile's serial moves only for more.
     pub still_depth: f32,
+    /// Seconds after a point is first held that what it gives is counted as
+    /// exchange whatever it is doing; infinite to wait for its basin to
+    /// fill.
+    pub fill_time: f32,
 }
 
 /// A cell held at a level, and the group what it gives is counted in.
@@ -431,16 +435,49 @@ pub enum SimCmd {
     AddWater { id: u32, cell: [u32; 2], volume: f64 },
     /// A spring at a cell, `rate` m³/s; 0 takes it away.
     Spring { id: u32, cell: [u32; 2], rate: f32 },
+    /// End the fill of a group's held cells (every group's, for `None`): from
+    /// now on what they give is exchange.
+    EndFill { id: u32, group: Option<u16> },
 }
 
 impl SimCmd {
     /// The volume it is for.
     pub fn id(&self) -> u32 {
         match self {
-            SimCmd::Hold { id, .. } | SimCmd::Release { id, .. } | SimCmd::AddWater { id, .. } | SimCmd::Spring { id, .. } => *id,
+            SimCmd::Hold { id, .. }
+            | SimCmd::Release { id, .. }
+            | SimCmd::AddWater { id, .. }
+            | SimCmd::Spring { id, .. }
+            | SimCmd::EndFill { id, .. } => *id,
         }
     }
 }
+
+/// What a simulated volume cost and holds, last frame: `water.stats`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SimStats {
+    /// Milliseconds its step took, the surface handed back included.
+    pub ms: f32,
+    /// Tiles held (0 for a sim without tiles), and those awake.
+    pub tiles: usize,
+    pub awake_tiles: usize,
+    /// Points in water that is moving, and points the frame's steps solved.
+    pub awake_points: usize,
+    pub solved: usize,
+    /// Points holding water, and the water on the sim, m³.
+    pub wet_points: usize,
+    pub volume: f64,
+    /// Held points still filling the ground under them.
+    pub filling: usize,
+    /// Tiles awake by why, as [`AWAKE_REASONS`] names them.
+    pub awake_by: [usize; 6],
+}
+
+/// Why a tiled sim's tiles are awake, in [`SimStats::awake_by`]'s order:
+/// the surface moving, water running across a face, a film soaking (or a
+/// pool's thin edge still finding out whether it is one), a spring, woken
+/// since its last step, and counting down the second to sleep.
+pub const AWAKE_REASONS: [&str; 6] = ["surface", "flow", "soak", "spring", "woken", "settling"];
 
 /// Water pouring off a drop: where a waterfall goes.
 #[derive(Clone, Copy, Debug, PartialEq)]
