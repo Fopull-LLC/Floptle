@@ -388,6 +388,9 @@ end
 | `water.tiles(id)` | a tiled sim's wet tiles, each with a serial that changes when its water does. |
 | `water.state(id)` | a tiled sim's wet points, for a save (`addVolume{ state = ... }` starts from it). |
 | `water.addWater(id, at, m3)` / `water.setSpring(id, at, rate)` | add or take water at a point; a spring changed while it runs. |
+| `water.splashes()` | what entered or left water since the last call. |
+| `water.setSlam(volume, k)` | the impulse a fast entry meets. |
+| `water.wet(node)` | seconds since a node was last in water. |
 | `water.removeVolume(id)` | take it away again. |
 
 A lake on a round world is part of a sphere about the planet's centre, and only
@@ -536,6 +539,26 @@ script lifts in `fixedUpdate` or a pool on a ship's deck floats things exactly
 as it would standing still, and `water.at` in `fixedUpdate` answers for that
 tick's water. Water on a body the physics moves (a ship, a lift) also moves
 with it, so what floats in a deck pool is carried along with the ship.
+
+**Things entering and leaving water.** Each tick the physics already knows
+how much of each body, and of each part of an assembly, is under water.
+`water.splashes()` hands back every crossing since the last call, oldest
+first: the node, the water, where it crossed on the surface, the water's up,
+its speed (positive going in), its mass, the face it met the water with and
+what it displaces. A body counts once per crossing, and one bobbing at the
+surface (slower than 0.5 m/s) not at all, so a splash, its sound, a ripple and
+impact damage all read one list. `water.setSlam(volume, k)` makes a fast
+entry stop hard, an impulse `k·ρ·v²·area·dt` against its motion while it goes
+under that never more than stops it; `water.wet(node)` is the seconds since a
+node was last in water, for drips and wet looks.
+
+```lua
+for _, s in ipairs(water.splashes()) do
+  if s.entering and s.speed > 3 then
+    -- s.pos and s.normal place the splash; s.speed and s.mass size it.
+  end
+end
+```
 
 `water.depthAt` and the solver answer from the **same geometry**, so a swim
 state can't disagree with the physics floating it — which is exactly what

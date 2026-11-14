@@ -213,6 +213,15 @@ impl WaterField {
         self.volumes.is_empty()
     }
 
+    /// The volume a point is in, or the one whose surface it is nearest
+    /// above: what a shape crossing a surface crossed.
+    pub fn nearest(&self, p: Vec3) -> Option<&WaterVolume> {
+        match self.sample(p).entity {
+            Some(e) => self.volumes.iter().find(|v| v.entity == e),
+            None => nearest_volume(self, p),
+        }
+    }
+
     /// The fraction (0..1) of a sphere of `radius` centred at `p` that is under
     /// the surface, as the exact spherical-cap volume rather than a step at the
     /// centre.

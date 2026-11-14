@@ -1278,6 +1278,7 @@ impl Editor {
                     }
                 }
                 self.warn_water_density_mismatch();
+                self.publish_water_crossings();
                 // Collision / trigger events from this tick, dispatched to
                 // both nodes' scripts: `onCollisionEnter/Stay/Exit(node,
                 // other, hit)` for solid contacts (incl. body-vs-body),

@@ -77,6 +77,13 @@ pub(crate) struct WaterShared {
     /// What each tiled sim's held groups have given since `water.exchanged`
     /// last asked, m³, by volume and group.
     pub exchanged: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>>,
+    /// Water entries and exits since `water.splashes` last asked, oldest
+    /// first, at most 64.
+    pub splashes: Rc<RefCell<std::collections::VecDeque<floptle_physics::splash::Splash>>>,
+    /// The physics clock and when each node was last in water.
+    pub wet: Rc<RefCell<(f64, std::collections::HashMap<u32, f64>)>>,
+    /// Each body of water's slam (`water.setSlam`), by the water's entity.
+    pub slam: Rc<RefCell<std::collections::HashMap<u32, f32>>>,
     pub next_id: Rc<std::cell::Cell<u32>>,
     /// The level, lent for the frame, so `water.surface` can tell which of a
     /// lake's sphere lies in its basin and which runs under the ground.
@@ -1155,6 +1162,88 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
         }
     }
 
+    // water.splashes() → every time something entered or left water since the
+    // last call, oldest first (at most 64): { node, volume or water, pos,
+    // normal, speed, mass, area, displaced, entering }. Where a game puts its
+    // splash, its sound, its ripple and its damage.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |lua, ()| {
+            let out = lua.create_table()?;
+            for (n, e) in s.splashes.borrow_mut().drain(..).enumerate() {
+                let row = lua.create_table()?;
+                row.set("node", crate::env::new_node_handle(lua, e.node)?)?;
+                // Declared water is numbered down from the top; a Water
+                // Volume node is itself.
+                if e.water > u32::MAX / 2 {
+                    row.set("volume", u32::MAX - e.water)?;
+                } else {
+                    row.set("water", crate::env::new_node_handle(lua, e.water)?)?;
+                }
+                row.set("pos", crate::math_api::LuaVec3(e.pos))?;
+                row.set("normal", crate::math_api::LuaVec3(e.normal.as_dvec3()))?;
+                row.set("speed", e.speed as f64)?;
+                row.set("mass", e.mass as f64)?;
+                row.set("area", e.area as f64)?;
+                row.set("displaced", e.displaced as f64)?;
+                row.set("entering", e.entering)?;
+                out.raw_set(n + 1, row)?;
+            }
+            Ok(out)
+        }) {
+            let _ = t.set("splashes", f);
+        }
+    }
+
+    // water.setSlam(volume, k): what something entering this water fast
+    // meets: an impulse k·ρ·v²·area·dt against its motion while it goes
+    // under, never more than stops it. `volume` is an addVolume id or a
+    // Water Volume node; 0 (the default) is none.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |_, (volume, k): (Value, f64)| {
+            let key = match &volume {
+                Value::Integer(i) => Some(u32::MAX - *i as u32),
+                Value::Number(n) => Some(u32::MAX - *n as u32),
+                Value::Table(t) => t.raw_get::<u32>("__id").ok(),
+                _ => None,
+            };
+            let Some(key) = key else {
+                return Err(mlua::Error::RuntimeError("water.setSlam(volume, k): `volume` is an id water.addVolume gave, or a Water Volume node".into()));
+            };
+            if !k.is_finite() || k < 0.0 {
+                return Err(mlua::Error::RuntimeError("water.setSlam: `k` is 0 or more (1 is a hard slam)".into()));
+            }
+            let mut m = s.slam.borrow_mut();
+            if k == 0.0 {
+                m.remove(&key);
+            } else {
+                m.insert(key, k as f32);
+            }
+            Ok(())
+        }) {
+            let _ = t.set("setSlam", f);
+        }
+    }
+
+    // water.wet(node) → seconds since the node (a body, an assembly or one of
+    // its parts) was last in water: 0 while it is, nil if it never was.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |_, node: Value| {
+            let eid = match &node {
+                Value::Table(t) => t.raw_get::<u32>("__id").ok(),
+                Value::Integer(i) => Some(*i as u32),
+                _ => None,
+            };
+            let Some(eid) = eid else { return Err(mlua::Error::RuntimeError("water.wet(node): `node` is a node".into())) };
+            let w = s.wet.borrow();
+            Ok(w.1.get(&eid).map(|t| (w.0 - t).max(0.0)))
+        }) {
+            let _ = t.set("wet", f);
+        }
+    }
+
     // water.removeVolume(id) → true if there was one.
     {
         let s = shared.clone();
@@ -1248,6 +1337,9 @@ mod tests {
             changed: Rc::default(),
             sim_cmds: Rc::default(),
             exchanged: Rc::default(),
+            splashes: Rc::default(),
+            wet: Rc::default(),
+            slam: Rc::default(),
             next_id: Rc::default(),
             colliders: Rc::default(),
             sim_origin: Rc::default(),

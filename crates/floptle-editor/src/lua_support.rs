@@ -2024,6 +2024,21 @@ function water.addWater(id, at, m3) end
 ---@param rate number
 ---@return boolean
 function water.setSpring(id, at, rate) end
+---Everything that entered or left water since the last call, oldest first (the
+---last 64 kept). Each body or assembly part counts once per crossing; slower
+---than 0.5 m/s is bobbing and is not reported. `speed` is + going in.
+---@return { node: Node, volume?: integer, water?: Node, pos: Vec3, normal: Vec3, speed: number, mass: number, area: number, displaced: number, entering: boolean }[]
+function water.splashes() end
+---What something entering this water fast meets: an impulse `k·ρ·v²·area·dt`
+---against its motion while it goes under, never more than stops it. `volume`
+---is an addVolume id or a Water Volume node; 0 (the default) is none.
+---@param volume integer|Node
+---@param k number
+function water.setSlam(volume, k) end
+---Seconds since `node` was last in water: 0 while it is, nil if it never was.
+---@param node Node
+---@return number|nil
+function water.wet(node) end
 ---Move the surface of water `water.addVolume` declared, in place: its id,
 ---look, density, drag, current and depth stay, and the physics floats things on
 ---the new level from the next tick. A lake's `level` is its surface's radius

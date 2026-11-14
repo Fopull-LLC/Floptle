@@ -1022,6 +1022,12 @@ pub struct ScriptHost {
     water_sim_cmds: Rc<RefCell<Vec<floptle_core::water::SimCmd>>>,
     /// What tiled sims' held groups gave, waiting for `water.exchanged`.
     water_exchanged: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>>,
+    /// Water entries and exits waiting for `water.splashes`.
+    water_splashes: Rc<RefCell<std::collections::VecDeque<floptle_physics::splash::Splash>>>,
+    /// The physics clock and when each node was last in water.
+    water_wet: Rc<RefCell<(f64, HashMap<u32, f64>)>>,
+    /// `water.setSlam`, by the water's entity.
+    water_slam: Rc<RefCell<HashMap<u32, f32>>>,
     /// Scatter sources scripts declared — resolved into
     /// drawable instances by the driver, never into scene nodes.
     scatter_sources: scatter_api::Sources,

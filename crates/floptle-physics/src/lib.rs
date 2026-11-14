@@ -34,6 +34,7 @@ mod pairs;
 mod shapes;
 mod sim;
 mod water;
+pub mod splash;
 mod world;
 
 pub use body::*;

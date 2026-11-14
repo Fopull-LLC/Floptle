@@ -30,7 +30,7 @@ each group, and meant to be searched.
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 36
 - [pathfinding — nav.*](#pathfinding--nav) — 26
-- [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 21
+- [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 24
 - [weather — wind](#weather--wind) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 12
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 38
@@ -3296,9 +3296,17 @@ water.setLevel(id, level) → true if there was such water. Moves the surface of
 
 water.setLevels(id, levels) → true if there was such water. A heightfield's surface heights, one per point as water.addVolume took them (false for dry ground), the same count; nothing else about it changes.
 
+### `water.setSlam`
+
+water.setSlam(volume, k) — what something entering this water fast meets: an impulse k·ρ·v²·area·dt against its motion each tick while it goes under, never more than stops it, so a hard splashdown stops hard (read the event's speed in water.splashes to break things). `volume` is an addVolume id or a Water Volume node; 0, the default, is none.
+
 ### `water.setSpring`
 
 water.setSpring(id, at, rate) → true if id is a sim laid with a `center`: a spring at a point giving `rate` m³/s, changed while it runs; 0 takes it away.
+
+### `water.splashes`
+
+water.splashes() → everything that entered or left water since the last call, oldest first (the last 64 are kept): { node, volume (an addVolume id) or water (a Water Volume node), pos (where it crossed, on the surface), normal (the water's up), speed (m/s along -normal: + going in, - coming out), mass, area (the face it met the water with, m²), displaced (m³ under water after the step), entering }. Each body, and each part of an assembly, counts once per crossing; a crossing slower than 0.5 m/s is bobbing and is not reported. One list for splashes, sounds, ripples, wet looks and impact damage.
 
 ### `water.state`
 
@@ -3315,6 +3323,10 @@ water.tiles(id) → { { key, serial, i, j }, ... }: the tiles of a sim laid with
 ### `water.volumes`
 
 water.volumes() — every body of water in the scene, as node handles. What a climate or weather system iterates when it wants to know where the seas are.
+
+### `water.wet`
+
+water.wet(node) → seconds since the node (a body, an assembly or one of its parts) was last in water: 0 while it is, nil if it never was. For drips and wet looks with no table in Lua.
 
 ## weather — wind
 

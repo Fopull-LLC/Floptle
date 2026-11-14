@@ -92,8 +92,24 @@ impl crate::Editor {
         }
         if let Some(sim) = self.sim.as_mut() {
             sim.world.water = water;
+            let slam = self.script_host.water_slam();
+            if !slam.is_empty() || sim.has_water_slam() {
+                sim.set_water_slam(slam);
+            }
         }
         self.water_sims.posers = posers;
+    }
+
+    /// Hand the scripts what this tick's physics saw of water: what entered
+    /// or left it (`water.splashes`) and what is in it (`water.wet`).
+    pub(crate) fn publish_water_crossings(&mut self) {
+        let Some(sim) = self.sim.as_mut() else { return };
+        let events = sim.take_splashes();
+        if !events.is_empty() {
+            self.script_host.push_water_splashes(events);
+        }
+        let (clock, wet) = sim.wet_now();
+        self.script_host.set_water_wet(clock, &wet);
     }
 
     /// Hand the solver the surfaces scripts moved since the last tick

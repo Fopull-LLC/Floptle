@@ -444,3 +444,63 @@ end
     assert!((second - first).abs() < 0.05, "the copy started from its state holds {second}, the first {first}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **Scripts hear what enters and leaves water.** A ball thrown into a pool
+/// at 9.9 m/s: water.splashes() hands back one entry, naming the ball and
+/// the pool, at that speed, and water.wet(ball) reads 0 while it is in;
+/// water.setSlam on a second pool makes an identical throw stop sooner.
+#[test]
+fn scripts_hear_a_ball_splash_into_a_pool() {
+    let (mut ed, dir) = project(
+        "splashes",
+        r#"
+local n = 0
+function update(node, dt)
+  n = n + 1
+  if n == 1 then
+    water.setSlam(find("Pool2"), 2)
+    -- No gravity in this scene: thrown down at what a 5 m fall reaches.
+    find("Ball").vy = -9.9045
+    find("Ball2").vy = -9.9045
+  end
+  for _, s in ipairs(water.splashes()) do
+    log(string.format("S %s %s %s %.3f", s.node.name, s.water and s.water.name or "-", tostring(s.entering), s.speed))
+  end
+  local w = water.wet(find("Ball"))
+  if w then log(string.format("WET %d %.3f", n, w)) end
+end
+"#,
+    );
+    for (name, x) in [("Pool", 0.0), ("Pool2", 30.0)] {
+        let pool = node(&mut ed, name, DVec3::new(x, -2.0, 0.0));
+        ed.world.insert(pool, Matter::default_water());
+    }
+    let r = (1.0f64 / (900.0 * 4.0 / 3.0 * std::f64::consts::PI)).cbrt();
+    for (name, x) in [("Ball", 0.0), ("Ball2", 30.0)] {
+        let b = node(&mut ed, name, DVec3::new(x, 0.5 + r, 0.0));
+        ed.world.insert(b, RigidBody { radius: r as f32, mass: 1.0, ..Default::default() });
+    }
+    camera(&mut ed, DVec3::new(15.0, 5.0, 40.0));
+    ed.toggle_play();
+    let mut deepest = [f64::INFINITY; 2];
+    for _ in 0..240 {
+        ed.play_step(1.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        for (k, name) in ["Ball", "Ball2"].iter().enumerate() {
+            let e = ed.world.query::<Name>().find(|(_, n)| n.0 == *name).map(|(e, _)| e).unwrap();
+            deepest[k] = deepest[k].min(floptle_core::world_transform(&ed.world, e).translation.y);
+        }
+    }
+    ed.drain_script_logs();
+    let lines: Vec<String> = ed.console.entries.iter().filter_map(|e| e.msg.strip_prefix("S ").map(str::to_string)).collect();
+    let ball: Vec<&String> = lines.iter().filter(|l| l.starts_with("Ball ")).collect();
+    assert_eq!(ball.len(), 1, "{lines:?}, the balls sank to {deepest:?}");
+    let parts: Vec<&str> = ball[0].split(' ').collect();
+    assert_eq!((parts[1], parts[2]), ("Pool", "true"), "{lines:?}");
+    let speed: f64 = parts[3].parse().unwrap();
+    assert!((speed - (2.0f64 * 9.81 * 5.0).sqrt()).abs() < 0.05 * 9.9, "it hit at {speed}");
+    assert!(ed.console.entries.iter().any(|e| e.msg.starts_with("WET ") && e.msg.ends_with(" 0.000")), "water.wet never read 0");
+    // The pool that slams stops its ball shallower.
+    assert!(deepest[1] > deepest[0] + 0.1, "the slam's ball sank to {}, the other's to {}", deepest[1], deepest[0]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

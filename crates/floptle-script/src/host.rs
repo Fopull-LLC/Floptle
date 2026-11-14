@@ -2997,6 +2997,9 @@ impl ScriptHost {
         let water_changed: Rc<RefCell<Vec<u32>>> = Rc::default();
         let water_sim_cmds: Rc<RefCell<Vec<floptle_core::water::SimCmd>>> = Rc::default();
         let water_exchanged: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>> = Rc::default();
+        let water_splashes: Rc<RefCell<std::collections::VecDeque<floptle_physics::splash::Splash>>> = Rc::default();
+        let water_wet: Rc<RefCell<(f64, HashMap<u32, f64>)>> = Rc::default();
+        let water_slam: Rc<RefCell<HashMap<u32, f32>>> = Rc::default();
         crate::water_api::install_water_api(
             &lua,
             crate::water_api::WaterShared {
@@ -3006,6 +3009,9 @@ impl ScriptHost {
                 changed: water_changed.clone(),
                 sim_cmds: water_sim_cmds.clone(),
                 exchanged: water_exchanged.clone(),
+                splashes: water_splashes.clone(),
+                wet: water_wet.clone(),
+                slam: water_slam.clone(),
                 next_id: Rc::default(),
                 colliders: colliders.clone(),
                 sim_origin: sim_origin.clone(),
@@ -3621,6 +3627,9 @@ impl ScriptHost {
             water_changed,
             water_sim_cmds,
             water_exchanged,
+            water_splashes,
+            water_wet,
+            water_slam,
             scatter_sources,
             scatter_owners,
             scatter_settled,
@@ -4287,6 +4296,32 @@ impl ScriptHost {
         for &(g, v) in groups {
             *e.entry(g).or_insert(0.0) += v;
         }
+    }
+
+    /// Water entries and exits from a tick, for `water.splashes`: the last
+    /// 64 are kept.
+    pub fn push_water_splashes(&self, events: Vec<floptle_physics::splash::Splash>) {
+        let mut ring = self.water_splashes.borrow_mut();
+        for e in events {
+            if ring.len() >= floptle_physics::splash::SPLASH_RING {
+                ring.pop_front();
+            }
+            ring.push_back(e);
+        }
+    }
+
+    /// The physics clock, and the nodes in water at it, for `water.wet`.
+    pub fn set_water_wet(&self, clock: f64, wet: &[u32]) {
+        let mut w = self.water_wet.borrow_mut();
+        w.0 = clock;
+        for &n in wet {
+            w.1.insert(n, clock);
+        }
+    }
+
+    /// `water.setSlam`'s values, by the water's entity.
+    pub fn water_slam(&self) -> HashMap<u32, f32> {
+        self.water_slam.borrow().clone()
     }
 
     /// Drop every declared water — a scene switch, like [`Self::clear_weather`].
