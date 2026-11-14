@@ -444,6 +444,9 @@ pub struct ChunkField {
     /// How many times a full-detail chunk's surface is subdivided onto the
     /// field ([`Self::set_mesh_refine`]); 0 meshes one vertex a cell.
     mesh_refine: u8,
+    /// Water the coarse meshes keep submerged ground under
+    /// ([`Self::set_water_levels`]); empty meshes as if there were none.
+    water_levels: Vec<WaterLevel>,
     /// Sub-voxels per voxel per axis a texture brush paints at
     /// ([`Self::set_fine_paint`]); 0 paints voxels only.
     fine_paint: u8,
@@ -484,6 +487,86 @@ pub struct ChunkField {
     /// Found its edits by [`Self::adopt_generation`]: what is on disk is the
     /// whole field, and the next save should replace it with the edits.
     converted: bool,
+}
+
+/// A water surface over a field, in the field's own space: what a coarse mesh
+/// keeps its submerged ground under ([`ChunkField::set_water_levels`]).
+///
+/// A coarse mesh simplifies the ground, and over a sea floor a few metres
+/// down its vertices can come to rest above the water: dark triangles of
+/// seabed standing out of the sea, seen from orbit. With a level declared, a
+/// coarse cell whose full-resolution ground is all under the water keeps its
+/// vertex under it too: dropped onto the ground straight below, or held
+/// `margin` under the surface where there is none within reach. A cell
+/// with any ground above the water is left alone, so a coast stays where the
+/// full-detail mesh draws it, to within a coarse cell.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaterLevel {
+    pub surface: WaterSurface,
+    /// Where this water is: within `.1` of the point `.0`. `None` is
+    /// everywhere, a sea round a whole world; a lake names its own basin, so
+    /// dry ground lower than the lake on the far side of the planet is not
+    /// taken for its bed.
+    pub within: Option<([f32; 3], f32)>,
+    /// How far under the surface a vertex with no ground under it is held,
+    /// and the least depth any vertex of a submerged cell is left at. Enough
+    /// to stay out of the water's own waves and clear of depth fighting from
+    /// a long way off.
+    pub margin: f32,
+    /// Draw every wholly submerged coarse cell flat, `margin` under the
+    /// surface, whatever depth its ground lies at: a seabed with no relief
+    /// from afar, for water drawn clear enough that the simplified floor
+    /// shows through it.
+    pub flatten: bool,
+}
+
+/// The shape of a [`WaterLevel`]'s surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WaterSurface {
+    /// A sea or lake on a round world: `radius` from `centre`.
+    Sphere { centre: [f32; 3], radius: f32 },
+    /// Flat water: the plane `height` along the unit vector `up` from the
+    /// field's origin.
+    Plane { up: [f32; 3], height: f32 },
+}
+
+impl WaterLevel {
+    /// A sea round the whole of a world centred on the field's origin.
+    pub fn sea(radius: f32) -> Self {
+        Self { surface: WaterSurface::Sphere { centre: [0.0; 3], radius }, within: None, margin: Self::MARGIN, flatten: false }
+    }
+
+    /// Flat water at `height` on the field's +Y.
+    pub fn flat(height: f32) -> Self {
+        Self { surface: WaterSurface::Plane { up: [0.0, 1.0, 0.0], height }, within: None, margin: Self::MARGIN, flatten: false }
+    }
+
+    /// The margin a level has when nothing sets one, in field units.
+    pub const MARGIN: f32 = 0.25;
+
+    /// How far `p` stands above the surface, negative under it.
+    #[inline]
+    pub fn above(&self, p: Vec3) -> f32 {
+        match self.surface {
+            WaterSurface::Sphere { centre, radius } => (p - Vec3::from(centre)).length() - radius,
+            WaterSurface::Plane { up, height } => p.dot(Vec3::from(up)) - height,
+        }
+    }
+
+    /// Straight up out of the water at `p`.
+    #[inline]
+    pub fn up(&self, p: Vec3) -> Vec3 {
+        match self.surface {
+            WaterSurface::Sphere { centre, .. } => (p - Vec3::from(centre)).try_normalize().unwrap_or(Vec3::Y),
+            WaterSurface::Plane { up, .. } => Vec3::from(up),
+        }
+    }
+
+    /// Is `p` where this water is?
+    #[inline]
+    pub fn covers(&self, p: Vec3) -> bool {
+        self.within.is_none_or(|(at, reach)| (p - Vec3::from(at)).length_squared() <= reach * reach)
+    }
 }
 
 /// What makes a field's pending chunks: see [`ChunkField::generate_deferring`].
@@ -830,6 +913,7 @@ impl ChunkField {
             voxel: voxel.max(1e-3),
             slot_edge_reach: 0,
             mesh_refine: 0,
+            water_levels: Vec::new(),
             fine_paint: 0,
             fine_factor: 0,
             fine_dirty: HashMap::new(),
@@ -879,6 +963,18 @@ impl ChunkField {
 
     pub fn mesh_refine(&self) -> u8 {
         self.mesh_refine
+    }
+
+    /// The water this ground lies under, for the meshes drawn from afar
+    /// (stride 2 and coarser): see [`WaterLevel`]. Empty, the default, meshes
+    /// exactly as before. Full-detail meshes never read it. Changing it does
+    /// not re-mesh: the caller does, when it changes.
+    pub fn set_water_levels(&mut self, levels: Vec<WaterLevel>) {
+        self.water_levels = levels;
+    }
+
+    pub fn water_levels(&self) -> &[WaterLevel] {
+        &self.water_levels
     }
 
     /// Paint texture slots finer than a voxel: `factor` sub-voxels a voxel

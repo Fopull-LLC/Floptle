@@ -2348,6 +2348,22 @@ function terrain.surfaceBelow(points, dirs, maxDist, opts) end
 ---@param ms? number
 ---@return number
 function terrain.editBudget(ms) end
+---The water the far ground of the terrain with id `id` is kept under. Ground
+---drawn from afar is simplified, and over a shallow sea floor the simplified
+---ground can stand out of the water. With a level, far ground whose own
+---surface is all under the water is drawn under it; a shore stays where the
+---ground puts it, and the ground near the camera is never changed.
+---
+---`level` is a number in the terrain's own frame: a radius from its centre
+---on a planet, a height on flat ground. `nil` follows the water declared on
+---the terrain (a Water Volume sea centred on it or a child of it, a child
+---pool, a `water.addVolume` lake), which is the default; `false` is none.
+---A change is meshed again over the following frames. Rules last until Play
+---stops.
+---@param id integer
+---@param level? number|boolean
+---@param opts? { margin: number?, flatten: boolean?, flat: boolean? } `margin`: the least depth such ground is held at, metres (0.25). `flatten`: draw all of it flat at that depth. `flat`: the level is a height (true) or a radius (false).
+function terrain.setWaterLevel(id, level, opts) end
 ---When the planet with terrain id `id` stops drawing its ground and draws as
 ---one shaded ball: past `radii` of its own radii from the camera, or once its
 ---disc is smaller than `pixels` across on screen. No rule is the default,

@@ -69,6 +69,8 @@ pub(crate) struct TerrainReceipts {
     /// `terrain.impostorAt` calls since the engine last took them: a body's
     /// terrain id and its rule, `None` to go back to the default.
     pub impostors: ImpostorCalls,
+    /// `terrain.setWaterLevel` calls since the engine last took them.
+    pub water_levels: WaterLevelCalls,
     /// Edits refused because the queue was full, since the host was made:
     /// what `terrain.capacity()` exists to keep at zero, and what
     /// `perf.counts().terrainDropped` reports.
@@ -185,6 +187,42 @@ struct TerrainDrops(Rc<std::cell::Cell<u64>>);
 /// `terrain.impostorAt` calls waiting for the engine: a terrain id and its
 /// rule, `None` for the default.
 pub(crate) type ImpostorCalls = Rc<RefCell<Vec<(u32, Option<ImpostorRule>)>>>;
+
+/// `terrain.setWaterLevel` calls waiting for the engine: a terrain id and
+/// what its far ground is to be kept under.
+pub(crate) type WaterLevelCalls = Rc<RefCell<Vec<(u32, TerrainWaterRule)>>>;
+
+/// The water a terrain's far ground is kept under (`terrain.setWaterLevel`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TerrainWater {
+    /// The water declared on it: a Water Volume or a `water.addVolume` lake.
+    Declared,
+    /// None, whatever water is declared on it.
+    Off,
+    /// This level, in the terrain's own frame: a radius from its centre on a
+    /// round world, a height on flat ground.
+    At(f64),
+}
+
+/// What `terrain.setWaterLevel` set for one terrain.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerrainWaterRule {
+    pub water: TerrainWater,
+    /// How far under the surface submerged far ground is held at least;
+    /// `None` is the engine's own.
+    pub margin: Option<f64>,
+    /// Draw wholly submerged far ground flat, just under the surface.
+    pub flatten: bool,
+    /// Whether a level given as a number is a height on flat ground (`true`)
+    /// or a radius (`false`); `None` asks the terrain: a radius on a planet.
+    pub flat: Option<bool>,
+}
+
+impl Default for TerrainWaterRule {
+    fn default() -> Self {
+        Self { water: TerrainWater::Declared, margin: None, flatten: false, flat: None }
+    }
+}
 
 /// When a planet stops drawing its ground and draws as one shaded ball.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -548,7 +586,7 @@ pub(crate) fn install_terrain_api(
     receipts: TerrainReceipts,
 ) {
     let TerrainStreamShared { save_dir, lod_anchor, edit_budget, warm, flush, busy, save_dir_in_use, unmade, prepare, paths, copies } = stream;
-    let TerrainReceipts { yields, next_op_id, planet, queued, generator, impostors, dropped, edits } = receipts;
+    let TerrainReceipts { yields, next_op_id, planet, queued, generator, impostors, water_levels, dropped, edits } = receipts;
     lua.set_app_data(TerrainDrops(dropped.clone()));
     let Ok(t) = lua.create_table() else { return };
 
@@ -994,6 +1032,42 @@ pub(crate) fn install_terrain_api(
             Ok(())
         }) {
             let _ = t.set("impostorAt", f);
+        }
+    }
+
+    // terrain.setWaterLevel(id, level, { margin, flatten, flat }) — the water
+    // the terrain's far ground is kept under. `level` is a number (a radius
+    // from the terrain's centre on a planet, a height on flat ground), nil
+    // for the water declared on the terrain, or false for none.
+    {
+        if let Ok(f) = lua.create_function(move |_, (id, level, opts): (u32, Value, Option<Table>)| {
+            const CALL: &str = "terrain.setWaterLevel";
+            let water = match level {
+                Value::Nil => TerrainWater::Declared,
+                Value::Boolean(false) => TerrainWater::Off,
+                Value::Integer(n) => TerrainWater::At(n as f64),
+                Value::Number(n) if n.is_finite() => TerrainWater::At(n),
+                _ => {
+                    return Err(mlua::Error::runtime(format!(
+                        "{CALL}: the level is a number, nil for the water declared on the terrain, or false for none"
+                    )));
+                }
+            };
+            let mut rule = TerrainWaterRule { water, ..Default::default() };
+            if let Some(t) = &opts {
+                crate::opts::check_keys(t, &["margin", "flatten", "flat"], CALL)?;
+                rule.margin = match t.raw_get::<Option<f64>>("margin")? {
+                    Some(m) if m.is_finite() && m >= 0.0 => Some(m),
+                    Some(_) => return Err(mlua::Error::runtime(format!("{CALL}: margin is 0 or more, in metres"))),
+                    None => None,
+                };
+                rule.flatten = t.raw_get::<Option<bool>>("flatten")?.unwrap_or(false);
+                rule.flat = t.raw_get::<Option<bool>>("flat")?;
+            }
+            water_levels.borrow_mut().push((id, rule));
+            Ok(())
+        }) {
+            let _ = t.set("setWaterLevel", f);
         }
     }
 

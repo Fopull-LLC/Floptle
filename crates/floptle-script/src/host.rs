@@ -3324,6 +3324,7 @@ impl ScriptHost {
         let terrain_queued: Rc<std::cell::Cell<usize>> = Rc::default();
         let terrain_generator = Rc::new(std::cell::Cell::new(floptle_field::procgen::GENERATOR_VERSION));
         let terrain_impostors: crate::terrain_api::ImpostorCalls = Rc::default();
+        let terrain_water_levels: crate::terrain_api::WaterLevelCalls = Rc::default();
         let terrain_unmade: Rc<RefCell<Vec<crate::terrain_api::UnmadeRegion>>> = Rc::default();
         let terrain_dropped: Rc<std::cell::Cell<u64>> = Rc::default();
         let terrain_edit_feed: Rc<RefCell<crate::terrain_api::EditFeed>> = Rc::default();
@@ -3355,6 +3356,7 @@ impl ScriptHost {
                 queued: terrain_queued.clone(),
                 generator: terrain_generator.clone(),
                 impostors: terrain_impostors.clone(),
+                water_levels: terrain_water_levels.clone(),
                 dropped: terrain_dropped.clone(),
                 edits: terrain_edit_feed.clone(),
             },
@@ -3568,6 +3570,7 @@ impl ScriptHost {
             terrain_queued,
             terrain_generator,
             terrain_impostors,
+            terrain_water_levels,
             terrain_generates,
             terrain_save_dir,
             terrain_warm,
@@ -4992,6 +4995,11 @@ impl ScriptHost {
     /// host has the current one.
     pub fn set_terrain_generator(&self, v: u32) {
         self.terrain_generator.set(v);
+    }
+
+    /// The `terrain.setWaterLevel` calls made since the last take, in order.
+    pub fn take_terrain_water_levels(&self) -> Vec<(u32, crate::terrain_api::TerrainWaterRule)> {
+        std::mem::take(&mut *self.terrain_water_levels.borrow_mut())
     }
 
     /// The `terrain.impostorAt` calls made since the last take, in order: a

@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 79
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 37
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 38
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 25
 - [weather — wind](#weather--wind) — 6
@@ -3107,6 +3107,10 @@ terrain.setShape("natural" | "faceted" | level) — how dug, raised and sculpted
 ### `terrain.setSlotMaterial`
 
 terrain.setSlotMaterial(slot, { ... } | nil) — give a palette slot a Material of its own, with node:setMaterial's keys: the ground painted with that slot shines, glows, takes its own normal map at its own strength (negative turns bumps into dents) or goes unlit, whatever the terrain's Material is. The keys given are laid over the slot's own Material and the rest keep their values; a slot without one starts from the default Material. nil gives the slot back to its terrain's Material. A new texture or map path is read in the background, the others draw straight away. Sets made during Play last for the run: Stop puts the palette's Materials back. Set from an editor action, it is a change to the scene, saved with its palette. Refuses: a slot outside 1 to terrain.slotCount(), a key setMaterial does not take.
+
+### `terrain.setWaterLevel`
+
+terrain.setWaterLevel(id [, level [, { margin = 0.25, flatten = false, flat = bool }]]) — the water the far ground of the terrain with id `id` is kept under. Ground drawn from afar is simplified, and over a shallow sea floor the simplified ground can stand out of the water; with a level, far ground whose own surface is all under the water is drawn under it, and a shore stays where the ground puts it. `level` is a number in the terrain's own frame (a radius from its centre on a planet, a height on flat ground; `flat` says which when the terrain cannot tell), `nil` for the water declared on the terrain (a Water Volume sea centred on it or a child of it, a child pool, a `water.addVolume` lake: the default, so most games never call this), or `false` for none. `margin` is the least depth such ground is held at, in metres; `flatten = true` draws all of it flat at that depth. The ground near the camera is never changed. A change is meshed again over the following frames. Rules last until Play stops.
 
 ### `terrain.slotAt`
 
