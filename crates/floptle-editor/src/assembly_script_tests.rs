@@ -2236,7 +2236,6 @@ end
     let m = one("M");
     let hits: usize = m.split(' ').next().unwrap().parse().unwrap();
     assert_eq!(hits, 10_000, "ten thousand points 0.6 m over the slab: {m}");
-    eprintln!("surfaceBelow 10,000 points: {m}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
