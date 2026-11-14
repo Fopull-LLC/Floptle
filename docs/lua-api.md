@@ -608,11 +608,11 @@ script.wake(node, kind) — wake that script on that node; script.wake(node) wak
 
 ### `simDt`
 
-Simulation seconds since this pass last ran (number): the step in fixedUpdate; in update and lateUpdate, the ticks the frame ran times the step, 0 on a frame that ran none. Equals dt, give or take a tick, while nothing is dropped.
+Simulation seconds since this pass last ran (number): the step in fixedUpdate; in update and lateUpdate, how far the smooth simulation clock moved, so a steady frame reads a steady simDt and never 0 while the game runs. Equals dt while nothing is dropped.
 
 ### `simTime`
 
-Seconds the simulation has actually advanced (number): fixed ticks run times the step, the same in every script and pass. Equals time until the catch-up budget or slow motion drops ticks; then time keeps the frame and simTime keeps the physics, so a timeout on something physical, a cooldown on a physical action or a controller's integral belongs on simTime.
+Seconds the simulation has actually advanced (number): whole fixed ticks in fixedUpdate; in update and lateUpdate also the time banked towards the next tick (the fraction the renderer blends by), so it moves smoothly every frame at any frame rate. The same in every script within a pass. Equals time until the catch-up budget or slow motion drops ticks; then time keeps the frame and simTime keeps the physics, so a timeout on something physical, a cooldown on a physical action or a controller's integral belongs on simTime.
 
 ### `spawn`
 

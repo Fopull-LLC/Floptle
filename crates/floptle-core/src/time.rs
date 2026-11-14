@@ -125,6 +125,17 @@ impl FixedTimestep {
     pub fn alpha(&self) -> f32 {
         self.accumulator / self.step
     }
+
+    /// Seconds banked towards the next tick and not yet run: `alpha × step`.
+    pub fn banked(&self) -> f32 {
+        self.accumulator
+    }
+
+    /// What [`Self::banked`] will be once `frame_dt` is banked, before any
+    /// tick runs: the step cap applied, nothing changed.
+    pub fn banked_after(&self, frame_dt: f32) -> f32 {
+        (self.accumulator + frame_dt).min(self.step * self.max_ticks as f32)
+    }
 }
 
 // --- Falling behind -------------------------------------------------------------

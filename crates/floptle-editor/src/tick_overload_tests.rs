@@ -327,10 +327,18 @@ fn a_new_project_has_the_catch_up_budget_and_an_old_one_does_not() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// What one script logged each pass under `clock`, across a frame long enough
-/// that the step cap drops ticks: `U time dt simTime simDt` from `update`,
+/// The frames [`clock_lines`] plays by default: steady 60 fps around one frame
+/// long enough that the step cap drops ticks.
+fn dropping_frames() -> Vec<f32> {
+    // A quarter-second frame banks fifteen 60 Hz ticks; the step cap runs
+    // eight and drops the rest, which is what the budget and slow motion do.
+    [1.0 / 60.0; 6].into_iter().chain([0.25]).chain([1.0 / 60.0; 4]).collect()
+}
+
+/// What one script logged each pass under `clock` across `frames`:
+/// `U time dt simTime simDt` from `update`, `L` the same from `lateUpdate`,
 /// `F time simTime simDt` from `fixedUpdate`, as numbers.
-fn clock_lines(clock: floptle_scene::ScriptClockDoc) -> Vec<(char, Vec<f64>)> {
+fn clock_lines(clock: floptle_scene::ScriptClockDoc, frames: &[f32]) -> Vec<(char, Vec<f64>)> {
     let dir = std::env::temp_dir().join(format!("floptle_script_clock_{clock:?}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("scripts")).unwrap();
@@ -338,6 +346,9 @@ fn clock_lines(clock: floptle_scene::ScriptClockDoc) -> Vec<(char, Vec<f64>)> {
         dir.join("scripts/clock.lua"),
         "function update(node, dt)\n\
            log(string.format(\"U %.9f %.9f %.9f %.9f\", time, dt, simTime, simDt))\n\
+         end\n\
+         function lateUpdate(node, dt)\n\
+           log(string.format(\"L %.9f %.9f %.9f %.9f\", time, dt, simTime, simDt))\n\
          end\n\
          function fixedUpdate(node, dt)\n\
            log(string.format(\"F %.9f %.9f %.9f\", time, simTime, simDt))\n\
@@ -356,9 +367,7 @@ fn clock_lines(clock: floptle_scene::ScriptClockDoc) -> Vec<(char, Vec<f64>)> {
     );
     ed.toggle_play();
     assert!(ed.playing, "did not enter play");
-    // A quarter-second frame banks fifteen 60 Hz ticks; the step cap runs
-    // eight and drops the rest, which is what the budget and slow motion do.
-    for dt in [1.0 / 60.0; 6].into_iter().chain([0.25]).chain([1.0 / 60.0; 4]) {
+    for &dt in frames {
         ed.play_step(dt, true);
         ed.drain_script_logs();
     }
@@ -370,7 +379,7 @@ fn clock_lines(clock: floptle_scene::ScriptClockDoc) -> Vec<(char, Vec<f64>)> {
         .filter_map(|l| {
             let mut w = l.msg.split_whitespace();
             let kind = w.next()?.chars().next()?;
-            if kind != 'U' && kind != 'F' {
+            if kind != 'U' && kind != 'L' && kind != 'F' {
                 return None;
             }
             Some((kind, w.map(|n| n.parse::<f64>().unwrap()).collect()))
@@ -390,7 +399,7 @@ fn clock_lines(clock: floptle_scene::ScriptClockDoc) -> Vec<(char, Vec<f64>)> {
 fn scripts_read_the_simulation_clock_when_ticks_are_dropped() {
     use floptle_scene::ScriptClockDoc as C;
     let step = 1.0 / 60.0;
-    let frame = clock_lines(C::Frame);
+    let frame = clock_lines(C::Frame, &dropping_frames());
     let fixed: Vec<&Vec<f64>> = frame.iter().filter(|(k, _)| *k == 'F').map(|(_, v)| v).collect();
     let upd: Vec<&Vec<f64>> = frame.iter().filter(|(k, _)| *k == 'U').map(|(_, v)| v).collect();
     assert!(fixed.len() >= 10 && upd.len() >= 10, "too few passes: {} ticks, {} frames", fixed.len(), upd.len());
@@ -405,14 +414,51 @@ fn scripts_read_the_simulation_clock_when_ticks_are_dropped() {
     assert!((summed - u_last[2]).abs() < 1e-6, "update's simDt adds up to {summed}, simTime is {}", u_last[2]);
     assert!(upd.iter().any(|v| (v[1] - 0.25).abs() < 1e-6), "frame-mode dt is not the frame's own: {upd:?}");
 
-    for (k, v) in clock_lines(C::Simulation) {
+    for (k, v) in clock_lines(C::Simulation, &dropping_frames()) {
         match k {
-            'U' => {
+            'U' | 'L' => {
                 assert!((v[0] - v[2]).abs() < 1e-6, "simulation clock: update's time {} is not simTime {}", v[0], v[2]);
                 assert!((v[1] - v[3]).abs() < 1e-6, "simulation clock: update's dt {} is not simDt {}", v[1], v[3]);
             }
             _ => assert!((v[0] - v[1]).abs() < 1e-6, "simulation clock: fixedUpdate's time {} is not simTime {}", v[0], v[1]),
         }
+    }
+}
+
+/// **The simulation clock is smooth in the frame passes at any frame rate.**
+/// At a display rate above the tick rate most frames run no tick. A clock
+/// that counted only ticks would hand `update` a `dt` of 0 on those frames and
+/// a whole step on the rest, and every eased camera, FOV and UI animation
+/// would step at the tick rate. The frame passes read the ticks run plus the
+/// time banked towards the next (the fraction the renderer blends tick states
+/// by), so a steady 144 fps over 60 Hz ticks reads a steady 1/144 s, in
+/// `update` and `lateUpdate` alike, and still does right after a hitch.
+#[test]
+fn the_simulation_clock_is_smooth_above_the_tick_rate() {
+    use floptle_scene::ScriptClockDoc as C;
+    let f = 1.0 / 144.0;
+    let frames: Vec<f32> = [f; 40].into_iter().chain([0.25]).chain([f; 20]).collect();
+    let lines = clock_lines(C::Simulation, &frames);
+    for pass in ['U', 'L'] {
+        let rows: Vec<&Vec<f64>> = lines.iter().filter(|(k, _)| *k == pass).map(|(_, v)| v).collect();
+        assert_eq!(rows.len(), frames.len(), "{pass}: one row a frame");
+        for (i, (v, &dt)) in rows.iter().zip(&frames).enumerate() {
+            if dt == 0.25 {
+                // The step cap drops part of this frame: less than the frame,
+                // never more, never nothing.
+                assert!(v[1] > 0.0 && v[1] <= 0.25 + 1e-6, "{pass} frame {i}: the hitch frame read dt {}", v[1]);
+                continue;
+            }
+            assert!((v[1] - dt as f64).abs() < 1e-5, "{pass} frame {i}: dt {} is not the steady frame's {dt}: {rows:?}", v[1]);
+        }
+        for w in rows.windows(2) {
+            assert!(w[1][2] >= w[0][2], "{pass}: simTime went backwards: {w:?}");
+        }
+    }
+    // The fixed pass still reads whole ticks.
+    let fixed: Vec<&Vec<f64>> = lines.iter().filter(|(k, _)| *k == 'F').map(|(_, v)| v).collect();
+    for w in fixed.windows(2) {
+        assert!((w[1][1] - w[0][1] - 1.0 / 60.0).abs() < 1e-6, "fixedUpdate's simTime is not a step apart: {w:?}");
     }
 }
 

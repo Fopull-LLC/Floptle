@@ -1439,24 +1439,42 @@ impl Editor {
         self.net_server.is_some() || self.net_client.is_some() || self.net_rollback.is_some()
     }
 
-    /// The project's catch-up budget for this session, in milliseconds of
-    /// ticks a frame, or `None` to run every banked tick: off unless the
-    /// project sets one, and off for a networked session, for the same
-    /// reason as [`Self::overload_policy`].
     /// Seconds the simulation has actually advanced this Play: the ticks run
     /// times the step, with nothing the catch-up budget or slow motion dropped.
     pub(crate) fn sim_now(&self) -> f64 {
         self.game_tick_no as f64 * self.game_tick.step as f64
     }
 
+    /// The simulation clock as a frame pass reads it: the ticks run plus the
+    /// time banked towards the next one, the same fraction the renderer blends
+    /// two tick states by. Counting whole ticks alone would hand `update` a
+    /// `dt` of 0 on every frame that ran none, which above the tick rate is
+    /// most of them, and every eased camera would step at the tick rate.
+    /// `update` runs before this frame's time is banked, so it reads the
+    /// clock as it will stand once it is: the moment the frame draws. While
+    /// paused nothing banks, and the clock holds.
+    fn smooth_sim_now(&self, late: bool, frame_dt: f32) -> f64 {
+        let banked = if self.paused || self.sim.is_none() {
+            0.0
+        } else if late {
+            self.game_tick.banked()
+        } else {
+            self.game_tick.banked_after(frame_dt)
+        };
+        self.sim_now() + banked as f64
+    }
+
     /// Set `simTime` and `simDt` for the frame pass (`late` false) or the late
     /// pass, and return the `dt` and `time` that pass hands its scripts: the
     /// frame's own, or the simulation's when the project's script clock says
     /// so. `simDt` is what the simulation advanced since that pass last ran.
+    /// The clock never runs backwards: when the catch-up budget drops time a
+    /// pass already saw banked, it holds until the ticks catch up.
     fn sim_clock_for(&mut self, late: bool, frame_dt: f32, frame_t: f32) -> (f32, f32) {
-        let now = self.sim_now();
+        let seen = if late { self.sim_t_late } else { self.sim_t_update };
+        let now = self.smooth_sim_now(late, frame_dt).max(seen);
         let last = if late { &mut self.sim_t_late } else { &mut self.sim_t_update };
-        let sim_dt = (now - *last).max(0.0);
+        let sim_dt = now - *last;
         *last = now;
         self.script_host.set_sim_clock(now, sim_dt);
         if self.project.script_clock == floptle_scene::ScriptClockDoc::Simulation {
@@ -1466,6 +1484,10 @@ impl Editor {
         }
     }
 
+    /// The project's catch-up budget for this session, in milliseconds of
+    /// ticks a frame, or `None` to run every banked tick: off unless the
+    /// project sets one, and off for a networked session, for the same
+    /// reason as [`Self::overload_policy`].
     pub(crate) fn tick_budget_ms(&self) -> Option<f32> {
         if self.clock_is_shared() {
             return None;

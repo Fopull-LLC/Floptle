@@ -386,8 +386,13 @@ in `project.ron`) picks which one scripts read as `time` and `dt`:
   start on it.
 
 `simTime` and `simDt` read the simulation's clock under either setting. In
-`update` and `lateUpdate`, `simDt` is what the simulation advanced since that
-pass last ran: the frame's ticks times the step, 0 on a frame that ran none.
+`fixedUpdate` it is whole ticks: `simDt` is the step. In `update` and
+`lateUpdate` it is smooth: the ticks run plus the time banked towards the next
+one, the same fraction the renderer blends tick states by. So above the tick
+rate (144 fps over 60 Hz ticks) `dt` is a steady 1/144 s every frame, never 0
+on the frames that ran no tick, and an eased camera or a UI animation driven
+from it is as smooth as on the frame clock. The two clocks only part when
+ticks are dropped.
 
 A networked session ignores both and always catches up, because its clock is
 shared with the other machines and running slow would desync it.

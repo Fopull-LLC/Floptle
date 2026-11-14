@@ -501,14 +501,15 @@ time = 0.0
 ---@type number
 dt = 0.0
 
----Seconds the simulation has actually advanced: fixed ticks run times the
----step. Equals `time` until the catch-up budget or slow motion drops ticks;
----then `time` keeps the frame and `simTime` keeps the physics.
+---Seconds the simulation has actually advanced: whole ticks in fixedUpdate;
+---in update and lateUpdate, plus the time banked towards the next tick, so it
+---moves smoothly every frame. Equals `time` until the catch-up budget or slow
+---motion drops ticks; then `time` keeps the frame and `simTime` the physics.
 ---@type number
 simTime = 0.0
 
----Simulation seconds since this pass last ran: the step in fixedUpdate, the
----ticks this frame ran in update and lateUpdate (0 on a frame that ran none).
+---Simulation seconds since this pass last ran: the step in fixedUpdate; in
+---update and lateUpdate the smooth clock's advance, never 0 while it runs.
 ---@type number
 simDt = 0.0
 
