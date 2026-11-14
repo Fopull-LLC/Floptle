@@ -654,6 +654,23 @@ is dropped rather than left hanging in the air over a canyon.
 **Digging the ground out from under one re-settles it**, because placement was
 never remembered in the first place.
 
+A prop keeps the height it settled at, so what it may land on matters:
+`settleOn` says. `"static"`, the default, lands on terrain and on anything that
+stays put (a building, a floor, a static body) and drops through anything a
+body moves or that has moved since play began: a parked rover, a lift, the
+player, a crate a script carried. `"terrain"` drops through everything but
+terrain, roofs included. `"all"` lands on the first collider of any kind, as
+every prop did before the choice existed. When a game knows the ground under
+some props has changed, `scatter.resettle(id, instanceId)` or
+`scatter.resettle(id, point, radius)` drops them again where they stand: same
+id, same roll, no remove and restore. A static piece that moves for the first
+time re-drops the props round where it stood by itself.
+
+```lua
+scatter.create{ asset = "rock.glb", settleOn = "terrain", ... }
+scatter.resettle(rocks, pad.pos, 12)     -- the ship took off: drop what was on it
+```
+
 LOD bands **cross-dissolve** rather than switching — the pop at a band boundary
 is the thing everyone notices about scatter and nothing else about it. The last
 band dissolves out the same way over the source's `fade` distance before its
@@ -765,6 +782,7 @@ end
 | `scatter.near(id, point, radius)` | instances around a point, nearest first: `{id, distance, pos, scale, param, up, yaw}` |
 | `scatter.remove(id, instanceId)` | remove one, permanently |
 | `scatter.restore(id [, instanceId])` | put one back, or all of them (regrowth) |
+| `scatter.resettle(id, instanceId)` / `scatter.resettle(id, point, radius)` | drop props onto the ground again where they stand, keeping their ids |
 | `scatter.removed(id)` | the ids this source has lost — **this** is what you save |
 | `scatter.cost(id)` | what it asks for per frame: `{chunks, props, far, chunkSize, perChunk}` |
 | `scatter.destroy(id)` | drop the whole source |

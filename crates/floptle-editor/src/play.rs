@@ -530,10 +530,18 @@ impl Editor {
             return;
         }
         let Some(mut sim) = self.sim.take() else { return };
+        // Where pieces stood the first time they moved: a scatter prop that
+        // settled on one is standing on nothing now (see `vacated_by`).
+        let mut vacated: Vec<(floptle_core::math::DVec3, f64)> = Vec::new();
         for (eid, change) in changes {
+            if !matches!(change, Change::Gone) && self.moved_statics.insert(eid) {
+                vacated.extend(vacated_by(&sim, eid));
+            }
             match change {
                 Change::Gone => {
                     self.static_baked.borrow_mut().remove(&eid);
+                    // The index may name a different node next.
+                    self.moved_statics.remove(&eid);
                 }
                 Change::Moved(delta) => {
                     sim.shift_statics_of(eid, delta);
@@ -555,6 +563,27 @@ impl Editor {
             }
         }
         self.sim = Some(sim);
+        if !vacated.is_empty() {
+            let sources: Vec<floptle_core::scatter::ScatterSource> = self.script_host.scatter_sources().clone();
+            for (p, r) in vacated {
+                self.scatter_cache.invalidate_near(&sources, p, r);
+                self.scatter_side.invalidate_near(&sources, p, r);
+            }
+        }
+    }
+
+    /// Drop the scatter props scripts asked to be dropped again
+    /// (`scatter.resettle`), in every view's cache.
+    pub(crate) fn apply_scatter_resettles(&mut self) {
+        let asks = self.script_host.take_scatter_resettles();
+        if asks.is_empty() {
+            return;
+        }
+        let sources = self.script_host.scatter_sources();
+        for (source, what) in asks {
+            self.scatter_cache.resettle(&sources, source, what);
+            self.scatter_side.resettle(&sources, source, what);
+        }
     }
 
     /// Rebuild the colliders of any tilemap whose cells changed while playing
@@ -1026,6 +1055,8 @@ impl Editor {
         // across sessions.
         self.stop_recording();
         self.script_host.clear_anim_state();
+        // A piece moved in the last run stands where the scene put it again.
+        self.moved_statics.clear();
         // Marks belong to the run that laid them.
         self.script_host.clear_decals();
         self.sync_decals();
@@ -1543,6 +1574,7 @@ impl Editor {
         self.script_host.clear_scatter();
         self.scatter_cache.clear();
         self.scatter_side.clear();
+        self.moved_statics.clear();
         // …and so does a wind: the bodies it blew on are going too.
         self.script_host.clear_weather();
         // …and a lake a script declared lay on ground that is going.
@@ -2657,6 +2689,23 @@ mod static_follow_tests {
         ed.follow_static_colliders();
         assert!(ed.static_baked.borrow().is_empty(), "a deleted node's record was kept");
     }
+}
+
+/// The world sphere round node `eid`'s colliders as they stand, as
+/// `(centre, radius)`: where a prop that settled on the piece would be
+/// standing. `None` when the node has no collider with a size.
+fn vacated_by(sim: &floptle_physics::Sim, eid: u32) -> Option<(floptle_core::math::DVec3, f64)> {
+    let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+    for c in sim.world.colliders.iter().filter(|c| c.eid == Some(eid)) {
+        let (a, b) = match (c.aabb(), c.bounds()) {
+            (Some(bx), _) => bx,
+            (None, Some((m, r))) => (m - Vec3::splat(r), m + Vec3::splat(r)),
+            (None, None) => continue,
+        };
+        lo = lo.min(a);
+        hi = hi.max(b);
+    }
+    (lo.x <= hi.x).then(|| (sim.world.origin + ((lo + hi) * 0.5).as_dvec3(), f64::from((hi - lo).length() * 0.5)))
 }
 
 /// Where a static collider was baked: the world pose it was built at.

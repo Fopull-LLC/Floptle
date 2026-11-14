@@ -1144,6 +1144,7 @@ impl Editor {
                 &self.scatter_protos,
                 &self.scatter_proto_radius,
                 if opts.scatter_main { &mut self.scatter_cache } else { &mut self.scatter_side },
+                &self.moved_statics,
                 opts.scatter_main,
                 cam.world_position,
                 &off_frustum,

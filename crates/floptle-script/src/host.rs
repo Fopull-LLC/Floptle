@@ -3038,6 +3038,7 @@ impl ScriptHost {
         let scatter_owners = crate::scatter_api::Owners::default();
         let scatter_settled = crate::scatter_api::Settled::default();
         let scatter_interactors = crate::scatter_api::Interactors::default();
+        let scatter_resettles = crate::scatter_api::Resettles::default();
         // The scripts' copy of the scene, made here rather than with the rest
         // of the handle layer below: a source that rides a node reads where
         // that node stands the moment it is created.
@@ -3051,6 +3052,7 @@ impl ScriptHost {
             scene_mirror.clone(),
             scatter_settled.clone(),
             scatter_interactors.clone(),
+            scatter_resettles.clone(),
         );
 
         // `weather.*` — the wind every system is moved by.
@@ -3650,6 +3652,7 @@ impl ScriptHost {
             scatter_owners,
             scatter_settled,
             scatter_interactors,
+            scatter_resettles,
             scatter_next_id,
             weather,
             scene_name,
@@ -4173,6 +4176,12 @@ impl ScriptHost {
         self.scatter_interactors.borrow().values().flatten().copied().collect()
     }
 
+    /// The props scripts asked to be dropped onto the ground again since the
+    /// last call (`scatter.resettle`), by source id.
+    pub fn take_scatter_resettles(&self) -> Vec<(u32, floptle_core::scatter::Resettle)> {
+        std::mem::take(&mut *self.scatter_resettles.borrow_mut())
+    }
+
     /// Every source that rides a node, as `(id, node name)`.
     pub fn anchored_scatter(&self) -> Vec<(u32, String)> {
         self.scatter_sources
@@ -4189,6 +4198,7 @@ impl ScriptHost {
         self.scatter_owners.borrow_mut().clear();
         self.scatter_settled.borrow_mut().clear();
         self.scatter_interactors.borrow_mut().clear();
+        self.scatter_resettles.borrow_mut().clear();
     }
 
     /// Every wind scripts have declared — what particles and props read.

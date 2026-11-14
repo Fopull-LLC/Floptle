@@ -837,6 +837,7 @@ impl Editor {
         self.land_spawns_on_moving_worlds();
         self.follow_static_colliders();
         self.follow_tile_colliders();
+        self.apply_scatter_resettles();
         // Water is rebuilt every frame for the same reason gravity is:
         // a WaterVolume spawned, moved, resized,
         // disabled or destroyed while the game is running must be in

@@ -43,6 +43,60 @@ pub enum Align {
     Surface,
 }
 
+/// Which props a game asked to be dropped onto the ground again
+/// (`scatter.resettle`), in place: the same id and the same roll, landing on
+/// whatever is under them now.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Resettle {
+    /// One prop, by id.
+    Id(InstanceId),
+    /// Every prop standing within `radius` of `center`, a world point.
+    Near { center: DVec3, radius: f64 },
+}
+
+/// What a prop may come to rest on when it is dropped onto the ground.
+///
+/// A prop keeps the height it settled at until its chunk is forgotten, so
+/// landing on something that later leaves (a parked rover, a ship coming in
+/// to land, a player standing there) leaves the prop hanging in the air
+/// where that thing was.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SettleOn {
+    /// Terrain only: a prop drops through every other collider, buildings
+    /// and floors included, to the terrain below.
+    Terrain,
+    /// Ground that stays put: terrain, and the colliders of nodes that do
+    /// not move. A collider on a node that is, or rides, a dynamic or
+    /// kinematic body (a vehicle, an assembly, a character), or that has
+    /// been moved since play began, is passed through. The default.
+    #[default]
+    Static,
+    /// The first collider of any kind, moving or not: how every prop
+    /// settled before the choice existed.
+    All,
+}
+
+impl SettleOn {
+    /// The name a script uses for it.
+    pub fn name(self) -> &'static str {
+        match self {
+            SettleOn::Terrain => "terrain",
+            SettleOn::Static => "static",
+            SettleOn::All => "all",
+        }
+    }
+
+    /// The setting a script's name means, if it names one.
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s {
+            "terrain" => Some(SettleOn::Terrain),
+            "static" => Some(SettleOn::Static),
+            "all" => Some(SettleOn::All),
+            _ => None,
+        }
+    }
+}
+
 /// One drawable form of a prop, and the distance it is used out to.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Band {
@@ -249,6 +303,8 @@ pub struct ScatterSource {
     /// settles nothing more, and draws what it already had, fading, until the
     /// host takes it away when the time runs out. `None` for a live source.
     pub dying: Option<(f32, f32)>,
+    /// What its props may come to rest on (see [`SettleOn`]).
+    pub settle_on: SettleOn,
 }
 
 /// One prop's look on top of its source's (`scatter.setTint`).
@@ -803,6 +859,7 @@ mod tests {
             shadow_fade: 0.0,
             leaving: HashMap::new(),
             dying: None,
+            settle_on: SettleOn::default(),
             marks: Default::default(),
         }
     }

@@ -225,6 +225,7 @@ fn field(far: f32) -> ScatterSource {
         shadow_fade: 0.0,
         leaving: Default::default(),
         dying: None,
+        settle_on: Default::default(),
         marks: Default::default(),
     }
 }
