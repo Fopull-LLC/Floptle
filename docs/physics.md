@@ -104,6 +104,10 @@ Turning or not, a box, polygon or mesh body starts at its node's full
 rotation, scale and pivot, so it collides exactly where it is drawn. One that
 does not turn keeps that angle.
 
+In water, **rotates** has no say in whether a box or a mesh body floats. It
+displaces the same water turning or not, so a crate of a given size and mass
+sits at one draft either way.
+
 ### Sizes that do not scale with the node
 
 Every body, collider, joint and gravity-volume size is in its node's space

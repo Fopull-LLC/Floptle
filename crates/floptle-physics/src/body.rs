@@ -500,13 +500,38 @@ impl Body {
         self.pos = com - self.orient * self.com_local();
     }
 
-    /// The radius of a sphere enclosing this body — what displaces water when
-    /// the shape has no radius of its own (a box).
     /// In the simulation: neither frozen by networking nor switched off.
     pub fn live(&self) -> bool {
         self.active && !self.off
     }
 
+    /// The sphere that stands in for this body in water: where it is and its
+    /// radius. Buoyancy and drag are those of this sphere.
+    ///
+    /// A body that rotates is its bounding sphere at its centre of mass. A
+    /// box or a mesh's hull that does not rotate is that same sphere, so a
+    /// crate floats at one draft whether or not it is allowed to tumble. A
+    /// polygon that does not rotate is its bounding sphere at its node. A
+    /// sphere or a capsule that does not rotate is its own radius at its
+    /// centre: a capsule held upright is a character, and floats as the ball
+    /// of its body, not of its height.
+    ///
+    /// Never the radius of `sample_centers`. That one is the skin a corner
+    /// carries for collision, two centimetres at most, and a box sized by it
+    /// displaced a few grams of water and sank like a stone.
+    pub(crate) fn water_sphere(&self) -> (Vec3, f32) {
+        if self.rotates {
+            return (self.com(), self.bounding_radius());
+        }
+        match self.shape {
+            BodyShape::Sphere | BodyShape::Capsule { .. } if self.radius > 0.0 => (self.pos, self.radius),
+            BodyShape::Hull(_) => (self.com(), self.bounding_radius()),
+            _ => (self.pos, self.bounding_radius()),
+        }
+    }
+
+    /// The radius of a sphere enclosing this body — what displaces water when
+    /// the shape has no radius of its own (a box).
     pub(crate) fn bounding_radius(&self) -> f32 {
         match self.shape {
             BodyShape::Sphere => self.radius,

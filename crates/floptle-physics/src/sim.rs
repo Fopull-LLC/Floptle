@@ -2369,9 +2369,8 @@ impl Sim {
         let mut out = Vec::new();
         for link in &self.map {
             let b = &self.world.bodies[link.body];
-            let (_, _, r) = b.sample_centers();
-            let r = if r > 0.0 { r } else { b.bounding_radius() };
-            if let Some((v, d, ratio)) = crate::water::density_ratio(&self.world.water, b.pos, r, b.mass) {
+            let (p, r) = b.water_sphere();
+            if let Some((v, d, ratio)) = crate::water::density_ratio(&self.world.water, p, r, b.mass) {
                 out.push((link.entity, v, d, b.mass, ratio));
             }
         }
