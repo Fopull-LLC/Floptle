@@ -1288,6 +1288,35 @@ pub struct Light {
     /// covers the same ground at any size, so a bigger map is crisper and a
     /// smaller one is cheaper: a settings screen's "shadow quality".
     pub shadow_map_size: u32,
+    /// The shadow map's near cascade, in world units: a second map of the
+    /// same size drawn over this much ground around the camera, so a
+    /// character near it keeps the detail a short shadow reach would give
+    /// while the main map still reaches `shadow_distance`. One map's texel
+    /// is `shadow_distance` × 1.7 / `shadow_map_size`; at a few hundred
+    /// metres that is wider than a hand, and a person-sized caster gets two
+    /// or three texels and a blotchy self-shadow. 0 = one map, as before.
+    ///
+    /// Drawn only past a long reach (see
+    /// [`SHADOW_NEAR_FROM_DISTANCE`](Self::SHADOW_NEAR_FROM_DISTANCE)), so a
+    /// scene whose single map was already fine looks and costs what it did,
+    /// unless [`shadow_near_always`](Self::shadow_near_always) says
+    /// otherwise. It costs one more depth pass, over the casters inside its
+    /// box.
+    pub shadow_near_distance: f32,
+    /// Draw the near cascade whenever `shadow_near_distance` is set and
+    /// shorter than half the shadow reach, not only past
+    /// [`SHADOW_NEAR_FROM_DISTANCE`](Self::SHADOW_NEAR_FROM_DISTANCE).
+    pub shadow_near_always: bool,
+    /// How far a lit point is pushed along its normal before it looks the
+    /// shadow map up, in the map's texels (default 1.5). More stops a surface
+    /// shadowing itself in stripes (acne); too much lifts a shadow off the
+    /// foot that casts it (peter-panning). Each cascade scales it by its own
+    /// texel.
+    pub shadow_normal_offset: f32,
+    /// How much nearer the sun a point's depth is taken before it is compared
+    /// with the map, in the map's texels (default 2). The same trade as
+    /// `shadow_normal_offset`, along the sun rather than the normal.
+    pub shadow_depth_bias: f32,
     /// Contact shadows: a short screen-space trace that catches what the marched
     /// field cannot. A dynamic mesh casts through a collider proxy — a box or a
     /// capsule — so a character's shadow is a capsule's, and the place that reads
@@ -1469,6 +1498,18 @@ impl Light {
     /// next. Past four, a scene wants a renderer that sorts glass per fragment,
     /// which is a different technique rather than a bigger number.
     pub const MAX_REFRACTION_LAYERS: u32 = 4;
+
+    /// The near cascade's reach a scene gets unless it says otherwise
+    /// ([`shadow_near_distance`](Self::shadow_near_distance)).
+    pub const SHADOW_NEAR_DISTANCE: f32 = 40.0;
+
+    /// The shadow reach past which the near cascade is drawn. The default
+    /// 150 m stays one map, as it always was, at any map size; a game that
+    /// stretches its reach past this gets the near detail. By reach rather
+    /// than by texel: a small map is a choice of soft, cheap shadows (a
+    /// settings screen's "low"), and drawing a second map for it would make
+    /// "low" both sharper and dearer.
+    pub const SHADOW_NEAR_FROM_DISTANCE: f32 = 160.0;
 }
 
 impl Default for Light {
@@ -1492,6 +1533,10 @@ impl Default for Light {
             shadow_steps: 64,
             shadow_map: false,
             shadow_map_size: 2048,
+            shadow_near_distance: Self::SHADOW_NEAR_DISTANCE,
+            shadow_near_always: false,
+            shadow_normal_offset: 1.5,
+            shadow_depth_bias: 2.0,
             contact_shadows: false,
             contact_length: 0.35,
             contact_steps: 12,

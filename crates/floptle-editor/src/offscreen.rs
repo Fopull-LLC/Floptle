@@ -603,18 +603,15 @@ impl Editor {
             Some(reach) => Light { shadow_distance: light_node.shadow_distance.min(reach), ..light_node },
             None => light_node,
         };
-        let (sun_vp, sun_map, sun_extra) = crate::shading::sun_map_lanes(
+        let sun_lanes = crate::shading::sun_map_lanes(
             &map_light,
             sun,
             (star_meta[0] >= 1.0).then_some(star_pos[0]),
             view_proj,
             cam.world_position,
         );
-        let globals = Globals {
+        let mut globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
-            sun_vp,
-            sun_map,
-            sun_extra,
             time: { let w = self.sway_wind(cam.world_position); [elapsed, w.x, w.y, w.z] },
             light_dir: sun,
             light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
@@ -628,7 +625,9 @@ impl Editor {
             // Meshed terrain reads its triplanar scale here; every per-slot
             // setting is in the slot store (`Editor::terrain_slot_store`).
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
+            ..Globals::default()
         };
+        sun_lanes.apply(&mut globals);
 
         // Camera-relative instances + blobs, exactly like the main gather —
         // including the frustum cull, built from this camera's matrix.
@@ -1489,7 +1488,7 @@ impl Editor {
             // prepass reads it for its shafts.
             headless_mark!("sun shadow map");
             let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
-            if raster.set_sun_map_size(gpu, light_node.shadow_map_size) {
+            if raster.set_sun_map_layout(gpu, light_node.shadow_map_size, globals.sun_near[0] > 0.5) {
                 raymarch.set_sun_map(gpu, Some(raster.sun_map_view()));
             }
             raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);

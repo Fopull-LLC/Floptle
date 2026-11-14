@@ -764,7 +764,7 @@ impl Editor {
                 // the prepass reads it for its shafts.
                 gpu_mark!("sun shadow map");
                 let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
-                if raster.set_sun_map_size(gpu, sun_map_size) {
+                if raster.set_sun_map_layout(gpu, sun_map_size, globals.sun_near[0] > 0.5) {
                     raymarch.set_sun_map(gpu, Some(raster.sun_map_view()));
                 }
                 raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);

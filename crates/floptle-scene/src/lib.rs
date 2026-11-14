@@ -2946,6 +2946,20 @@ pub struct LightDoc {
     /// and not written, by default.
     #[serde(default = "default_shadow_map_size", skip_serializing_if = "is_default_shadow_map_size")]
     pub shadow_map_size: u32,
+    /// The shadow map's near cascade (see `Light::shadow_near_distance`);
+    /// `Light::SHADOW_NEAR_DISTANCE`, and not written, by default. It draws
+    /// only past a 160 m reach, so a scene from before whose map was
+    /// fine renders as it did.
+    #[serde(default = "default_shadow_near_distance", skip_serializing_if = "is_default_shadow_near_distance")]
+    pub shadow_near_distance: f32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shadow_near_always: bool,
+    /// The shadow map's normal offset and depth bias, in its texels (see
+    /// `Light::shadow_normal_offset`); 1.5 and 2, and not written, by default.
+    #[serde(default = "default_shadow_normal_offset", skip_serializing_if = "is_default_shadow_normal_offset")]
+    pub shadow_normal_offset: f32,
+    #[serde(default = "default_shadow_depth_bias", skip_serializing_if = "is_default_shadow_depth_bias")]
+    pub shadow_depth_bias: f32,
     /// Contact shadows default off: they cost a screen-space trace per lit
     /// fragment, and a scene that never asked for them should not start paying.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -3077,6 +3091,24 @@ fn default_shadow_map_size() -> u32 {
 fn is_default_shadow_map_size(n: &u32) -> bool {
     *n == 2048
 }
+fn default_shadow_near_distance() -> f32 {
+    Light::SHADOW_NEAR_DISTANCE
+}
+fn is_default_shadow_near_distance(v: &f32) -> bool {
+    *v == Light::SHADOW_NEAR_DISTANCE
+}
+fn default_shadow_normal_offset() -> f32 {
+    1.5
+}
+fn is_default_shadow_normal_offset(v: &f32) -> bool {
+    *v == 1.5
+}
+fn default_shadow_depth_bias() -> f32 {
+    2.0
+}
+fn is_default_shadow_depth_bias(v: &f32) -> bool {
+    *v == 2.0
+}
 fn default_fog_sky() -> f32 {
     1.0
 }
@@ -3168,6 +3200,10 @@ impl From<&Light> for LightDoc {
             shadow_steps: l.shadow_steps,
             shadow_map: l.shadow_map,
             shadow_map_size: l.shadow_map_size,
+            shadow_near_distance: l.shadow_near_distance,
+            shadow_near_always: l.shadow_near_always,
+            shadow_normal_offset: l.shadow_normal_offset,
+            shadow_depth_bias: l.shadow_depth_bias,
             contact_shadows: l.contact_shadows,
             contact_length: l.contact_length,
             contact_steps: l.contact_steps,
@@ -3227,6 +3263,10 @@ impl LightDoc {
             shadow_steps: self.shadow_steps.clamp(8, 64),
             shadow_map: self.shadow_map,
             shadow_map_size: self.shadow_map_size.clamp(512, 4096).next_power_of_two(),
+            shadow_near_distance: self.shadow_near_distance.clamp(0.0, 400.0),
+            shadow_near_always: self.shadow_near_always,
+            shadow_normal_offset: self.shadow_normal_offset.clamp(0.0, 16.0),
+            shadow_depth_bias: self.shadow_depth_bias.clamp(0.0, 16.0),
             contact_shadows: self.contact_shadows,
             contact_length: self.contact_length.clamp(0.01, 20.0),
             contact_steps: self.contact_steps.clamp(2, 32),
@@ -7009,6 +7049,45 @@ mod tests {
             let doc: LightDoc = ron::from_str(&format!("(direction: (0, 1, 0), shadow_map_size: {asked})")).unwrap();
             assert_eq!(doc.to_light().shadow_map_size, got, "asked {asked}");
         }
+    }
+
+    /// The near cascade and the map's two bias knobs: kept when set, not
+    /// written at their defaults (so a scene nobody touched writes no new
+    /// keys), read as those defaults from a scene saved before them, and
+    /// fenced to what the renderer can use.
+    #[test]
+    fn the_shadow_near_cascade_and_bias_knobs_round_trip() {
+        let set = Light {
+            shadow_near_distance: 24.0,
+            shadow_near_always: true,
+            shadow_normal_offset: 0.75,
+            shadow_depth_bias: 3.5,
+            ..Light::default()
+        };
+        let ron = ron::to_string(&LightDoc::from(&set)).unwrap();
+        for key in ["shadow_near_distance:24.0", "shadow_near_always:true", "shadow_normal_offset:0.75", "shadow_depth_bias:3.5"] {
+            assert!(ron.contains(key), "{key} missing from {ron}");
+        }
+        let back = ron::from_str::<LightDoc>(&ron).unwrap().to_light();
+        assert_eq!(
+            (back.shadow_near_distance, back.shadow_near_always, back.shadow_normal_offset, back.shadow_depth_bias),
+            (24.0, true, 0.75, 3.5)
+        );
+        let plain = ron::to_string(&LightDoc::from(&Light::default())).unwrap();
+        for key in ["shadow_near", "shadow_normal_offset", "shadow_depth_bias"] {
+            assert!(!plain.contains(key), "the default {key} is written: {plain}");
+        }
+        let old = ron::from_str::<LightDoc>("(direction: (0, 1, 0), shadow_map: true, shadow_distance: 364)").unwrap().to_light();
+        let d = Light::default();
+        assert_eq!(
+            (old.shadow_near_distance, old.shadow_near_always, old.shadow_normal_offset, old.shadow_depth_bias),
+            (d.shadow_near_distance, false, 1.5, 2.0),
+            "a scene from before reads the defaults"
+        );
+        let wild = ron::from_str::<LightDoc>("(direction: (0, 1, 0), shadow_near_distance: -5, shadow_normal_offset: 99, shadow_depth_bias: -1)")
+            .unwrap()
+            .to_light();
+        assert_eq!((wild.shadow_near_distance, wild.shadow_normal_offset, wild.shadow_depth_bias), (0.0, 16.0, 0.0));
     }
 
     #[test]

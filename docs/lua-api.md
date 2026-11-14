@@ -42,7 +42,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 10
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
-- [components — getcomponent](#components--getcomponent) — 125
+- [components — getcomponent](#components--getcomponent) — 129
 - [animation — node:animator](#animation--nodeanimator) — 33
 - [particles — effects from script](#particles--effects-from-script) — 16
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 42
@@ -4255,6 +4255,10 @@ Stars mode (1/0; assign true/false): hold the sun. The brightest star lights fro
 
 With keyOverride (1/0; assign true/false): the held star shines with colorR/G/B × intensity instead of its own colour (strength caps at 4, as a star's does).
 
+### `env.shadowDepthBias`
+
+How much nearer the sun a point's depth is taken before it is compared with the shadow map, in the map's texels (read/write, 0..16, default 2). The same trade as shadowNormalOffset, along the sun instead of the normal.
+
 ### `env.shadowDistance`
 
 Max world distance a shadow ray marches before giving up; far geometry stops casting past it.
@@ -4270,6 +4274,18 @@ Sun shadows from a shadow map instead of the field march (read/write, true/false
 ### `env.shadowMapSize`
 
 The sun shadow map's edge in texels (read/write): 512, 1024, 2048 (the default) or 4096; anything else rounds up to the next of those. The map covers the same ground around the camera at any size, so a bigger map draws crisper shadow edges and a smaller one is cheaper: a settings screen's shadow quality. Changing it makes the map again on the next frame. Only matters with env.shadowMap on. The map's own pass is a depth render of the drawn scene from the sun, so its cost grows with the texels it fills: about a quarter at 1024 and four times at 4096 of what 2048 costs, and the lighting's lookups cost the same at any size.
+
+### `env.shadowNearAlways`
+
+Draw the shadow map's near cascade (shadowNearDistance) at any shadowDistance where it fits, not only past 160 m (read/write, 1/0; assign true/false). Off by default.
+
+### `env.shadowNearDistance`
+
+The shadow map's near cascade, in world units (read/write; default 40, 0 = one map). One shadow map's texel is shadowDistance × 1.7 / shadowMapSize: at a few hundred metres that is wider than a hand, and a person-sized caster gets two or three texels and a blotchy self-shadow. The near cascade is a second map of the same size over this much ground around the camera, so a character near it keeps the detail a short shadow reach gives while the main map still reaches shadowDistance; across a band at its edge it hands over to the main map, so the change has no line. Drawn only past a shadowDistance of 160 m, at any shadowMapSize, and when it is under half of shadowDistance, so a scene whose one map was already fine (the default 150 m included) looks and costs what it did; a small map stays the soft, cheap choice it was. shadowNearAlways draws it whenever it fits. Costs one more depth pass, over the casters inside its box. Only matters with env.shadowMap on.
+
+### `env.shadowNormalOffset`
+
+How far a lit point is moved along its normal before it looks the shadow map up, in the map's texels (read/write, 0..16, default 1.5). Each cascade scales it by its own texel. More stops a surface shadowing itself in stripes (acne); too much lifts a shadow off the foot that casts it (peter-panning). A game at an unusual scale tunes this and shadowDepthBias for its own.
 
 ### `env.shadowQuantize`
 

@@ -127,6 +127,20 @@ pub struct Globals {
     pub sun_extra: [f32; 4],
     /// x = scene time in seconds, for a `.flsl` that moves its vertices.
     pub time: [f32; 4],
+    /// The near cascade's matrix: a second, smaller sun map
+    /// ([`sun_shadow_matrix`] at the near distance) drawn beside the first in
+    /// the same texture, so a small caster near the camera keeps its detail
+    /// while the far map reaches the whole shadow distance. Only read when
+    /// `sun_near.x` is set.
+    pub sun_near_vp: [[f32; 4]; 4],
+    /// The near cascade, laid out like `sun_map`: x = on, y = filter radius
+    /// in texels, z = normal offset (world units), w = one of its texels in uv.
+    pub sun_near: [f32; 4],
+    /// x = the near cascade's depth bias, y = the band (in its uv) over which
+    /// it hands over to the far map at its edge, z = the far map's share of
+    /// the texture's width: 0.5 when the texture holds both cascades, which
+    /// the raster fills in itself (0 reads as the whole width).
+    pub sun_near_extra: [f32; 4],
 }
 
 impl Default for Globals {
@@ -148,6 +162,9 @@ impl Default for Globals {
             sun_map: [0.0; 4],
             sun_extra: [0.0; 4],
             time: [0.0; 4],
+            sun_near_vp: [[0.0; 4]; 4],
+            sun_near: [0.0; 4],
+            sun_near_extra: [0.0; 4],
         }
     }
 }
@@ -162,11 +179,13 @@ pub fn sun_map_size_for(asked: u32) -> u32 {
     asked.clamp(512, 4096).next_power_of_two()
 }
 
-/// The sun shadow map's depth texture, `size` texels square.
-fn sun_depth_texture(device: &wgpu::Device, label: &str, size: u32) -> wgpu::Texture {
+/// The sun shadow map's depth texture, `size` texels high and `cascades`
+/// maps of that size wide: the near cascade sits to the right of the far map
+/// in the same texture, so the lighting still binds one texture.
+fn sun_depth_texture(device: &wgpu::Device, label: &str, size: u32, cascades: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d { width: size * cascades.max(1), height: size, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -440,6 +459,13 @@ fn new_fine_buffer(device: &wgpu::Device, words: usize) -> wgpu::Buffer {
         mapped_at_creation: false,
     })
 }
+
+/// The opaque depth draws of one pass: plain buckets, skinned buckets, and
+/// the buckets of shaders that move their vertices.
+type DepthBuckets = (Vec<(usize, Option<u32>, u32, u32)>, Vec<(usize, Option<u32>, u32, u32)>, Vec<FlslBucket>);
+
+/// One opaque draw a depth pass is offered: mesh, texture, instance.
+type DepthDraw = (MeshId, Option<TexId>, InstanceRaw);
 
 /// Build the group(0) bind group over the frame globals, the two paint stores,
 /// the terrain palette and the three skinning stores. A free function so
@@ -1044,10 +1070,18 @@ pub struct Raster {
     /// The same, with the 1×1 stand-in where the sun map goes: for the pass
     /// that draws the sun map.
     globals_bind_sunpass: wgpu::BindGroup,
+    /// The near cascade's pass's own globals (its view from the sun) and the
+    /// stand-in group over them, so both cascades record into one submit.
+    sun_near_globals_buf: wgpu::Buffer,
+    globals_bind_sunpass_near: wgpu::BindGroup,
     _sun_map: wgpu::Texture,
     sun_map_view: wgpu::TextureView,
     /// The sun map's edge in texels.
     sun_map_size: u32,
+    /// Whether the sun map's texture is two maps wide, the far map on the
+    /// left and the near cascade on the right
+    /// ([`set_sun_map_layout`](Raster::set_sun_map_layout)).
+    sun_map_wide: bool,
     _sun_stub: wgpu::Texture,
     sun_stub_view: wgpu::TextureView,
     sun_samp: wgpu::Sampler,
@@ -1191,6 +1225,8 @@ pub struct Raster {
     /// The last sun shadow map's opaque instances: how many it drew, and how
     /// many it was given ([`sun_map_draws`](Raster::sun_map_draws)).
     sun_map_casts: (usize, usize),
+    /// The same for the near cascade's pass, (0, 0) when it did not run.
+    sun_near_casts: (usize, usize),
     /// Leave out of the sun map what lies outside its box (the default).
     sun_map_cull: bool,
     /// Every model picture on the GPU, by its pixels, so a picture is put
@@ -1861,7 +1897,7 @@ impl Raster {
         // The sun shadow map, its comparison sampler, and a 1×1 stand-in for
         // the pass that draws into it (a texture cannot be sampled and drawn to
         // in one pass).
-        let depth_tex = |label: &str, size: u32| sun_depth_texture(device, label, size);
+        let depth_tex = |label: &str, size: u32| sun_depth_texture(device, label, size, 1);
         let sun_map = depth_tex("raster-sun-map", SUN_MAP_SIZE);
         let sun_map_view = sun_map.create_view(&wgpu::TextureViewDescriptor::default());
         let sun_stub = depth_tex("raster-sun-map-stub", 1);
@@ -2042,6 +2078,31 @@ impl Raster {
             &sun_samp,
             &fine_buf,
         );
+        let sun_near_globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster-globals-sun-near"),
+            size: std::mem::size_of::<Globals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let globals_bind_sunpass_near = make_globals_bind(
+            device,
+            &globals_layout,
+            &sun_near_globals_buf,
+            &vpaint_buf,
+            &tpaint_buf,
+            &terrain_pal_view,
+            &terrain_samp,
+            &terrain_samp_nearest,
+            &terrain_slots,
+            &skin_joints_buf,
+            &skin_weights_buf,
+            &skin_palette_buf,
+            &skin_meta_buf,
+            &mat_ext_buf,
+            &sun_stub_view,
+            &sun_samp,
+            &fine_buf,
+        );
 
         // 1×1 white default for meshes registered without a texture (the tint then
         // shows through unchanged).
@@ -2185,8 +2246,11 @@ impl Raster {
             use_primed_pipeline: true,
             globals_bind,
             globals_bind_sunpass,
+            sun_near_globals_buf,
+            globals_bind_sunpass_near,
             _sun_map: sun_map,
             sun_map_size: SUN_MAP_SIZE,
+            sun_map_wide: false,
             sun_map_view,
             _sun_stub: sun_stub,
             sun_stub_view,
@@ -2240,6 +2304,7 @@ impl Raster {
             instance_cap,
             meshes: Vec::new(),
             sun_map_casts: (0, 0),
+            sun_near_casts: (0, 0),
             sun_map_cull: true,
             mesh_textures: HashMap::new(),
             texture_drop: 0,
@@ -3476,16 +3541,54 @@ impl Raster {
     /// whether it was, so the fog pass can be handed the new one
     /// (`Raymarch::set_sun_map`).
     pub fn set_sun_map_size(&mut self, gpu: &Gpu, size: u32) -> bool {
+        self.set_sun_map_layout(gpu, size, false)
+    }
+
+    /// [`Self::set_sun_map_size`], and room for the near cascade beside the
+    /// far map when `near` asks for it (`Globals::sun_near`): the texture is
+    /// then two maps wide. Once wide it stays wide until the size changes, so
+    /// a frame that draws one view with the cascade and another without (a
+    /// stacked layer fitted to a cockpit) does not make the map again every
+    /// frame; a single map on a wide texture uses its left half. Returns
+    /// whether the map was made again, for `Raymarch::set_sun_map`.
+    pub fn set_sun_map_layout(&mut self, gpu: &Gpu, size: u32, near: bool) -> bool {
         let size = sun_map_size_for(size);
-        if size == self.sun_map_size {
+        let wide = near || (self.sun_map_wide && size == self.sun_map_size);
+        if size == self.sun_map_size && wide == self.sun_map_wide {
             return false;
         }
-        let map = sun_depth_texture(&gpu.device, "raster-sun-map", size);
+        let map = sun_depth_texture(&gpu.device, "raster-sun-map", size, if wide { 2 } else { 1 });
         self.sun_map_view = map.create_view(&wgpu::TextureViewDescriptor::default());
         self._sun_map = map;
         self.sun_map_size = size;
+        self.sun_map_wide = wide;
         self.rebuild_globals_bind(&gpu.device);
         true
+    }
+
+    /// Whether the sun map's texture holds the near cascade beside the far
+    /// map ([`Self::set_sun_map_layout`]).
+    pub fn sun_map_wide(&self) -> bool {
+        self.sun_map_wide
+    }
+
+    /// The far map's share of the sun map texture's width, for a pass that
+    /// reads it on its own terms (the fog's `fog_sun.w`): 0.5 when the near
+    /// cascade sits beside it, else 0, which reads as all of it.
+    pub fn sun_map_far_share(&self) -> f32 {
+        if self.sun_map_wide { 0.5 } else { 0.0 }
+    }
+
+    /// The sun map lanes as this raster's texture can serve them: the far
+    /// map's share of the width filled in, and the near cascade switched off
+    /// when the texture has no room for it (a caller that never asked for
+    /// the wide layout).
+    fn sun_map_lanes_for_texture(&self, mut g: Globals) -> Globals {
+        g.sun_near_extra[2] = self.sun_map_far_share();
+        if !self.sun_map_wide {
+            g.sun_near[0] = 0.0;
+        }
+        g
     }
 
     /// The sun shadow map's edge in texels.
@@ -3768,6 +3871,25 @@ impl Raster {
             device,
             &self.globals_layout,
             &self.globals_buf,
+            &self.vpaint_buf,
+            &self.tpaint_buf,
+            &self.terrain_pal_view,
+            &self.terrain_samp,
+            &self.terrain_samp_nearest,
+            &self.terrain_slots,
+            &self.skin_joints_buf,
+            &self.skin_weights_buf,
+            &self.skin_palette_buf,
+            &self.skin_meta_buf,
+            &self.mat_ext_buf,
+            &self.sun_stub_view,
+            &self.sun_samp,
+            &self.fine_buf,
+        );
+        self.globals_bind_sunpass_near = make_globals_bind(
+            device,
+            &self.globals_layout,
+            &self.sun_near_globals_buf,
             &self.vpaint_buf,
             &self.tpaint_buf,
             &self.terrain_pal_view,
@@ -4114,6 +4236,7 @@ impl Raster {
     /// from where the character was last frame, so this frame's triangles
     /// depth-failed against their own stale silhouette and flickered.
     fn begin_pass(&mut self, gpu: &Gpu, globals: Globals) {
+        let globals = self.sun_map_lanes_for_texture(globals);
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         self.upload_skin_frame(gpu);
         self.upload_mat_ext(gpu);
@@ -5618,7 +5741,32 @@ impl Raster {
         keep: &dyn Fn(&(MeshId, Option<TexId>, InstanceRaw)) -> bool,
         flsl: &[FlslDraw],
         skins: &[SkinDraw],
-    ) -> (Vec<(usize, Option<u32>, u32, u32)>, Vec<(usize, Option<u32>, u32, u32)>, Vec<FlslBucket>) {
+    ) -> DepthBuckets {
+        let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
+        let buckets = self.bucket_opaque_depth_draws(instances, keep, flsl, skins, &mut raws);
+        self.write_instances(gpu, &raws);
+        buckets
+    }
+
+    /// Put `raws` in the instance buffer, from its start.
+    fn write_instances(&mut self, gpu: &Gpu, raws: &[InstanceRaw]) {
+        self.ensure_instances(gpu, raws.len() as u32);
+        if !raws.is_empty() {
+            gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(raws));
+        }
+    }
+
+    /// [`Self::upload_opaque_depth_draws`]'s buckets, appending their
+    /// instance data to `raws` (whose starts they count from), so two lists
+    /// can share one upload.
+    fn bucket_opaque_depth_draws(
+        &self,
+        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
+        keep: &dyn Fn(&DepthDraw) -> bool,
+        flsl: &[FlslDraw],
+        skins: &[SkinDraw],
+        raws: &mut Vec<InstanceRaw>,
+    ) -> DepthBuckets {
         // Opaque instances only, bucketed by (mesh, texture) exactly like
         // `draw_scene` (the texture is bound for the per-texel alpha discard).
         // Opaque-SHADER flsl draws join in — their phase comes from the shader,
@@ -5651,7 +5799,6 @@ impl Raster {
         let solid = |raw: &InstanceRaw| {
             !glassy.get(ext_index_of(raw) as usize).copied().unwrap_or(false)
         };
-        let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
         let buckets: Vec<(usize, Option<u32>, u32, u32)> = bucket_into(
             instances
                 .iter()
@@ -5667,7 +5814,7 @@ impl Raster {
                         .filter(|(_, _, bind, _)| flsl_opaque(bind))
                         .map(|(id, tex, _, raw)| ((id.0 as usize, tex.map(|t| t.0)), raw)),
                 ),
-            &mut raws,
+            raws,
         )
         .into_iter()
         .map(|((mesh_idx, tex_key), start, count)| (mesh_idx, tex_key, start, count))
@@ -5676,7 +5823,7 @@ impl Raster {
         // shades — `vs_skin` is `@invariant` through the shared tail, so the two
         // agree bit for bit. Priming from the bind pose instead would depth-reject
         // the pose, and a character would vanish behind its own T-stance.
-        let skin_buckets = self.bucket_skins_where(skins, &mut raws, |d| match &d.flsl {
+        let skin_buckets = self.bucket_skins_where(skins, raws, |d| match &d.flsl {
             None => {
                 is_terrain(&d.instance)
                     || dithered(&d.instance)
@@ -5684,12 +5831,7 @@ impl Raster {
             }
             Some(bind) => flsl_opaque(bind),
         });
-        let displaced =
-            self.bucket_flsl(flsl, skins, &mut raws, |sh| sh.opaque && sh.displaced_depth.is_some());
-        self.ensure_instances(gpu, raws.len() as u32);
-        if !raws.is_empty() {
-            gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
-        }
+        let displaced = self.bucket_flsl(flsl, skins, raws, |sh| sh.opaque && sh.displaced_depth.is_some());
         (buckets, skin_buckets, displaced)
     }
 
@@ -5716,7 +5858,7 @@ impl Raster {
     }
 
     /// Whether an instance can put anything in the sun's shadow map: whether its
-    /// bounds touch the sun's box (`globals.sun_vp`). The camera's list reaches
+    /// bounds touch the sun's box (`g.view_proj`, the cascade being drawn). The camera's list reaches
     /// as far as it sees, terrain kilometres out and flora to its reach, and
     /// the box reaches to the shadow distance; everything outside it the GPU
     /// would transform and then clip away whole. The pass clips depth (no
@@ -5728,7 +5870,7 @@ impl Raster {
     /// frame's wind (`vs`'s `0.1·sway·h²·|wind|·1.25`, with the height at its
     /// most, the sphere's diameter).
     fn sun_reach(&self, g: &Globals) -> impl Fn(&(MeshId, Option<TexId>, InstanceRaw)) -> bool + use<> {
-        let box_ = crate::cull::Frustum::from_view_proj(Mat4::from_cols_array_2d(&g.sun_vp));
+        let box_ = crate::cull::Frustum::from_view_proj(Mat4::from_cols_array_2d(&g.view_proj));
         let wind = glam::Vec3::new(g.time[1], g.time[2], g.time[3]).length();
         let sway: Vec<f32> = self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| c[2][2].max(0.0)).collect();
         let reach: Vec<f32> = self.meshes.iter().map(|m| m.reach).collect();
@@ -5766,9 +5908,23 @@ impl Raster {
         self.sun_map_casts
     }
 
+    /// The near cascade's last pass, as [`Self::sun_map_draws`]: how many
+    /// opaque instances it drew of how many it was given, (0, 0) when the
+    /// frame had no near cascade.
+    pub fn sun_near_map_draws(&self) -> (usize, usize) {
+        self.sun_near_casts
+    }
+
     /// Draw the sun shadow map for this view: every opaque draw, depth only,
-    /// from the sun ([`Globals::sun_vp`]). A no-op unless `globals.sun_map.x`
-    /// is set. Before the main pass, which samples it.
+    /// from the sun ([`Globals::sun_vp`]), and again into the near cascade
+    /// beside it when `globals.sun_near.x` is set and the texture has room
+    /// ([`Self::set_sun_map_layout`]). A no-op unless `globals.sun_map.x` is
+    /// set. Before the main pass, which samples it.
+    ///
+    /// Both cascades are bucketed into one instance upload and recorded into
+    /// one submit, the near one through its own globals: a second submit left
+    /// the GPU idle while the CPU built the near list, which cost more than
+    /// the near map's drawing did.
     pub fn sun_shadow_pass(
         &mut self,
         gpu: &Gpu,
@@ -5777,34 +5933,34 @@ impl Raster {
         flsl: &[FlslDraw],
         skins: &[SkinDraw],
     ) {
+        self.sun_near_casts = (0, 0);
         if globals.sun_map[0] < 0.5 {
             return;
         }
-        let mut g = globals;
-        g.view_proj = g.sun_vp;
+        let globals = self.sun_map_lanes_for_texture(globals);
+        let size = self.sun_map_size;
+        let mut far = globals;
+        far.view_proj = far.sun_vp;
         // Tells `fs_depth` this is the sun's view: what fades a surface for the
         // camera does not thin its shadow.
-        g.sun_extra[1] = 1.0;
-        self.begin_pass(gpu, g);
-        // Filtered as the records are bucketed, not into copies of the list
-        // first: those were two copies of every instance in the frame.
-        let casts = self.casts();
-        let reach = self.sun_map_cull.then(|| self.sun_reach(&g));
-        let cast = std::cell::Cell::new(0usize);
-        let keep = |d: &(MeshId, Option<TexId>, InstanceRaw)| {
-            let ok = casts(&d.2) && reach.as_ref().is_none_or(|r| r(d));
-            cast.set(cast.get() + ok as usize);
-            ok
-        };
-        let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, instances, &keep, flsl, skins);
-        // Buckets bound to a texture-array set draw through the array build.
-        let (array_buckets, buckets): (Vec<_>, Vec<_>) =
-            buckets.into_iter().partition(|b| b.1.is_some_and(|t| self.pools.array_ids.contains(&t)));
-        self.sun_map_casts = (cast.get(), instances.len());
+        far.sun_extra[1] = 1.0;
+        self.begin_pass(gpu, far);
+        let near = (globals.sun_near[0] > 0.5).then_some(Globals { view_proj: far.sun_near_vp, ..far });
+        let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
+        let (far_buckets, far_counts) = self.sun_cascade_buckets(&far, instances, flsl, skins, &mut raws);
+        let near_buckets = near.as_ref().map(|g| self.sun_cascade_buckets(g, instances, flsl, skins, &mut raws));
+        self.write_instances(gpu, &raws);
+        self.sun_map_casts = far_counts;
+        if let Some(g) = &near {
+            gpu.queue.write_buffer(&self.sun_near_globals_buf, 0, bytemuck::bytes_of(g));
+        }
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-sun-map") });
         {
+            // One render pass for both, cleared once: the near cascade as a
+            // second pass that loaded the cleared texture cost three to four
+            // times what drawing the same texels in the first one did.
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("raster-sun-map"),
                 color_attachments: &[],
@@ -5817,35 +5973,87 @@ impl Raster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_pipeline(&self.prepass_pipeline);
-            rp.set_bind_group(0, &self.globals_bind_sunpass, &[]);
             rp.set_vertex_buffer(1, self.instance_buf.slice(..));
-            let draw = |rp: &mut wgpu::RenderPass<'_>, bs: &[(usize, Option<u32>, u32, u32)]| {
-                for &(mesh_idx, tex_key, start, count) in bs {
-                    let mesh = &self.meshes[mesh_idx];
-                    let bind = match tex_key {
-                        Some(t) => &self.textures[t as usize].bind,
-                        None => &mesh.tex_bind,
-                    };
-                    rp.set_bind_group(1, bind, &[]);
-                    rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                    rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
-                }
-            };
-            draw(&mut rp, &buckets);
-            if !array_buckets.is_empty() {
-                rp.set_pipeline(&self.array_passes(gpu).prepass);
-                draw(&mut rp, &array_buckets);
-                rp.set_pipeline(&self.prepass_pipeline);
+            self.record_sun_cascade(gpu, &mut rp, &far_buckets, [0, size], &self.globals_bind_sunpass);
+            if let Some((buckets, _)) = &near_buckets {
+                self.record_sun_cascade(gpu, &mut rp, buckets, [size, size], &self.globals_bind_sunpass_near);
             }
-            if !skin_buckets.is_empty() {
-                rp.set_pipeline(&self.skin_prepass_pipeline);
-                draw(&mut rp, &skin_buckets);
-            }
-            self.draw_displaced_depth(&mut rp, &displaced);
         }
         gpu.queue.submit([encoder.finish()]);
+        if let Some((_, counts)) = near_buckets {
+            self.sun_near_casts = counts;
+        }
+    }
+
+    /// One cascade's opaque draws inside `g.view_proj`'s box, appended to
+    /// `raws`, and (drawn, given).
+    fn sun_cascade_buckets(
+        &self,
+        g: &Globals,
+        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
+        flsl: &[FlslDraw],
+        skins: &[SkinDraw],
+        raws: &mut Vec<InstanceRaw>,
+    ) -> (DepthBuckets, (usize, usize)) {
+        // Filtered as the records are bucketed, not into copies of the list
+        // first: those were two copies of every instance in the frame.
+        let casts = self.casts();
+        let reach = self.sun_map_cull.then(|| self.sun_reach(g));
+        let cast = std::cell::Cell::new(0usize);
+        let keep = |d: &(MeshId, Option<TexId>, InstanceRaw)| {
+            let ok = casts(&d.2) && reach.as_ref().is_none_or(|r| r(d));
+            cast.set(cast.get() + ok as usize);
+            ok
+        };
+        let buckets = self.bucket_opaque_depth_draws(instances, &keep, flsl, skins, raws);
+        (buckets, (cast.get(), instances.len()))
+    }
+
+    /// Record one cascade of the sun map into the `size`-texel square that
+    /// starts `x` texels across the texture (`at` = [x, size]), through
+    /// `globals` (the far cascade's group over the frame's globals, or the
+    /// near one's over its own).
+    fn record_sun_cascade<'a>(
+        &'a self,
+        gpu: &Gpu,
+        rp: &mut wgpu::RenderPass<'a>,
+        (buckets, skin_buckets, displaced): &DepthBuckets,
+        at: [u32; 2],
+        globals: &'a wgpu::BindGroup,
+    ) {
+        // Buckets bound to a texture-array set draw through the array build.
+        let (array_buckets, buckets): (Vec<_>, Vec<_>) =
+            buckets.iter().copied().partition(|b| b.1.is_some_and(|t| self.pools.array_ids.contains(&t)));
+        let array_prepass = (!array_buckets.is_empty()).then(|| &self.array_passes(gpu).prepass);
+        let [x, size] = at;
+        rp.set_viewport(x as f32, 0.0, size as f32, size as f32, 0.0, 1.0);
+        rp.set_scissor_rect(x, 0, size, size);
+        rp.set_pipeline(&self.prepass_pipeline);
+        rp.set_bind_group(0, globals, &[]);
+        let draw = |rp: &mut wgpu::RenderPass<'a>, bs: &[(usize, Option<u32>, u32, u32)]| {
+            for &(mesh_idx, tex_key, start, count) in bs {
+                let mesh = &self.meshes[mesh_idx];
+                let bind = match tex_key {
+                    Some(t) => &self.textures[t as usize].bind,
+                    None => &mesh.tex_bind,
+                };
+                rp.set_bind_group(1, bind, &[]);
+                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+            }
+        };
+        draw(rp, &buckets);
+        if let Some(pipeline) = array_prepass {
+            rp.set_pipeline(pipeline);
+            draw(rp, &array_buckets);
+            rp.set_pipeline(&self.prepass_pipeline);
+        }
+        if !skin_buckets.is_empty() {
+            rp.set_pipeline(&self.skin_prepass_pipeline);
+            draw(rp, skin_buckets);
+        }
+        self.draw_displaced_depth(rp, displaced);
     }
 
     /// Returns nothing. "Was the target reallocated?" is not "does the bind

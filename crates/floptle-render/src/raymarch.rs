@@ -275,7 +275,9 @@ pub struct RaymarchGlobals {
     pub fog_sun_vp: [[f32; 4]; 4],
     /// x = 1 when the fog may read the sun map (the raster pass drew one and
     /// handed it over), y = its depth bias, z = its blur radius in map
-    /// coordinates. Appended at the end.
+    /// coordinates, w = the far map's share of the texture's width (0.5 when
+    /// the near cascade sits beside it; 0 reads as all of it). Appended at
+    /// the end.
     pub fog_sun: [f32; 4],
     /// The froxel grid the fog was built in when `fog_cache.x` is 3
     /// ([`Raymarch::set_fog_froxels`]): its cells across, down and deep.

@@ -409,7 +409,10 @@ opaque + lighting pass fell from 9.5 ms to 4.1 ms, and the map itself costs
 - `raster.wgsl` `sun_map_vis` offsets the point along its normal by 1.5
   texels, biases the depth by two texels, and takes a rotated 12-tap disc of
   hardware 2×2 compares. Softness scales the disc from 1.5 to 7.5 texels. The
-  last 4% of the map fades to sun.
+  last 4% of the map fades to sun. The offset and the bias are Lighting
+  fields, `shadow_normal_offset` and `shadow_depth_bias` (`env.shadowNormalOffset`,
+  `env.shadowDepthBias`, the panel's **normal offset** and **depth bias**), in
+  texels, so a game at its own scale can trade acne against peter-panning.
 - `field.wgsl` `sun_shadow` asks `sun_map_vis` first and marches only when
   it answers −1. The raymarch module's stub always answers −1, so raymarched
   matter keeps the march.
@@ -418,9 +421,60 @@ opaque + lighting pass fell from 9.5 ms to 4.1 ms, and the map itself costs
 evaluates both sides, and the first cut ran the march and the map on every
 pixel: 16 ms instead of 4.
 
-**Limits:** one cascade, so detail is set by `shadow_distance` and the map's
-size (about 10 cm a texel at 120 with the default 2048; 5 cm at 4096, 40 cm at
-512). The map's own pass fills its texels, so it costs about a quarter at 1024
+### The near cascade
+
+One map's texel is `shadow_distance` × 1.7 / `shadow_map_size`. A game that
+stretches its reach to a few hundred metres gets texels wider than a hand:
+at 364 m and 2048 texels, 30 cm. The filter, the normal offset and the bias
+all scale with the texel, so a person-sized caster gets two or three texels,
+its self-shadow goes blotchy, its shadow lifts off its feet, and the pattern
+changes as the sun moves.
+
+`Light::shadow_near_distance` (`env.shadowNearDistance`, the panel's **near
+detail**; 40 m by default, 0 is off) adds a second map of the same size over
+that much ground around the camera:
+
+- It's built by the same `sun_shadow_matrix` as the far map, at the near
+  distance: centred a third of it ahead of the camera, snapped to whole
+  texels on a grid fixed in the world, so it holds still as the camera moves.
+  At 40 m and 2048 texels a texel is 3.3 cm, and the near map is exactly
+  what a scene with a 40 m shadow distance draws, the reach the default
+  was chosen by: a 1.8 m figure at 364 m renders identical to the same
+  figure at a 40 m shadow distance.
+- Both maps live in one texture, the far map on the left and the near one on
+  the right (`Raster::set_sun_map_layout`), so the lighting binds no extra
+  texture: the raster fragment stage is at its sampled-texture limit on a
+  WebGL2-class device. The near map draws in its own pass, culled to its
+  own box (`sun_cascade_pass`), with the viewport on its half.
+- `sun_map_vis` reads the near map for a point inside its box and hands over
+  to the far map across a band at the box's edge (a tenth of its uv, about
+  7 m at 40 m), so the change in detail is a blend, not a line. It picks by
+  where the point falls in the near box rather than by its distance from the
+  camera, so every point it sends to the near map is one that map holds,
+  filter taps included. Each tap is clamped half a texel inside its own half,
+  so no 2×2 compare reaches into the other map.
+- The fog's shafts read only the far map (`fog_sun.w` carries its share of
+  the texture's width).
+
+**When it draws.** Only past a reach of 160 m
+(`Light::SHADOW_NEAR_FROM_DISTANCE`), at any map size, and only when the near
+distance is under half the reach. A scene at the default 150 m stays one map,
+looks exactly as it did and costs what it did. It goes by reach rather than
+by texel on purpose: a small map is a choice of soft, cheap shadows (a
+settings screen's "low"), and a second map would make "low" sharper and
+dearer. `shadow_near_always` (`env.shadowNearAlways`) draws it whenever it
+fits. Old projects keep one map until they set `shadowNearDistance`: the
+upgrade pass (`shadow_upgrade.rs`) writes `shadow_near_distance: 0` into each
+scene from before the cascade whose reach is past 160 m.
+
+Once the texture is two maps wide it stays wide until the map's size
+changes, so a frame that draws one view with the cascade and another without
+(a stacked layer fitted to a cockpit) never makes the texture again every
+frame.
+
+**Limits:** two cascades at most, so beyond the near box detail is set by
+`shadow_distance` and the map's size (about 10 cm a texel at 120 with the
+default 2048; 5 cm at 4096, 40 cm at 512). The map's own pass fills its texels, so it costs about a quarter at 1024
 and four times at 4096 of what it costs at 2048; the lighting's lookups cost
 the same at any size. Blobs that are only a distance field cast only in the march.
 In stars mode the map is drawn toward star 0, the brightest at the camera

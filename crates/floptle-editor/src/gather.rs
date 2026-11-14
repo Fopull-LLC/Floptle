@@ -1736,18 +1736,15 @@ impl Editor {
             cam.world_position,
             light_node.shadows || point_shadows,
         );
-        let (sun_vp, sun_map, sun_extra) = crate::shading::sun_map_lanes(
+        let sun_lanes = crate::shading::sun_map_lanes(
             &light_node,
             sun,
             (star_meta[0] >= 1.0).then_some(star_pos[0]),
             view_proj,
             cam.world_position,
         );
-        let globals = Globals {
+        let mut globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
-            sun_vp,
-            sun_map,
-            sun_extra,
             time: { let w = self.sway_wind(cam.world_position); [elapsed, w.x, w.y, w.z] },
             light_dir: sun,
             light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
@@ -1761,7 +1758,9 @@ impl Editor {
             // Meshed terrain reads its triplanar scale here; every per-slot
             // setting is in the slot store (`Editor::terrain_slot_store`).
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
+            ..Globals::default()
         };
+        sun_lanes.apply(&mut globals);
         FrameLighting {
             light_node,
             sun,

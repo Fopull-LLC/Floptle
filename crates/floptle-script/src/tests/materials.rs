@@ -1150,6 +1150,47 @@ fn a_script_sets_the_shadow_map_size() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **A game tunes the shadow map's near cascade and its two biases.** Each
+/// reads the scene's value and a write sets it, fenced to the range the
+/// renderer uses.
+#[test]
+fn a_script_sets_the_shadow_near_cascade_and_biases() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_shadow_near_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "tune",
+        "function start(node)\n  local l = find(\"Lighting\"):getcomponent(\"Light\")\n  \
+         was = { l.shadowNearDistance, l.shadowNearAlways, l.shadowNormalOffset, l.shadowDepthBias }\n  \
+         l.shadowNearDistance = params.near\n  l.shadowNearAlways = true\n  \
+         l.shadowNormalOffset = params.offset\n  l.shadowDepthBias = params.bias\nend\n",
+    );
+    for ((near, offset, bias), got) in [((24.0, 0.5, 3.0), (24.0, 0.5, 3.0)), ((-3.0, 40.0, -1.0), (0.0, 16.0, 0.0)), ((900.0, 1.5, 2.0), (400.0, 1.5, 2.0))] {
+        let mut world = World::default();
+        let lighting = world.spawn();
+        world.insert(lighting, Transform::IDENTITY);
+        world.insert(lighting, floptle_core::Name("Lighting".into()));
+        world.insert(lighting, floptle_core::Light::default());
+        let driver = world.spawn();
+        world.insert(driver, Transform::IDENTITY);
+        let mut inst = floptle_core::ScriptInst::new("tune");
+        inst.params.push(("near".into(), near));
+        inst.params.push(("offset".into(), offset));
+        inst.params.push(("bias".into(), bias));
+        world.insert(driver, Scripts(vec![inst]));
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let l = *world.get::<floptle_core::Light>(lighting).unwrap();
+        assert_eq!((l.shadow_near_distance, l.shadow_normal_offset, l.shadow_depth_bias), got, "asked {near}, {offset}, {bias}");
+        assert!(l.shadow_near_always);
+        let was: mlua::Table = host.instance_env(driver.index(), "tune").unwrap().get("was").unwrap();
+        let was: Vec<f64> = (1..=4).map(|i| was.get(i).unwrap()).collect();
+        assert_eq!(was, vec![floptle_core::Light::SHADOW_NEAR_DISTANCE as f64, 0.0, 1.5, 2.0]);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **A settings screen sets the view distance.** `far` and `near` on a
 /// camera read back and write, through the component and `setCamera`, and a
 /// far plane asked for in front of the near one stays a metre past it.

@@ -333,6 +333,7 @@ mod ui_design_ui;
 mod ui_game;
 mod upgrade;
 mod terrain_upgrade;
+mod shadow_upgrade;
 mod ui_input;
 mod ui_nav;
 mod ui_shader_lib;

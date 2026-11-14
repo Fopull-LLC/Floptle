@@ -1112,10 +1112,15 @@ fn fog_sun_tap(p: vec3<f32>) -> f32 {
     // printed the steps' per-pixel jitter into the air as a fine hatch.
     let r = G.fog_sun.z;
     let d = clip.z - G.fog_sun.y;
+    // `fog_sun.w` is the far map's share of the texture's width: half when
+    // the near cascade sits beside it (0 reads as all of it). The x of each
+    // look stays inside that share.
+    let s = vec2<f32>(select(1.0, G.fog_sun.w, G.fog_sun.w > 0.0), 1.0);
+    let at = vec4<f32>(clamp(uv.x - 0.5 * r, 0.0, 1.0), uv.y - 0.5 * r, clamp(uv.x + 0.5 * r, 0.0, 1.0), uv.y + 0.5 * r);
     var lit = 0.0;
-    lit += textureSampleCompareLevel(fog_sun_tex, fog_sun_samp, uv + vec2<f32>(-0.5, -0.5) * r, d);
-    lit += textureSampleCompareLevel(fog_sun_tex, fog_sun_samp, uv + vec2<f32>(0.5, -0.5) * r, d);
-    lit += textureSampleCompareLevel(fog_sun_tex, fog_sun_samp, uv + vec2<f32>(-0.5, 0.5) * r, d);
-    lit += textureSampleCompareLevel(fog_sun_tex, fog_sun_samp, uv + vec2<f32>(0.5, 0.5) * r, d);
+    lit += textureSampleCompareLevel(fog_sun_tex, fog_sun_samp, at.xy * s, d);
+    lit += textureSampleCompareLevel(fog_sun_tex, fog_sun_samp, at.zy * s, d);
+    lit += textureSampleCompareLevel(fog_sun_tex, fog_sun_samp, at.xw * s, d);
+    lit += textureSampleCompareLevel(fog_sun_tex, fog_sun_samp, at.zw * s, d);
     return lit * 0.25;
 }

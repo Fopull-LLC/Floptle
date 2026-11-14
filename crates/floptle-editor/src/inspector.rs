@@ -5054,6 +5054,29 @@ impl EditorTabViewer<'_> {
                             }
                         }
                     });
+                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.shadow_near_distance, 0.0..=200.0), "near detail")
+                        .on_hover_text(
+                            "a second map of the same size over this much ground around the camera, so a character \
+                             near it keeps its shadow detail at a long shadow distance. Drawn only \
+                             past a shadow distance of 160 m, and it costs one more depth pass. 0 = one map",
+                        )
+                        .changed();
+                    ui.add_enabled_ui(l.shadow_near_distance > 0.0, |ui| {
+                        cmd.inspector_changed |= crate::responsive::check(ui, &mut l.shadow_near_always, "near detail always")
+                            .on_hover_text("draw the near map at any shadow distance, not only past 160 m")
+                            .changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("normal offset").on_hover_text(
+                            "how far a lit point moves along its normal before it looks the map up, in texels (1.5): \
+                             more stops stripes of self-shadow, too much lifts shadows off their casters",
+                        );
+                        cmd.inspector_changed |=
+                            ui.add(egui::DragValue::new(&mut l.shadow_normal_offset).speed(0.05).range(0.0..=16.0)).changed();
+                        ui.label("depth bias").on_hover_text("the same trade along the sun, in texels (2)");
+                        cmd.inspector_changed |=
+                            ui.add(egui::DragValue::new(&mut l.shadow_depth_bias).speed(0.05).range(0.0..=16.0)).changed();
+                    });
                 }
                 // Contact shadows: the short-range half, from the depth
                 // buffer rather than from the field.
