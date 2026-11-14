@@ -362,6 +362,12 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
             let (animators, culled) = p.borrow().anim_counts();
             out.set("animators", animators)?;
             out.set("animatorsCulled", culled)?;
+            // Simulated water last frame: points in water that is moving,
+            // points solved in its steps, tiles tiled sims hold.
+            let (awake, solved, tiles) = p.borrow().water_counts();
+            out.set("waterAwake", awake)?;
+            out.set("waterSolved", solved)?;
+            out.set("waterTiles", tiles)?;
             // Sleepers woken last frame, by cause: what keeps a parked craft
             // awake, when between wakes its own readout says `settling`.
             let wakes = lua.create_table()?;

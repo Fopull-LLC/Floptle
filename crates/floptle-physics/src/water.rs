@@ -45,6 +45,28 @@ pub enum WaterShape {
     Declared { water: Arc<DeclaredWater>, origin: DVec3 },
 }
 
+/// How whatever a body of water lies on is moving, in the sim frame: a deck
+/// pool on a ship, a tank on a lift. The water moves with its carrier, so
+/// what floats in it is dragged along with the ship rather than held back
+/// against still air. Zero for water on ground that does not move, and for
+/// water on a world on rails, whose riders are carried with it already.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WaterCarry {
+    /// The carrier's velocity at `about`, m/s.
+    pub vel: Vec3,
+    /// Its spin, radians a second about each axis.
+    pub ang_vel: Vec3,
+    /// The point the spin turns about: the carrier's centre of mass.
+    pub about: Vec3,
+}
+
+impl WaterCarry {
+    /// The carrier's velocity at sim-frame point `p`.
+    pub fn at(&self, p: Vec3) -> Vec3 {
+        self.vel + self.ang_vel.cross(p - self.about)
+    }
+}
+
 /// One body of water in the sim.
 #[derive(Clone, Debug)]
 pub struct WaterVolume {
@@ -68,6 +90,8 @@ pub struct WaterVolume {
     /// The node this volume belongs to (what a query names, and what the
     /// renderer tints by).
     pub entity: u32,
+    /// The motion of the body it rides, added to its own flow.
+    pub carry: WaterCarry,
 }
 
 impl WaterVolume {
@@ -98,10 +122,14 @@ impl WaterVolume {
     /// current, zero in still water and out of it. Drag acts on the velocity
     /// relative to this, so a current carries what floats in it.
     pub fn flow_at(&self, p: Vec3) -> Vec3 {
-        match &self.shape {
-            WaterShape::Declared { water, origin } if !self.frozen => water.at(*origin + p.as_dvec3()).flow.as_vec3(),
-            _ => Vec3::ZERO,
+        if self.frozen {
+            return Vec3::ZERO;
         }
+        let own = match &self.shape {
+            WaterShape::Declared { water, origin } => water.at(*origin + p.as_dvec3()).flow.as_vec3(),
+            _ => Vec3::ZERO,
+        };
+        if self.carry == WaterCarry::default() { own } else { own + self.carry.at(p) }
     }
 
     /// The direction "up" out of the water at `p` — radially outward for a sea,
@@ -183,6 +211,15 @@ impl WaterField {
 
     pub fn is_empty(&self) -> bool {
         self.volumes.is_empty()
+    }
+
+    /// The volume a point is in, or the one whose surface it is nearest
+    /// above: what a shape crossing a surface crossed.
+    pub fn nearest(&self, p: Vec3) -> Option<&WaterVolume> {
+        match self.sample(p).entity {
+            Some(e) => self.volumes.iter().find(|v| v.entity == e),
+            None => nearest_volume(self, p),
+        }
     }
 
     /// The fraction (0..1) of a sphere of `radius` centred at `p` that is under
@@ -347,6 +384,7 @@ mod tests {
                 angular_drag: 1.0,
                 frozen: false,
                 entity: 7,
+                carry: WaterCarry::default(),
             }],
         }
     }
@@ -364,6 +402,7 @@ mod tests {
                 angular_drag: 1.0,
                 frozen: false,
                 entity: 3,
+                carry: WaterCarry::default(),
             }],
         }
     }
@@ -468,6 +507,7 @@ mod tests {
                 angular_drag: 1.0,
                 frozen: false,
                 entity: 9,
+                carry: WaterCarry::default(),
             }],
         }
     }
@@ -589,6 +629,7 @@ mod tests {
             angular_drag: 1.0,
             frozen: false,
             entity: 42,
+            carry: WaterCarry::default(),
         };
         let ocean = WaterVolume {
             shape: WaterShape::Sphere { center: Vec3::ZERO, radius: 3.0 },
@@ -597,6 +638,7 @@ mod tests {
             angular_drag: 1.0,
             frozen: false,
             entity: 9,
+            carry: WaterCarry::default(),
         };
         let p = Vec3::new(0.0, -1.0, 0.0);
         let a = WaterField { volumes: vec![tank.clone(), ocean.clone()] };

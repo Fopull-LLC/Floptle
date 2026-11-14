@@ -67,6 +67,13 @@ pub struct Sim {
     /// their position and velocity are set from a conic, so a held force
     /// would be discarded and only its torque would act. Neither does.
     coasting: std::collections::HashSet<u32>,
+    /// What entered and left water, and when each node was last in it.
+    crossings: crate::splash::Crossings,
+    /// Body and assembly velocities as the tick began.
+    tick_vel: Vec<Vec3>,
+    tick_vel_c: Vec<(Vec3, Vec3)>,
+    /// Each body of water's slam, by the water's entity.
+    water_slam: std::collections::HashMap<u32, f32>,
     accum: f32,
     pub fixed_dt: f32,
     /// The project's resolved layer table (names → bit indices + collision
@@ -389,6 +396,10 @@ impl Sim {
             tick_prev_c: Vec::new(),
             held: Vec::new(),
             coasting: std::collections::HashSet::new(),
+            crossings: Default::default(),
+            tick_vel: Vec::new(),
+            tick_vel_c: Vec::new(),
+            water_slam: Default::default(),
             accum: 0.0,
             fixed_dt: 1.0 / 120.0,
             layers,
@@ -1600,6 +1611,13 @@ impl Sim {
         self.tick_prev.extend(self.world.bodies.iter().map(|b| b.pos));
         self.tick_prev_c.clear();
         self.tick_prev_c.extend(self.world.compounds.iter().map(|c| (c.pos, c.orient)));
+        // As the tick began, for what crosses a water surface in it.
+        if !self.world.water.is_empty() || self.crossings.any_wet() {
+            self.tick_vel.clear();
+            self.tick_vel.extend(self.world.bodies.iter().map(|b| b.vel));
+            self.tick_vel_c.clear();
+            self.tick_vel_c.extend(self.world.compounds.iter().map(|c| (c.vel, c.ang_vel)));
+        }
         let n = (tick_dt / self.fixed_dt).round().max(1.0) as u32;
         // Accumulate contacts across the tick's substeps (each step clears its
         // own) so a one-substep graze still registers as a touch this tick.
@@ -1637,6 +1655,95 @@ impl Sim {
         }
         self.held.clear();
         self.detect_touches(&tick_contacts, &tick_kin);
+        self.water_crossings(tick_dt);
+    }
+
+    /// Ask every body and every part of an assembly about the water once
+    /// this tick has stepped: record what entered or left it, and give what
+    /// is going in fast its water's slam. See [`crate::splash`].
+    fn water_crossings(&mut self, dt: f32) {
+        if self.world.water.is_empty() && !self.crossings.any_wet() {
+            self.crossings.tick(dt);
+            return;
+        }
+        let mut probes = Vec::new();
+        let mut owner = Vec::new();
+        for l in &self.map {
+            let b = &self.world.bodies[l.body];
+            if !b.active || b.kinematic {
+                continue;
+            }
+            let was_vel = self.tick_vel.get(l.body).copied().unwrap_or(b.vel);
+            probes.push(crate::splash::Probe { node: l.entity.index(), pos: b.com(), radius: b.bounding_radius(), vel: b.vel, was_vel, mass: b.mass });
+            owner.push((false, l.body, b.mass));
+        }
+        for l in &self.cmap {
+            let c = &self.world.compounds[l.compound];
+            if !c.active {
+                continue;
+            }
+            for s in &c.shapes {
+                let r = match s.geom {
+                    crate::ShapeGeom::Sphere { radius } => radius,
+                    crate::ShapeGeom::Capsule { radius, half_height } => radius + half_height,
+                    crate::ShapeGeom::Box { half } => half.length(),
+                };
+                let p = c.pos + c.orient * s.offset;
+                let v = c.vel + c.ang_vel.cross(p - c.pos);
+                let (wv, wa) = self.tick_vel_c.get(l.compound).copied().unwrap_or((c.vel, c.ang_vel));
+                let was_vel = wv + wa.cross(p - c.pos);
+                probes.push(crate::splash::Probe { node: s.id as u32, pos: p, radius: r, vel: v, was_vel, mass: s.mass.max(1e-4) });
+                owner.push((true, l.compound, s.mass.max(1e-4)));
+            }
+        }
+        let slam = &self.water_slam;
+        let dv = self.crossings.pass(&self.world.water, self.world.origin, &probes, dt, |e| slam.get(&e).copied().unwrap_or(0.0));
+        for ((compound, i, share), dv) in owner.into_iter().zip(dv) {
+            if dv == Vec3::ZERO {
+                continue;
+            }
+            if compound {
+                let c = &mut self.world.compounds[i];
+                c.vel += dv * share / c.mass.max(1e-4);
+            } else {
+                self.world.bodies[i].vel += dv;
+            }
+        }
+        // An assembly is wet while any part of it is.
+        for l in &self.cmap {
+            let c = &self.world.compounds[l.compound];
+            if c.shapes.iter().any(|s| self.crossings.dry_for(s.id as u32) == Some(0.0)) {
+                self.crossings.mark_wet(l.entity.index());
+            }
+        }
+    }
+
+    /// The water entries and exits since the last call, oldest first: at
+    /// most [`crate::splash::SPLASH_RING`] of them.
+    pub fn take_splashes(&mut self) -> Vec<crate::splash::Splash> {
+        self.crossings.events.drain(..).collect()
+    }
+
+    /// Seconds since node `eid` (a body, an assembly or one of its parts)
+    /// was last in water; `None` if it never was.
+    pub fn dry_for(&self, eid: u32) -> Option<f64> {
+        self.crossings.dry_for(eid)
+    }
+
+    /// The nodes in water this tick, and the clock.
+    pub fn wet_now(&self) -> (f64, Vec<u32>) {
+        self.crossings.wet_now()
+    }
+
+    /// The slam each body of water gives what enters it fast, by the water's
+    /// entity (see [`crate::splash::Splash::water`]); 0 or missing is none.
+    pub fn set_water_slam(&mut self, slam: std::collections::HashMap<u32, f32>) {
+        self.water_slam = slam;
+    }
+
+    /// Does any body of water slam?
+    pub fn has_water_slam(&self) -> bool {
+        !self.water_slam.is_empty()
     }
 
     /// Hold a force on the compound rooted at `eid` for the next tick: `force`
@@ -1955,6 +2062,21 @@ impl Sim {
             Link::Body(i) => self.world.bodies[i].grounded,
             Link::Compound(i) => self.world.compounds[i].grounded,
         })
+    }
+
+    /// How the dynamic body or assembly on node `eid` is moving this tick:
+    /// `(centre of mass in the sim frame, velocity, spin)`. `None` for a node
+    /// the solver does not move: no body, a kinematic one (its node is the
+    /// authority), or one switched off. What water lying on a moving body
+    /// takes as its own motion.
+    pub fn carrier_motion(&self, eid: u32) -> Option<(Vec3, Vec3, Vec3)> {
+        if let Some(l) = self.cmap.iter().find(|l| l.entity.index() == eid) {
+            let c = &self.world.compounds[l.compound];
+            return c.active.then_some((c.pos, c.vel, c.ang_vel));
+        }
+        let l = self.map.iter().find(|l| l.entity.index() == eid)?;
+        let b = &self.world.bodies[l.body];
+        (b.active && !b.kinematic).then_some((b.pos, b.vel, if b.rotates { b.ang_vel } else { Vec3::ZERO }))
     }
 
     /// Write the body on node `eid` to its node now, at its pose this tick:

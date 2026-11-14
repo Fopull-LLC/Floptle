@@ -262,6 +262,7 @@ impl Editor {
                 angular_drag: angular_drag.max(0.0),
                 frozen: *frozen,
                 entity: e.index(),
+                carry: floptle_physics::WaterCarry::default(),
             });
         }
         field

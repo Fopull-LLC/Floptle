@@ -379,8 +379,19 @@ end
 | `water.volumes()` | every water node in the scene. |
 | `water.flowAt(x, y, z)` | the water's velocity there, m/s; zero in still water. |
 | `water.addVolume{...}` | declare a lake or a heightfield of water no node carries; returns an id. |
-| `water.surface(id [, {cells, colors, fixed, buffers}])` | its surface as the arrays `mesh.build` takes, in the parent's frame. `colors` adds depth, flow and foam per vertex; `fixed` keeps every grid point a vertex, ready for `mesh.update`. |
+| `water.surface(id [, {cells, colors, fixed, buffers, tile}])` | its surface as the arrays `mesh.build` takes, in the parent's frame. `colors` adds depth, flow and foam per vertex; `fixed` keeps every grid point a vertex, ready for `mesh.update`. |
 | `water.surfaceChanged(id)` | whether the surface moved since `water.surface(id)` last took it. |
+| `water.setLevel(id, level)` | move its surface in place: a lake's radius, a heightfield's or a sim's held level. |
+| `water.setLevels(id, levels)` | a heightfield's levels, one per point. |
+| `water.levelOf(id)` | its level now. |
+| `water.hold(id, cells, level [, group])` / `water.release(id, cells)` | hold a sim's points at a level, or let them go. |
+| `water.exchanged(id)` | what each group of held points gave the water since the last ask, m³. |
+| `water.tiles(id)` | a tiled sim's wet tiles, each with a serial that changes when its water does. |
+| `water.state(id)` | a tiled sim's wet points, for a save (`addVolume{ state = ... }` starts from it). |
+| `water.addWater(id, at, m3)` / `water.setSpring(id, at, rate)` | add or take water at a point; a spring changed while it runs. |
+| `water.splashes()` | what entered or left water since the last call. |
+| `water.setSlam(volume, k)` | the impulse a fast entry meets. |
+| `water.wet(node)` | seconds since a node was last in water. |
 | `water.removeVolume(id)` | take it away again. |
 
 A lake on a round world is part of a sphere about the planet's centre, and only
@@ -431,9 +442,124 @@ for _, f in ipairs(water.falls(river)) do
 end
 ```
 
+### Simulated water on a round world
+
+A `shape = "sim"` volume declared with a `center` instead of an `origin` is
+laid on a patch of its parent's surface: `center` is a point on the ground
+in the parent's frame (the body's centre is the frame's origin), and each
+point of the patch has its own up, along the body's radial, so a patch
+hundreds of metres across on a small world holds its water level with the
+world rather than sagging into the ground on one side and hanging in the air
+on the other. Its ground is read from the terrain's own field along each
+point's radial (from collision where the parent has no terrain), and read
+again where the ground is dug or filled. `level` is a radius from the body's
+centre. `flat = true` lays the patch on a flat world instead, its up the
+parent's +Y and `level` a height.
+
+The water is stored in tiles of 32 × 32 points, and only where it is: a
+patch can be 640 m across at 1.25 m a point (`size = 640, cell = 1.25`) and
+cost only the few thousand points a river or a flooded trench wets. Tiles are
+made as the water reaches them, sleep once their water is still (a settled
+lake costs nothing a step), wake when water beside them moves, when their
+ground is dug, or when a script holds or adds water in them, and are
+dropped once dry.
+
+```lua
+local trench = water.addVolume{ shape = "sim", parent = "Planet", center = beach, cell = 1.25, size = 200,
+  level = false,                                   -- start dry
+  held = { { pos = coastPoint, level = seaRadius } } }
+
+water.hold(trench, coastCells, seaRadius, 2)       -- the sea along the coast, counted as group 2
+local gave = water.exchanged(trench)[2] or 0       -- m³ the sea gave since the last ask
+```
+
+- `level = false` starts it dry; `depths = {...}` (metres per point, a row at
+  a time) starts it from a saved or authored state.
+- `held = { { pos = vec3 or cell = {i, j}, level =, group = } }` and
+  `water.hold(id, cells, level [, group])` hold points' surface at a level
+  (a radius on a round world): the sea at a coast, a lake at its live level,
+  a river's rows at their surface. `water.release(id, cells)` lets them go.
+  `cells` is a list of points in the parent's frame (the point under each),
+  or `{i, j}` columns and rows from the patch's corner, counted from 0.
+  `water.setLevel(id, level)` moves every held point to `level`.
+- `water.exchanged(id)` is what each group of held points gave the water
+  since the last ask, m³ (negative: what it took). A lake held at its level
+  is a finite reservoir: a breach drains it by what left, and the water
+  stops at the sill.
+- `solver = "swe"` (the default) moves the water with momentum: a breach
+  sends a surge down a channel, a wave runs up a beach. `solver = "pipes"`
+  is the cheaper model without momentum, for calm water that only has to find
+  its level. Water with momentum always meets at least a smooth bed's drag (a
+  Manning roughness of 0.012) whatever `roughness` says, which is what lets a
+  shore come to rest. A film thinner than 1 mm reads as dry ground, and one
+  thinner than half that stays where it is.
+- `budget` is the most a frame spends stepping it, in milliseconds (1 by
+  default). Past it the water runs slow for a moment; the frame does not.
+  `perf.counts()` reports `waterAwake` (points in tiles that are moving),
+  `waterSolved` (points solved in the frame) and `waterTiles` (tiles held).
+- `water.state(id)` is its wet points, `{ columns, rows, cells = { i, j,
+  depth, ... } }`, for a save; `addVolume{ ..., state = s }` starts from it.
+- `water.addWater(id, at, m3)` adds water at a point (takes it, if negative):
+  seepage, rain, a pump. `water.setSpring(id, at, rate)` puts a spring there,
+  changes it, or at 0 takes it away.
+- `minDepth` (1 mm) is the least depth that moves and reads as water, and
+  `soak` (metres a second) soaks away films thinner than `soakBelow` (1 cm),
+  so a drained channel dries instead of holding a film for good.
+- `water.tiles(id)` lists the tiles holding water, each `{ key, serial, i,
+  j }`; a tile's `serial` changes only when its water does, so a game
+  rebuilds only the tiles that moved: `water.surface(id, { tile = key })` is
+  one tile's surface, wet points only, and `water.surface(id)` all of them.
+
 `water.falls([id])` lists every place simulated water pours off a drop of more
 than 1.5 m, in the world, refreshed as the water flows: where a game puts its
 waterfall sheets and mist, and takes them away when a fall runs dry.
+
+A declared volume's level can move without removing and adding it again:
+`water.setLevel(id, level)` gives a lake a new surface radius, puts every wet
+point of a heightfield at `level` (`water.setLevels` sets them one by one), and
+holds a sim's held points at `level`, so the sim's water flows in or out there.
+The id and everything else about the volume stay, the physics floats things on
+the new level from the next tick, and the call is cheap enough to make every
+frame while a pool fills or a lake drains through a breach. `water.levelOf(id)`
+reads it back.
+
+```lua
+-- A pit beside the lake seeps full over a minute and a half.
+local pit = water.addVolume{ shape = "lake", parent = "Planet", center = pitCentre, reach = 6, depth = 4 }
+function update(node, dt)
+  local l = water.levelOf(pit)
+  if l < fullRadius then water.setLevel(pit, math.min(fullRadius, l + dt * 0.03)) end
+end
+```
+
+Water rides whatever it lies on **tick by tick**: a Water Volume node, or a
+volume declared with a `parent`, is put where its node is for every fixed
+tick, after the planets move on their rails and again after `fixedUpdate`,
+so a lake on a planet orbiting at hundreds of metres a second, a tank a
+script lifts in `fixedUpdate` or a pool on a ship's deck floats things exactly
+as it would standing still, and `water.at` in `fixedUpdate` answers for that
+tick's water. Water on a body the physics moves (a ship, a lift) also moves
+with it, so what floats in a deck pool is carried along with the ship.
+
+**Things entering and leaving water.** Each tick the physics already knows
+how much of each body, and of each part of an assembly, is under water.
+`water.splashes()` hands back every crossing since the last call, oldest
+first: the node, the water, where it crossed on the surface, the water's up,
+its speed (positive going in), its mass, the face it met the water with and
+what it displaces. A body counts once per crossing, and one bobbing at the
+surface (slower than 0.5 m/s) not at all, so a splash, its sound, a ripple and
+impact damage all read one list. `water.setSlam(volume, k)` makes a fast
+entry stop hard, an impulse `k·ρ·v²·area·dt` against its motion while it goes
+under that never more than stops it; `water.wet(node)` is the seconds since a
+node was last in water, for drips and wet looks.
+
+```lua
+for _, s in ipairs(water.splashes()) do
+  if s.entering and s.speed > 3 then
+    -- s.pos and s.normal place the splash; s.speed and s.mass size it.
+  end
+end
+```
 
 `water.depthAt` and the solver answer from the **same geometry**, so a swim
 state can't disagree with the physics floating it — which is exactly what

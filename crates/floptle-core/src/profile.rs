@@ -548,6 +548,8 @@ pub struct FrameProfile {
     overloaded: bool,
     /// Last frame's animators and how many were culled.
     anim_counts: (usize, usize),
+    /// Simulated water last frame: points awake, points solved, tiles held.
+    water_counts: (usize, usize, usize),
     /// Sleepers woken last frame, by cause, in the physics' `WakeReason`
     /// order.
     wakes: [u32; 10],
@@ -942,6 +944,17 @@ impl FrameProfile {
     /// [`Self::set_fog_paths`]'s switch.
     pub fn fog_paths(&self) -> bool {
         self.fog_paths
+    }
+
+    /// Last frame's simulated water: points in water that is moving, points
+    /// solved, and the tiles tiled sims hold.
+    pub fn set_water_counts(&mut self, awake: usize, solved: usize, tiles: usize) {
+        self.water_counts = (awake, solved, tiles);
+    }
+
+    /// [`Self::set_water_counts`]'s numbers.
+    pub fn water_counts(&self) -> (usize, usize, usize) {
+        self.water_counts
     }
 
     /// Last frame's animators, and how many culling skipped.

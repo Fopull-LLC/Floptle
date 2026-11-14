@@ -3004,12 +3004,24 @@ impl ScriptHost {
         let water_freeze: Rc<RefCell<Vec<(u32, bool)>>> = Rc::new(RefCell::new(Vec::new()));
         let water_declared: Rc<RefCell<Vec<floptle_core::water::DeclaredWater>>> = Rc::default();
         let water_surfaces = crate::water_api::SurfaceBook::default();
+        let water_changed: Rc<RefCell<Vec<u32>>> = Rc::default();
+        let water_sim_cmds: Rc<RefCell<Vec<floptle_core::water::SimCmd>>> = Rc::default();
+        let water_exchanged: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>> = Rc::default();
+        let water_splashes: Rc<RefCell<std::collections::VecDeque<floptle_physics::splash::Splash>>> = Rc::default();
+        let water_wet: Rc<RefCell<(f64, HashMap<u32, f64>)>> = Rc::default();
+        let water_slam: Rc<RefCell<HashMap<u32, f32>>> = Rc::default();
         crate::water_api::install_water_api(
             &lua,
             crate::water_api::WaterShared {
                 volumes: water_volumes.clone(),
                 freeze: water_freeze.clone(),
                 declared: water_declared.clone(),
+                changed: water_changed.clone(),
+                sim_cmds: water_sim_cmds.clone(),
+                exchanged: water_exchanged.clone(),
+                splashes: water_splashes.clone(),
+                wet: water_wet.clone(),
+                slam: water_slam.clone(),
                 next_id: Rc::default(),
                 colliders: colliders.clone(),
                 sim_origin: sim_origin.clone(),
@@ -3626,6 +3638,12 @@ impl ScriptHost {
             water_freeze,
             water_declared,
             water_surfaces,
+            water_changed,
+            water_sim_cmds,
+            water_exchanged,
+            water_splashes,
+            water_wet,
+            water_slam,
             scatter_sources,
             scatter_owners,
             scatter_settled,
@@ -4216,6 +4234,24 @@ impl ScriptHost {
         *self.water_volumes.borrow_mut() = v;
     }
 
+    /// Move one of the scene's bodies of water to where its node is this
+    /// tick: a sea's centre and radius, a pool's centre, turn and
+    /// half-extents. Between the once-a-frame [`Self::set_water_volumes`],
+    /// so `water.at` in `fixedUpdate` answers for the water the solver
+    /// floats things in.
+    pub fn pose_water_volume(&self, entity: u32, center: glam::DVec3, rot: glam::Quat, radius: f64, half: glam::DVec3) {
+        if let Some(v) = self.water_volumes.borrow_mut().iter_mut().find(|v| v.entity == entity) {
+            v.center = center.to_array();
+            if v.sea {
+                v.radius = radius;
+            } else {
+                let q = rot.as_dquat();
+                v.rot = [q.x, q.y, q.z, q.w];
+                v.half = half.to_array();
+            }
+        }
+    }
+
     /// The water scripts declared with `water.addVolume`, frames as of the
     /// last [`Self::set_water_frame`].
     pub fn declared_water(&self) -> std::cell::Ref<'_, Vec<floptle_core::water::DeclaredWater>> {
@@ -4261,6 +4297,57 @@ impl ScriptHost {
         if let Some(sim) = self.water_declared.borrow_mut().iter_mut().find(|w| w.id == id).and_then(|w| w.simulated.as_mut()) {
             sim.falls = falls;
         }
+    }
+
+    /// Declared water a script moved the surface of (`water.setLevel`)
+    /// since the last ask, by id, each once: the solver takes its new
+    /// surface for the next tick.
+    pub fn take_water_changed(&self) -> Vec<u32> {
+        let mut ids = std::mem::take(&mut *self.water_changed.borrow_mut());
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// The holds, releases and water added to tiled sims since the last ask.
+    pub fn take_water_sim_cmds(&self) -> Vec<floptle_core::water::SimCmd> {
+        std::mem::take(&mut *self.water_sim_cmds.borrow_mut())
+    }
+
+    /// Add what a tiled sim's held groups gave to what `water.exchanged`
+    /// hands back, m³ by group.
+    pub fn add_water_exchanged(&self, id: u32, groups: &[(u16, f64)]) {
+        let mut all = self.water_exchanged.borrow_mut();
+        let e = all.entry(id).or_default();
+        for &(g, v) in groups {
+            *e.entry(g).or_insert(0.0) += v;
+        }
+    }
+
+    /// Water entries and exits from a tick, for `water.splashes`: the last
+    /// 64 are kept.
+    pub fn push_water_splashes(&self, events: Vec<floptle_physics::splash::Splash>) {
+        let mut ring = self.water_splashes.borrow_mut();
+        for e in events {
+            if ring.len() >= floptle_physics::splash::SPLASH_RING {
+                ring.pop_front();
+            }
+            ring.push_back(e);
+        }
+    }
+
+    /// The physics clock, and the nodes in water at it, for `water.wet`.
+    pub fn set_water_wet(&self, clock: f64, wet: &[u32]) {
+        let mut w = self.water_wet.borrow_mut();
+        w.0 = clock;
+        for &n in wet {
+            w.1.insert(n, clock);
+        }
+    }
+
+    /// `water.setSlam`'s values, by the water's entity.
+    pub fn water_slam(&self) -> HashMap<u32, f32> {
+        self.water_slam.borrow().clone()
     }
 
     /// Drop every declared water — a scene switch, like [`Self::clear_weather`].

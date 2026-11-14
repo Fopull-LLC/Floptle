@@ -14,7 +14,7 @@ impl crate::Editor {
         self.vfx.wind = (self.script_host.wind_field().clone(), self.script_host.weather_time());
     }
 
-    fn refresh_winds(&mut self) {
+    pub(crate) fn refresh_winds(&mut self) {
         let anchored = self.script_host.anchored_winds();
         if anchored.is_empty() {
             return;
@@ -47,11 +47,22 @@ pub(crate) struct WaterSims {
     /// Volumes waiting for ground to be under them, and how many frames
     /// they have waited.
     waiting: std::collections::HashMap<u32, u32>,
+    /// Declared water that lies on a node, and the node: found by name once
+    /// a frame, read again every tick.
+    pub(crate) anchors: Vec<(u32, floptle_core::Entity)>,
+    /// Where each body of water the solver holds gets its pose from, read
+    /// every tick: see `water_pose.rs`.
+    pub(crate) posers: Vec<crate::water_pose::WaterPoser>,
+    /// Tiled sims (declared with a `center`), by volume id.
+    pub(crate) tiled: std::collections::HashMap<u32, crate::water_tiled::TiledSim>,
 }
 
 struct WaterSim {
     grid: floptle_field::water::WaterGrid,
     water: floptle_field::water::ShallowWater,
+    /// The level its held points are held at, and those points.
+    level: f32,
+    held: Vec<usize>,
     /// The level edit the ground was last read against.
     seen_edits: u64,
 }
@@ -128,6 +139,7 @@ impl crate::Editor {
                 }
                 // The sea or the lake beyond the patch: its level held along
                 // the edge, wherever the ground there is under it.
+                let mut held = Vec::new();
                 if spec.hold_edges {
                     for j in 0..g.rows {
                         for i in 0..g.columns {
@@ -135,13 +147,22 @@ impl crate::Editor {
                             let edge = i == 0 || j == 0 || i + 1 == g.columns || j + 1 == g.rows;
                             if edge && grid.ground[c] < level {
                                 water.hold_level(c, level);
+                                held.push(c);
                             }
                         }
                     }
                 }
-                self.water_sims.sims.insert(w.id, WaterSim { grid, water, seen_edits: edits });
+                self.water_sims.sims.insert(w.id, WaterSim { grid, water, level, held, seen_edits: edits });
             }
             let Some(s) = self.water_sims.sims.get_mut(&w.id) else { continue };
+            // `water.setLevel`: what is held is held at the new level, and
+            // water flows in or out there until the rest follows.
+            if spec.level != s.level {
+                s.level = spec.level;
+                for &c in &s.held {
+                    s.water.hold_level(c, spec.level);
+                }
+            }
             // Ground dug or filled since: read it again where it changed, and
             // wake the water there.
             if edits != s.seen_edits {
@@ -240,6 +261,10 @@ impl crate::Editor {
                 Surface::Grid(std::sync::Arc::new(HeightGrid { levels, flow, ..(**g).clone() })),
             );
         }
+        drop(lent);
+        let (awake, solved, tiles) = self.step_tiled_sims(dt);
+        let simple: (usize, usize) = self.water_sims.sims.values().fold((0, 0), |(a, s), w| (a + w.water.awake_count(), s + w.water.solved_count()));
+        self.script_host.profile().borrow_mut().set_water_counts(awake * floptle_core::water::TILE * floptle_core::water::TILE + simple.0, solved + simple.1, tiles);
     }
 }
 
@@ -268,8 +293,9 @@ impl crate::Editor {
     /// Where each anchored `water.addVolume` lake's node has got to, in the
     /// same pass the winds take, so a lake turns with its planet for the
     /// solver and for `water.at` alike.
-    fn refresh_water_frames(&mut self) {
+    pub(crate) fn refresh_water_frames(&mut self) {
         let anchored = self.script_host.anchored_water();
+        self.water_sims.anchors.clear();
         if anchored.is_empty() {
             return;
         }
@@ -281,6 +307,7 @@ impl crate::Editor {
         }
         for (id, name) in &anchored {
             let frame = nodes.get(name.as_str()).map_or(floptle_core::scatter::Frame::IDENTITY, |&e| {
+                self.water_sims.anchors.push((*id, e));
                 let wt = floptle_core::world_transform(&self.world, e);
                 floptle_core::scatter::Frame { origin: wt.translation, rot: wt.rotation.normalize() }
             });
@@ -312,6 +339,7 @@ impl crate::Editor {
                 angular_drag: w.angular_drag,
                 frozen: false,
                 entity: u32::MAX - w.id,
+                carry: floptle_physics::WaterCarry::default(),
             })
             .collect()
     }

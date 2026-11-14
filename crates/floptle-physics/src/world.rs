@@ -1430,6 +1430,7 @@ impl PhysicsWorld {
                 crate::WaterShape::Sphere { center, .. } | crate::WaterShape::Box { center, .. } => *center += delta,
                 crate::WaterShape::Declared { origin, .. } => *origin = new_origin,
             }
+            v.carry.about += delta;
         }
         self.origin = new_origin;
         for c in &mut self.colliders {

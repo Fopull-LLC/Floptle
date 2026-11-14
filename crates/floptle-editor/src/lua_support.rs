@@ -1962,13 +1962,16 @@ function water.flowAt(x, y, z) end
 ---point), or water the engine moves (`shape = \"sim\"`: the same grid keys and
 ---`level`, the height it is filled to over the ground found under it; it then
 ---flows, drains into holes dug beside it and settles; `springs`, `roughness`
----and `holdEdges` make it a river). It floats things, slows
+---and `holdEdges` make it a river; with `center` instead of `origin` it lies on
+---a round world, each point's up its own radial, `level` a radius or `false`
+---to start dry, ground read from the terrain's field, `size` metres across,
+---stored in tiles only where water is). It floats things, slows
 ---them and carries them on its `current`, and
 ---`water.at` answers for it. `depth` is how far below the surface its bed lies,
 ---so a cave under a lake is dry. From inside it looks like a Water Volume node
 ---(`tint`, `visibility` to change that, `underwater = false` for none). Returns
 ---an id.
----@param opts { shape?: \"lake\"|\"heightfield\"|\"sim\", level?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
+---@param opts { shape?: \"lake\"|\"heightfield\"|\"sim\", level?: number|false, size?: number, depths?: number[], held?: { pos?: Vec3, cell?: integer[], level?: number, group?: integer }[], solver?: \"swe\"|\"pipes\", budget?: number, flat?: boolean, state?: { columns: integer, rows: integer, cells: number[] }, minDepth?: number, soak?: number, soakBelow?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
 ---@return integer
 function water.addVolume(opts) end
 ---Every place simulated water pours off a drop of more than 1.5 m, in the
@@ -1988,7 +1991,9 @@ function water.falls(id) end
 ---marks the answer `dynamic`, so it goes to `mesh.build` once and then to
 ---`mesh.update`. `buffers = true` returns buffers instead of lists.
 ---@param id integer
----@param opts? { cells?: integer, colors?: boolean, fixed?: boolean, buffers?: boolean }
+---A sim laid with a `center` is its wet points only; `tile` (a key from
+---`water.tiles`) is one tile of it.
+---@param opts? { cells?: integer, colors?: boolean, fixed?: boolean, buffers?: boolean, tile?: integer }
 ---@return { positions: number[]|buffer, normals: number[]|buffer, uvs: number[]|buffer, indices: integer[]|buffer, colors?: number[]|buffer, dynamic?: boolean, indexCapacity?: integer }|nil
 function water.surface(id, opts) end
 ---Has this water's surface changed since `water.surface(id)` was last called?
@@ -1996,6 +2001,88 @@ function water.surface(id, opts) end
 ---@param id integer
 ---@return boolean
 function water.surfaceChanged(id) end
+---Hold points of a sim laid with a `center` at `level` (a radius on a round
+---world): the sea at a coast, a lake at its live level. What they give or take
+---is counted in `group` (1 by default) for `water.exchanged`. `cells` is a list
+---of points in the parent's frame, or `{i, j}` columns and rows from the
+---patch's corner counted from 0, or one point.
+---@param id integer
+---@param cells Vec3|Vec3[]|integer[][]
+---@param level number
+---@param group? integer
+---@return boolean
+function water.hold(id, cells, level, group) end
+---Let held points of a sim go: the water there flows again.
+---@param id integer
+---@param cells Vec3|Vec3[]|integer[][]
+---@return boolean
+function water.release(id, cells) end
+---What each group of held points gave the water since the last ask, m³
+---(negative: what it took).
+---@param id integer
+---@return table<integer, number>
+function water.exchanged(id) end
+---The tiles of a sim laid with a `center` that hold water, 32 × 32 points
+---each; a tile's `serial` changes only when its water does.
+---@param id integer
+---@return { key: integer, serial: integer, i: integer, j: integer }[]|nil
+function water.tiles(id) end
+---Every wet point of a sim laid with a `center`, for a save:
+---`water.addVolume{ ..., state = s }` starts the same sim from it.
+---@param id integer
+---@return { columns: integer, rows: integer, cells: number[] }|nil
+function water.state(id) end
+---Add `m3` cubic metres of water to a sim laid with a `center` at a point (or
+---an `{i, j}` point), or take it if negative: seepage, rain, a pump.
+---@param id integer
+---@param at Vec3|integer[]
+---@param m3 number
+---@return boolean
+function water.addWater(id, at, m3) end
+---A spring at a point of a sim laid with a `center`, giving `rate` m³/s; 0 takes
+---it away.
+---@param id integer
+---@param at Vec3|integer[]
+---@param rate number
+---@return boolean
+function water.setSpring(id, at, rate) end
+---Everything that entered or left water since the last call, oldest first (the
+---last 64 kept). Each body or assembly part counts once per crossing; slower
+---than 0.5 m/s is bobbing and is not reported. `speed` is + going in.
+---@return { node: Node, volume?: integer, water?: Node, pos: Vec3, normal: Vec3, speed: number, mass: number, area: number, displaced: number, entering: boolean }[]
+function water.splashes() end
+---What something entering this water fast meets: an impulse `k·ρ·v²·area·dt`
+---against its motion while it goes under, never more than stops it. `volume`
+---is an addVolume id or a Water Volume node; 0 (the default) is none.
+---@param volume integer|Node
+---@param k number
+function water.setSlam(volume, k) end
+---Seconds since `node` was last in water: 0 while it is, nil if it never was.
+---@param node Node
+---@return number|nil
+function water.wet(node) end
+---Move the surface of water `water.addVolume` declared, in place: its id,
+---look, density, drag, current and depth stay, and the physics floats things on
+---the new level from the next tick. A lake's `level` is its surface's radius
+---from its parent's centre; a heightfield's wet points all go to `level`; a
+---sim's held points go to `level`. Cheap enough to call every frame. true if
+---there was such water.
+---@param id integer
+---@param level number
+---@return boolean
+function water.setLevel(id, level) end
+---A heightfield's surface heights, one per point as `water.addVolume` took
+---them (`false` for dry ground), the same count. true if there was such water.
+---@param id integer
+---@param levels (number|boolean)[]
+---@return boolean
+function water.setLevels(id, levels) end
+---The level of water `water.addVolume` declared: a lake's radius, the mean of
+---a heightfield's wet points, a sim's mean surface where it is wet. nil when
+---there is none, or none of it is wet.
+---@param id integer
+---@return number|nil
+function water.levelOf(id) end
 ---Take away water `water.addVolume` declared. true if there was some.
 ---@param id integer
 ---@return boolean

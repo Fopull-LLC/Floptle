@@ -194,6 +194,8 @@ mod water_sheet_tests;
 #[cfg(test)]
 mod tile_physics_tests;
 #[cfg(test)]
+mod water_tick_tests;
+#[cfg(test)]
 mod template_gen;
 #[cfg(test)]
 mod template_village;
@@ -293,6 +295,8 @@ mod rollback_session;
 mod rig_overrides;
 mod scatter_draw;
 mod weather;
+mod water_pose;
+mod water_tiled;
 mod scene_ops;
 mod space;
 mod script_actions;
