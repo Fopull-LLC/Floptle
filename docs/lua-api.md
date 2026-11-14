@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 231
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 233
 - [node — transform & body fields](#node--transform--body-fields) — 45
 - [node — methods & handles](#node--methods--handles) — 41
 - [vectors, directions & easing](#vectors-directions--easing) — 51
@@ -148,6 +148,10 @@ agent:teleport(point) — put it AND its node somewhere without walking there, a
 
 The settings a game offers the person playing it, and the one thing every main menu needs: quit. app.quit(), app.title(), app.version(), and the video settings — app.vsync/setVsync, app.retro/setRetro, app.retroHeight/setRetroHeight, app.retroIntegerScale/setRetroIntegerScale. A setting you change here is for THIS SESSION: it lives in project.ron, the file that ships to every player, so Stop puts it back — persist the player's choice yourself with save.*, the same rule access.* follows. Window resolution and fullscreen are NOT here yet; that is one question (windowing) waiting to be answered properly. See docs/scripting.md §30.
 
+### `app.anisotropy`
+
+app.anisotropy() → 1, 2, 4, 8 or 16: the texture filtering app.setAnisotropy set, or the project's Texture filtering setting until it does.
+
 ### `app.antialias`
 
 app.antialias() → how the 3D scene smooths its edges: "Fxaa" or "Off", the names project.ron uses. The project's setting until a script sets it.
@@ -219,6 +223,10 @@ app.retroHeight() → the internal height the game composites at, in pixels. In 
 ### `app.retroIntegerScale`
 
 app.retroIntegerScale() → whether the retro composite is upscaled by a WHOLE number and letterboxed rather than stretched to fill.
+
+### `app.setAnisotropy`
+
+app.setAnisotropy(1 | 2 | 4 | 8 | 16) — a settings screen's texture filtering: how many samples a smooth (mipmapped, filter SmoothMipmaps) texture takes along ground or water seen at a grazing angle. Higher keeps the detail far into the distance instead of smearing it to a blur; 1 is plain trilinear filtering. Pixel-art and plain smooth textures (UI images, sprites) are not affected. Changing it remakes the samplers once, on the frame it changes. For this session, as the other video settings are: keep the player's choice with save.* and set it again at start; the project's Texture filtering setting (8 unless changed) is the default. Refuses: any other number.
 
 ### `app.setAntialias`
 

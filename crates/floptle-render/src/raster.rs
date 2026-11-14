@@ -845,6 +845,8 @@ const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLay
 struct RegisteredMesh {
     gpu_mesh: GpuMesh,
     tex_bind: wgpu::BindGroup,
+    /// The sampling `tex_bind` samples its own picture with.
+    sampling: TexSampling,
     _texture: Option<wgpu::Texture>, // kept alive for the bind group (None = default)
     /// Base offset of this mesh's vertex-paint block in `vpaint_buf`; 0 = unpainted.
     paint_base: u32,
@@ -1136,6 +1138,10 @@ pub struct Raster {
     /// One sampler per distinct [`TexSampling`], built on demand and reused (textures
     /// pick theirs by filter/wrap; samplers are cheap to share).
     samplers: HashMap<TexSampling, wgpu::Sampler>,
+    /// How many samples a mipmapped picture's sampler may take along a
+    /// footprint seen at an angle ([`Self::set_anisotropy`]): 1 is plain
+    /// trilinear.
+    anisotropy: u16,
     default_tex: wgpu::Texture,
     /// [`Self::white_texture`]'s handle, registered on first ask. One per
     /// renderer: every "draw this untextured" in the frame is the same 1×1
@@ -1672,6 +1678,10 @@ struct FlslBinding {
     shader: FlslShaderId,
     params_buf: wgpu::Buffer,
     bind: wgpu::BindGroup,
+    /// What each slot binds and which slots are data, kept so the binding
+    /// can be made again over new samplers ([`Raster::set_anisotropy`]).
+    textures: Vec<Option<TexId>>,
+    data: Vec<bool>,
 }
 
 /// One custom-shader draw: mesh + optional base-texture override (group(1),
@@ -2210,6 +2220,7 @@ impl Raster {
             tex_layout,
             empty_field_bind,
             samplers: HashMap::new(),
+            anisotropy: 1,
             default_tex,
             white_tex: None,
             flat_normal_view,
@@ -2764,8 +2775,6 @@ impl Raster {
         textures: &[Option<TexId>],
         data: &[bool],
     ) -> FlslBindingId {
-        let default_sampler = self.sampler_for(gpu, TexSampling::default());
-        let sh = &self.flsl_shaders[shader.0 as usize];
         let params_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raster-flsl-params"),
             size: (params.len().max(16)) as u64,
@@ -2773,12 +2782,33 @@ impl Raster {
             mapped_at_creation: false,
         });
         gpu.queue.write_buffer(&params_buf, 0, params);
+        let bind = self.flsl_bind_group(gpu, shader, &params_buf, textures, data);
+        let binding = FlslBinding { shader, params_buf, bind, textures: textures.to_vec(), data: data.to_vec() };
+        match replace {
+            Some(id) if (id.0 as usize) < self.flsl_bindings.len() => {
+                self.flsl_bindings[id.0 as usize] = binding;
+                id
+            }
+            _ => {
+                self.flsl_bindings.push(binding);
+                FlslBindingId(self.flsl_bindings.len() as u32 - 1)
+            }
+        }
+    }
 
-        let default_view = self.default_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut entries =
-            vec![wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() }];
+    /// The group(3) bind group of a shader's binding: its params, and each
+    /// slot's texture with the sampler of the sampling it was registered with.
+    fn flsl_bind_group(
+        &mut self,
+        gpu: &Gpu,
+        shader: FlslShaderId,
+        params_buf: &wgpu::Buffer,
+        textures: &[Option<TexId>],
+        data: &[bool],
+    ) -> wgpu::BindGroup {
+        let tex_slots = self.flsl_shaders[shader.0 as usize].tex_slots;
         // Per-slot samplers reuse the texture's own registered sampling.
-        let samplers: Vec<wgpu::Sampler> = (0..sh.tex_slots)
+        let samplers: Vec<wgpu::Sampler> = (0..tex_slots)
             .map(|i| {
                 let sampling = textures
                     .get(i)
@@ -2787,9 +2817,13 @@ impl Raster {
                     .and_then(|t| self.textures.get(t.0 as usize))
                     .map(|t| t.sampling)
                     .unwrap_or_default();
-                self.samplers.get(&sampling).cloned().unwrap_or_else(|| default_sampler.clone())
+                self.sampler_for(gpu, sampling)
             })
             .collect();
+        let sh = &self.flsl_shaders[shader.0 as usize];
+        let default_view = self.default_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut entries =
+            vec![wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() }];
         for (i, sampler) in samplers.iter().enumerate() {
             let view = textures
                 .get(i)
@@ -2807,22 +2841,11 @@ impl Raster {
                 resource: wgpu::BindingResource::Sampler(sampler),
             });
         }
-        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("raster-flsl-material"),
             layout: &sh.group3_layout,
             entries: &entries,
-        });
-        let binding = FlslBinding { shader, params_buf, bind };
-        match replace {
-            Some(id) if (id.0 as usize) < self.flsl_bindings.len() => {
-                self.flsl_bindings[id.0 as usize] = binding;
-                id
-            }
-            _ => {
-                self.flsl_bindings.push(binding);
-                FlslBindingId(self.flsl_bindings.len() as u32 - 1)
-            }
-        }
+        })
     }
 
     /// The shader a live binding was made for, or `None` for an id nobody
@@ -2837,6 +2860,69 @@ impl Raster {
         if let Some(b) = self.flsl_bindings.get(id.0 as usize) {
             gpu.queue.write_buffer(&b.params_buf, 0, params);
         }
+    }
+
+    /// How many samples a mipmapped picture takes along a footprint seen at
+    /// a grazing angle: 1 (plain trilinear), 2, 4, 8 or 16; anything else is
+    /// held to the nearest of those at or below it. Ground and water seen
+    /// low across keep their detail into the distance instead of smearing to
+    /// the level of the footprint's longest side. Only `SmoothMipmaps`
+    /// pictures take it: pixel art and plain smooth images are left as they
+    /// are.
+    ///
+    /// The samplers live in a cache by sampling, so a change makes each one
+    /// once and remakes the bind groups that hold them (every picture's, every
+    /// material set's, every shader binding's), on the call that changes it.
+    /// Asking for the level already set does nothing. Answers whether
+    /// anything changed.
+    pub fn set_anisotropy(&mut self, gpu: &Gpu, level: u32) -> bool {
+        let level = anisotropy_level(level);
+        if level == self.anisotropy {
+            return false;
+        }
+        self.anisotropy = level;
+        self.samplers.retain(|s, _| s.filter != TexFilter::SmoothMipmaps);
+        // Each picture's own bind, but not the sets: they bind several.
+        let sets: std::collections::HashSet<u32> =
+            self.mat_sets.values().map(|t| t.0).chain(self.pools.array_ids.iter().copied()).collect();
+        for i in 0..self.textures.len() {
+            let t = &self.textures[i];
+            if sets.contains(&(i as u32)) || t.sampling.filter != TexFilter::SmoothMipmaps {
+                continue;
+            }
+            let (sampling, view) = (t.sampling, t.view.clone());
+            let sampler = self.sampler_for(gpu, sampling);
+            self.textures[i].bind = self.plain_surface_bind(gpu, "raster-material-tex", &view, &sampler);
+        }
+        let sets: Vec<([u32; SURFACE_SLOTS], TexId)> = self.mat_sets.iter().map(|(k, id)| (*k, *id)).collect();
+        for (key, id) in sets {
+            let bind = self.surface_set_bind(gpu, key);
+            self.textures[id.0 as usize].bind = bind;
+        }
+        self.rebind_array_sets(gpu);
+        for i in 0..self.meshes.len() {
+            let m = &self.meshes[i];
+            let Some(tex) = m._texture.as_ref().filter(|_| m.sampling.filter == TexFilter::SmoothMipmaps) else {
+                continue;
+            };
+            let (sampling, view) = (m.sampling, tex.create_view(&wgpu::TextureViewDescriptor::default()));
+            let sampler = self.sampler_for(gpu, sampling);
+            self.meshes[i].tex_bind = self.plain_surface_bind(gpu, "raster-mesh-tex", &view, &sampler);
+        }
+        for i in 0..self.flsl_bindings.len() {
+            let b = &self.flsl_bindings[i];
+            let (shader, params_buf, textures, data) = (b.shader, b.params_buf.clone(), b.textures.clone(), b.data.clone());
+            if (shader.0 as usize) >= self.flsl_shaders.len() {
+                continue;
+            }
+            self.flsl_bindings[i].bind = self.flsl_bind_group(gpu, shader, &params_buf, &textures, &data);
+        }
+        true
+    }
+
+    /// The anisotropy [`Self::set_anisotropy`] set.
+    pub fn anisotropy(&self) -> u32 {
+        u32::from(self.anisotropy)
     }
 
     /// A sampler for the given settings, created on first use and cached.
@@ -2875,6 +2961,9 @@ impl Raster {
             mag_filter: mag,
             min_filter: min,
             mipmap_filter: mip,
+            // Only a mipmapped sampler filters linearly at every level,
+            // which anisotropic filtering requires.
+            anisotropy_clamp: if s.filter == TexFilter::SmoothMipmaps { self.anisotropy } else { 1 },
             ..Default::default()
         });
         self.samplers.insert(s, samp.clone());
@@ -2895,7 +2984,7 @@ impl Raster {
         self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| (c[1][0] as u32) & EXT_BLEND != 0).collect()
     }
 
-    pub(crate) fn material_bind(&self, id: TexId) -> Option<&wgpu::BindGroup> {
+    pub fn material_bind(&self, id: TexId) -> Option<&wgpu::BindGroup> {
         self.textures.get(id.0 as usize).map(|t| &t.bind)
     }
 
@@ -2950,40 +3039,7 @@ impl Raster {
         if let Some(&id) = self.mat_sets.get(&key) {
             return id;
         }
-        let white = linear_view_of(&self.default_tex);
-        // Resolve each slot to (view, sampler), falling back to the neutral pair.
-        // An unknown id falls back too rather than failing the draw: a material
-        // pointing at a texture that failed to load should render untextured,
-        // not disappear.
-        //
-        // `data` picks the RAW view. Slot 0 is the base colour — a picture, and
-        // sRGB is how pictures are stored. Slots 1..4 are a normal map, a
-        // roughness, a metallic and an occlusion: numbers, which must come back
-        // as the numbers that were authored.
-        let slot = |k: u32, flat: bool, data: bool| -> (&wgpu::TextureView, &wgpu::Sampler) {
-            match self.textures.get(k as usize) {
-                Some(t) => (
-                    if data { &t.linear_view } else { &t.view },
-                    self.samplers.get(&t.sampling).unwrap_or(&self.neutral_samp),
-                ),
-                None if flat => (&self.flat_normal_view, &self.neutral_samp),
-                None => (&white, &self.neutral_samp),
-            }
-        };
-        let bind = make_surface_bind(
-            &gpu.device,
-            &self.tex_layout,
-            "raster-surface-set",
-            [
-                slot(key[0], false, false),
-                slot(key[1], true, true),
-                slot(key[2], false, true),
-                slot(key[3], false, true),
-                slot(key[4], false, true),
-                // The emissive map is a colour, stored as a picture is.
-                slot(key[5], false, false),
-            ],
-        );
+        let bind = self.surface_set_bind(gpu, key);
         // The set's own `view` / `_texture` mirror its BASE, so `texture_view`
         // and `texture_size` keep answering about the image an artist would
         // point at (a spritesheet's cell inset asks for exactly this).
@@ -3005,6 +3061,50 @@ impl Raster {
         self.mat_sets.insert(key, id);
         self.pools.note_set(id, key);
         id
+    }
+
+    /// The group(1) bind of a material set over the six textures `key` names.
+    fn surface_set_bind(&mut self, gpu: &Gpu, key: [u32; SURFACE_SLOTS]) -> wgpu::BindGroup {
+        // Every sampler the set binds exists before the slots borrow them.
+        for k in key {
+            if let Some(sampling) = self.textures.get(k as usize).map(|t| t.sampling) {
+                self.sampler_for(gpu, sampling);
+            }
+        }
+        let white = linear_view_of(&self.default_tex);
+        // Resolve each slot to (view, sampler), falling back to the neutral pair.
+        // An unknown id falls back too rather than failing the draw: a material
+        // pointing at a texture that failed to load should render untextured,
+        // not disappear.
+        //
+        // `data` picks the RAW view. Slot 0 is the base colour — a picture, and
+        // sRGB is how pictures are stored. Slots 1..4 are a normal map, a
+        // roughness, a metallic and an occlusion: numbers, which must come back
+        // as the numbers that were authored.
+        let slot = |k: u32, flat: bool, data: bool| -> (&wgpu::TextureView, &wgpu::Sampler) {
+            match self.textures.get(k as usize) {
+                Some(t) => (
+                    if data { &t.linear_view } else { &t.view },
+                    self.samplers.get(&t.sampling.sampler_part()).unwrap_or(&self.neutral_samp),
+                ),
+                None if flat => (&self.flat_normal_view, &self.neutral_samp),
+                None => (&white, &self.neutral_samp),
+            }
+        };
+        make_surface_bind(
+            &gpu.device,
+            &self.tex_layout,
+            "raster-surface-set",
+            [
+                slot(key[0], false, false),
+                slot(key[1], true, true),
+                slot(key[2], false, true),
+                slot(key[3], false, true),
+                slot(key[4], false, true),
+                // The emissive map is a colour, stored as a picture is.
+                slot(key[5], false, false),
+            ],
+        )
     }
 
     /// Whether binding `tex` draws the same as an untextured mesh's own bind:
@@ -4192,6 +4292,7 @@ impl Raster {
         let mesh = RegisteredMesh {
             gpu_mesh,
             tex_bind,
+            sampling: TexSampling::default(),
             _texture: None,
             paint_base: 0,
             dynamic: Some(slot),
@@ -4395,12 +4496,14 @@ impl Raster {
             .create_view(&wgpu::TextureViewDescriptor::default());
         // A mesh with no texture of its own keeps the shared default's crisp
         // sampling, as `set_mesh_sampling` always left it.
-        let sampler = self.sampler_for(gpu, if owned.is_some() { sampling } else { TexSampling::default() });
+        let sampling = if owned.is_some() { sampling } else { TexSampling::default() };
+        let sampler = self.sampler_for(gpu, sampling);
         let tex_bind = self.plain_surface_bind(gpu, "raster-mesh-tex", &view, &sampler);
 
         self.meshes.push(RegisteredMesh {
             gpu_mesh,
             tex_bind,
+            sampling,
             _texture: owned,
             paint_base,
             dynamic: None,
@@ -4509,6 +4612,7 @@ impl Raster {
         let bind = self.plain_surface_bind(gpu, "raster-mesh-tex", &view, &sampler);
         if let Some(m) = self.meshes.get_mut(id.0 as usize) {
             m.tex_bind = bind;
+            m.sampling = sampling;
         }
     }
 
@@ -4533,7 +4637,10 @@ impl Raster {
                 index_count: m.gpu_mesh.index_count,
             },
             tex_bind: m.tex_bind.clone(),
-            _texture: None, // the source slot keeps the texture alive
+            sampling: m.sampling,
+            // The same picture as the source (a handle, not a copy), so the
+            // clone's bind can be made again over a new sampler.
+            _texture: m._texture.clone(),
             paint_base: m.paint_base,
             dynamic: None,
             // Its vertices are a pose the CPU writes every frame.
@@ -5902,6 +6009,18 @@ fn picture_key(t: &TextureData, mips: bool, coverage: AlphaCoverage) -> u64 {
 /// slot binds. Falls back to the ordinary view for a texture that was not
 /// uploaded as sRGB (a render target in the float scene format), where there is
 /// no decode to undo.
+/// An anisotropy a sampler takes: 1, 2, 4, 8 or 16, the nearest at or
+/// below `level` (0 is 1).
+pub fn anisotropy_level(level: u32) -> u16 {
+    match level {
+        0..=1 => 1,
+        2..=3 => 2,
+        4..=7 => 4,
+        8..=15 => 8,
+        _ => 16,
+    }
+}
+
 fn linear_view_of(tex: &wgpu::Texture) -> wgpu::TextureView {
     if tex.format() == wgpu::TextureFormat::Rgba8UnormSrgb {
         tex.create_view(&wgpu::TextureViewDescriptor {

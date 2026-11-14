@@ -3300,6 +3300,10 @@ pub enum ScriptVec3Doc {
     Fast,
 }
 
+/// The anisotropy a project takes when it sets none: sharp ground and water
+/// into the distance for a small cost on the texture units.
+pub const DEFAULT_ANISOTROPY: u32 = 8;
+
 /// Project-wide render settings — the PS1/PS2-style knobs that apply to every
 /// scene. Saved to `project.ron`, edited in the editor's Project Settings.
 ///
@@ -3556,6 +3560,12 @@ pub struct ProjectConfigDoc {
     /// [`March`](FogMethodDoc::March).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fog_method: Option<FogMethodDoc>,
+    /// How many samples a mipmapped texture takes along a surface seen at a
+    /// grazing angle: 1, 2, 4, 8 or 16. `None` (every file from before the
+    /// setting, and a new project until it is changed) is
+    /// [`DEFAULT_ANISOTROPY`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anisotropy: Option<u8>,
     /// How a render scale is brought up to the screen; see [`UpscaleDoc`].
     /// `None` means the file predates the setting and resolves to
     /// [`Bilinear`](UpscaleDoc::Bilinear).
@@ -3670,6 +3680,7 @@ impl ProjectConfigDoc {
             wheel_friction: Some(WheelFrictionDoc::Single),
             terrain_shape: Some(TerrainShapeDoc::Natural),
             fog_method: Some(FogMethodDoc::Grid),
+            anisotropy: None,
             upscale: Some(UpscaleDoc::Fsr1),
             screen_draw_order: Some(ScreenDrawOrderDoc::CallOrder),
             terrain_border: Some(TerrainBorderDoc::Natural),
@@ -3739,6 +3750,14 @@ impl ProjectConfigDoc {
     /// file from before the setting did it bilinearly, and still does.
     pub fn upscale_resolved(&self) -> UpscaleDoc {
         self.upscale.unwrap_or(UpscaleDoc::Bilinear)
+    }
+
+    /// How many samples a mipmapped texture takes at a grazing angle: the
+    /// project's setting, [`DEFAULT_ANISOTROPY`] when it has none. Older
+    /// projects take the default too: it changes how sharp distant ground
+    /// is, and nothing else.
+    pub fn anisotropy_resolved(&self) -> u32 {
+        self.anisotropy.map_or(DEFAULT_ANISOTROPY, u32::from)
     }
 
     /// How this project builds its volumetric fog. A project file from
@@ -5579,6 +5598,23 @@ mod tests {
         let text = ron::ser::to_string(&new).unwrap();
         let back: ProjectConfigDoc = ron::from_str(&text).unwrap();
         assert_eq!(back.antialias, Some(super::AntialiasDoc::Fxaa), "the choice is written down: {text}");
+    }
+
+    /// **Texture filtering is 8x unless a project chose otherwise.** A file
+    /// from before the setting and a new project both take the default and
+    /// write nothing for it; a choice is written down and read back.
+    #[test]
+    fn texture_filtering_defaults_to_8x_and_a_choice_is_written_down() {
+        let old: ProjectConfigDoc = ron::from_str("(retro: false)").unwrap();
+        assert_eq!((old.anisotropy, old.anisotropy_resolved()), (None, super::DEFAULT_ANISOTROPY));
+        assert_eq!(super::DEFAULT_ANISOTROPY, 8);
+        let new = ProjectConfigDoc::for_new_project();
+        assert_eq!(new.anisotropy_resolved(), 8);
+        let text = ron::ser::to_string(&new).unwrap();
+        assert!(!text.contains("anisotropy"), "a project that never chose wrote the setting: {text}");
+        let chosen = ProjectConfigDoc { anisotropy: Some(2), ..Default::default() };
+        let back: ProjectConfigDoc = ron::from_str(&ron::ser::to_string(&chosen).unwrap()).unwrap();
+        assert_eq!(back.anisotropy_resolved(), 2, "the choice is written down");
     }
 
     /// A new project starts at `fast`; an existing one never does. Asserted

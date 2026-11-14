@@ -194,6 +194,7 @@ impl crate::Editor {
             },
             fullscreen: self.window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
             texture_quality: self.raster.as_ref().map_or(0, |r| r.texture_quality()),
+            anisotropy: self.project.anisotropy_resolved(),
             frame_cap: self.frame_cap,
             refresh_hz: (self.refresh_period > 0.0).then(|| 1.0 / self.refresh_period),
             dynamic_resolution: self.dyn_res.is_some(),
@@ -253,6 +254,12 @@ impl crate::Editor {
         }
         if let Some(q) = req.texture_quality {
             self.set_texture_quality(q);
+        }
+        // Into the project for the run, as the render scale is: the renderer
+        // takes it with the rest of the project's look, and Stop puts the
+        // project back.
+        if let Some(n) = req.anisotropy {
+            self.project.anisotropy = u8::try_from(n).ok();
         }
         if let Some(spec) = req.dynamic_resolution {
             self.dyn_res = spec.map(|s| {
