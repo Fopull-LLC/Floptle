@@ -252,6 +252,15 @@ thread_local! {
     pub(crate) static FLUSHED_TRANSFORMS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// A screen shader's name as a script writes it: the file name without its
+/// extension, lower-cased (`"shaders/WaterFx.flsl"` is `"waterfx"`).
+fn screen_shader_stem(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
 /// `node:setShaderParam` on a model that has per-part overrides and no node
 /// Material: the uniform goes to every part that wears a shader.
 /// `false` when no part does — the caller says so.
@@ -2994,6 +3003,7 @@ impl ScriptHost {
             Rc::new(RefCell::new(Vec::new()));
         let water_freeze: Rc<RefCell<Vec<(u32, bool)>>> = Rc::new(RefCell::new(Vec::new()));
         let water_declared: Rc<RefCell<Vec<floptle_core::water::DeclaredWater>>> = Rc::default();
+        let water_surfaces = crate::water_api::SurfaceBook::default();
         crate::water_api::install_water_api(
             &lua,
             crate::water_api::WaterShared {
@@ -3003,6 +3013,7 @@ impl ScriptHost {
                 next_id: Rc::default(),
                 colliders: colliders.clone(),
                 sim_origin: sim_origin.clone(),
+                surfaces: water_surfaces.clone(),
             },
         );
 
@@ -3088,6 +3099,7 @@ impl ScriptHost {
             carry: Rc::new(RefCell::new(HashMap::new())),
             sprite_draws: Rc::new(RefCell::new(HashMap::new())),
             shader_param_sets: Rc::new(RefCell::new(Vec::new())),
+            shader_array_sets: Rc::new(RefCell::new(Vec::new())),
             shader_texture_sets: Rc::new(RefCell::new(Vec::new())),
             screen_shader_toggles: Rc::new(RefCell::new(Vec::new())),
             envs: Rc::new(RefCell::new(HashMap::new())),
@@ -3529,6 +3541,7 @@ impl ScriptHost {
             sprite_draws: shared.sprite_draws.clone(),
             sprites_written: None,
             shader_param_sets: shared.shader_param_sets.clone(),
+            shader_array_sets: shared.shader_array_sets.clone(),
             shader_texture_sets: shared.shader_texture_sets.clone(),
             screen_shader_toggles: shared.screen_shader_toggles.clone(),
             colliders,
@@ -3612,6 +3625,7 @@ impl ScriptHost {
             water_volumes,
             water_freeze,
             water_declared,
+            water_surfaces,
             scatter_sources,
             scatter_owners,
             scatter_settled,
@@ -4229,6 +4243,18 @@ impl ScriptHost {
         }
     }
 
+    /// What the engine's simulation of declared water `id` knows at each
+    /// point of its grid this frame (the bed, the foam), for the per-vertex
+    /// colours `water.surface` gives.
+    pub fn set_water_report(&self, id: u32, report: floptle_core::water::SimReport) {
+        self.water_surfaces.set_report(id, report);
+    }
+
+    /// Has [`Self::set_water_report`] been called for declared water `id`?
+    pub fn has_water_report(&self, id: u32) -> bool {
+        self.water_surfaces.has_report(id)
+    }
+
     /// Where a simulated volume's water pours off drops now, for
     /// `water.falls`.
     pub fn set_water_falls(&self, id: u32, falls: Vec<floptle_core::water::WaterFall>) {
@@ -4240,6 +4266,7 @@ impl ScriptHost {
     /// Drop every declared water — a scene switch, like [`Self::clear_weather`].
     pub fn clear_declared_water(&mut self) {
         self.water_declared.borrow_mut().clear();
+        self.water_surfaces.retain(&|_| false);
     }
 
     /// Drain `water.setFrozen(node, on)` calls made this frame.
@@ -6606,6 +6633,12 @@ impl ScriptHost {
         self.meshes.borrow_mut().take_requests()
     }
 
+    /// What `mesh.update` changed since the last call, one entry a mesh, for
+    /// the driver to write into each mesh's own buffers.
+    pub fn take_mesh_updates(&self) -> Vec<crate::MeshUpdate> {
+        self.meshes.borrow_mut().take_updates()
+    }
+
     /// Meshes `mesh.free` gave back since the last call.
     pub fn take_mesh_releases(&self) -> Vec<String> {
         self.meshes.borrow_mut().take_releases()
@@ -7661,6 +7694,33 @@ impl ScriptHost {
                     );
                 }
             }
+            // `node:setShaderParam(name, { … })`: a whole uniform array, onto
+            // the screen shaders that declare one. Named like a single knob:
+            // `"waterfx.bodies"` for one pass, `"bodies"` for every pass.
+            let array_sets: Vec<_> = self.shader_array_sets.borrow_mut().drain(..).collect();
+            for (eid, name, values) in array_sets {
+                let Some(&ent) = scene.ents.get(&eid) else { continue };
+                if let Some(Matter::PostProcess { screen_shaders, .. }) = world.get_mut::<Matter>(ent) {
+                    let (want, knob) = match name.split_once('.') {
+                        Some((pass, knob)) => (Some(pass.to_ascii_lowercase()), knob),
+                        None => (None, name.as_str()),
+                    };
+                    for pass in screen_shaders.iter_mut() {
+                        if want.as_ref().is_none_or(|w| *w == screen_shader_stem(&pass.shader)) {
+                            // The list a script writes every frame is the
+                            // same length every frame: reuse its storage.
+                            let slot = pass.arrays.entry(knob.to_string()).or_default();
+                            slot.clear();
+                            slot.extend_from_slice(&values);
+                        }
+                    }
+                } else {
+                    shader_nowhere(
+                        &mut self.shader_warned, &self.logs, &scene.names,
+                        eid, "", &name, "is not a Post Processing node, and only a screen shader has uniform arrays",
+                    );
+                }
+            }
             // `node:setShaderTexture(slot, ref)`: point one of the shader's
             // declared texture slots somewhere else, this frame.
             //
@@ -7699,6 +7759,25 @@ impl ScriptHost {
                             &mut self.shader_warned, &self.logs, &scene.names,
                             eid, &part, &slot, "has no material override",
                         ),
+                    }
+                    continue;
+                }
+                // A Post Processing node: the slot of a screen shader, named
+                // as its knobs are (`"waterfx.pattern"`, or bare for every
+                // pass).
+                if let Some(Matter::PostProcess { screen_shaders, .. }) = world.get_mut::<Matter>(ent) {
+                    let (want, knob) = match slot.split_once('.') {
+                        Some((pass, knob)) => (Some(pass.to_ascii_lowercase()), knob),
+                        None => (None, slot.as_str()),
+                    };
+                    for pass in screen_shaders.iter_mut() {
+                        if want.as_ref().is_none_or(|w| *w == screen_shader_stem(&pass.shader)) {
+                            if path.is_empty() {
+                                pass.textures.remove(knob);
+                            } else {
+                                pass.textures.insert(knob.to_string(), path.clone());
+                            }
+                        }
                     }
                     continue;
                 }

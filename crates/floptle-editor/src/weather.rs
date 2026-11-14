@@ -213,6 +213,28 @@ impl crate::Editor {
             if falls != spec.falls {
                 self.script_host.set_water_falls(w.id, falls);
             }
+            // What `water.surface` colours its vertices from: the bed under
+            // each point, and how broken the water is there. White where it
+            // runs faster than its own waves, and at the lip and the foot of
+            // every fall. Worked out only while the water is moving: a
+            // settled lake keeps the report it has.
+            if s.water.awake_count() > 0 || !self.script_host.has_water_report(w.id) {
+                let mut foam: Vec<f32> = (0..s.grid.len())
+                    .map(|c| {
+                        let v = s.water.velocity(&s.grid, c);
+                        floptle_core::water::foam(s.water.depth[c], v[0].hypot(v[1]))
+                    })
+                    .collect();
+                for f in s.water.falls(&s.grid, FALL_DROP) {
+                    let c = f.cell as usize;
+                    foam[c] = 1.0;
+                    let foot = s.grid.nbr[c][f.face as usize];
+                    if foot != floptle_field::water::WALL {
+                        foam[foot as usize] = 1.0;
+                    }
+                }
+                self.script_host.set_water_report(w.id, floptle_core::water::SimReport { ground: s.grid.ground.clone(), foam });
+            }
             self.script_host.set_water_surface(
                 w.id,
                 Surface::Grid(std::sync::Arc::new(HeightGrid { levels, flow, ..(**g).clone() })),

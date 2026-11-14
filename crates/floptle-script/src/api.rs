@@ -8594,8 +8594,13 @@ fn node_particles_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::R
     // from a script every tick (a uniform write on the GPU, never a
     // recompile). Works on a mesh Material's shader AND on a UI element's
     // `stage ui` shader — instruments like the navball live on this.
+    //
+    // node:setShaderParam(name, { … }) — fill a screen shader's uniform
+    // array (`uniform bodies: vec4[8]`) in one call: a list of numbers for
+    // a `float[n]`, a list of `{x, y, z, w}` lists for a vector one.
     {
         let sets = shared.shader_param_sets.clone();
+        let arrays = shared.shader_array_sets.clone();
         methods.set(
             "setShaderParam",
             lua.create_function(
@@ -8603,12 +8608,27 @@ fn node_particles_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::R
                       (this, name, x, y, z, w): (
                     Table,
                     String,
-                    f32,
+                    mlua::Value,
                     Option<f32>,
                     Option<f32>,
                     Option<f32>,
                 )| {
                     let e: u32 = this.raw_get("__id")?;
+                    let x = match x {
+                        mlua::Value::Number(n) => n as f32,
+                        mlua::Value::Integer(n) => n as f32,
+                        mlua::Value::Table(list) => {
+                            arrays.borrow_mut().push((e, name, shader_array_values(&list)?));
+                            return Ok(());
+                        }
+                        other => {
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "node:setShaderParam(name, x, y?, z?, w?): x is a number, or a list to fill \
+                                 a uniform array (got {})",
+                                other.type_name()
+                            )));
+                        }
+                    };
                     sets.borrow_mut().push((
                         e,
                         None,
@@ -9078,6 +9098,36 @@ fn node_bone_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Resul
         })?,
     )?;
     Ok(())
+}
+
+/// The elements of a uniform array as a script hands them to
+/// `node:setShaderParam(name, { … })`: each a number (a `float[n]` element)
+/// or a list of up to four (`{x, y, z, w}`); lanes left out are zero.
+fn shader_array_values(list: &Table) -> mlua::Result<Vec<[f32; 4]>> {
+    let n = list.raw_len();
+    let mut out = Vec::with_capacity(n);
+    for i in 1..=n {
+        let v = match list.raw_get::<mlua::Value>(i)? {
+            mlua::Value::Number(x) => [x as f32, 0.0, 0.0, 0.0],
+            mlua::Value::Integer(x) => [x as f32, 0.0, 0.0, 0.0],
+            mlua::Value::Table(t) => {
+                let mut v = [0.0f32; 4];
+                for (lane, slot) in v.iter_mut().enumerate() {
+                    *slot = t.raw_get::<Option<f32>>(lane + 1)?.unwrap_or(0.0);
+                }
+                v
+            }
+            other => {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "node:setShaderParam(name, list): element {i} is a {}; each element is a number or a \
+                     list of up to four numbers",
+                    other.type_name()
+                )));
+            }
+        };
+        out.push(v);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

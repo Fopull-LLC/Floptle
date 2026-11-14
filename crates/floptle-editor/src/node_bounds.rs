@@ -381,6 +381,7 @@ mod tests {
             frozen: false,
             tint: [0.0; 3],
             visibility: 28.0,
+            underwater: true,
         }
     }
 }

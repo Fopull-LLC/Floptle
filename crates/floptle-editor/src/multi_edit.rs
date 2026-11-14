@@ -537,6 +537,7 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
                 frozen,
                 tint,
                 visibility,
+                underwater,
             },
             Matter::WaterVolume {
                 kind: bk,
@@ -548,6 +549,7 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
                 frozen: bf,
                 tint: bt,
                 visibility: bv,
+                underwater: bu,
             },
             Matter::WaterVolume {
                 kind: tk,
@@ -559,6 +561,7 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
                 frozen: tf,
                 tint: tt,
                 visibility: tv,
+                underwater: tu,
             },
         ) => {
             let mut hit = false;
@@ -571,6 +574,7 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
             set(frozen, bf, tf, &mut hit);
             set(tint, bt, tt, &mut hit);
             set(visibility, bv, tv, &mut hit);
+            set(underwater, bu, tu, &mut hit);
             hit
         }
         (

@@ -923,6 +923,30 @@ impl<'a> SettingsCtx<'a> {
         );
         row(
             ui,
+            "Texture filtering",
+            Some("how many samples a smooth (mipmapped) texture takes along ground or water seen \
+                  low across. Higher keeps its detail further into the distance instead of \
+                  smearing it, for a small cost on the GPU's texture units. 1x is plain \
+                  trilinear filtering. Pixel-art and plain smooth textures are not affected. \
+                  A game can offer it to players with app.setAnisotropy"),
+            |ui| {
+                let mut n = project.anisotropy_resolved();
+                egui::ComboBox::from_id_salt("project-anisotropy")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(format!("{n}x"))
+                    .show_ui(ui, |ui| {
+                        for level in [1, 2, 4, 8, 16] {
+                            ui.selectable_value(&mut n, level, format!("{level}x"));
+                        }
+                    });
+                if n != project.anisotropy_resolved() {
+                    project.anisotropy = u8::try_from(n).ok();
+                    out.save_project = true;
+                }
+            },
+        );
+        row(
+            ui,
             "Terrain border",
             Some("how a terrain palette slot meets its neighbours when it is first given a texture. \
                   \"natural\": a 1 m blend that the two slots' heights decide, so sand fills the \

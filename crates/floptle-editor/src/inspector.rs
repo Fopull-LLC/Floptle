@@ -2427,6 +2427,7 @@ fn water_volume_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
         frozen,
         tint,
         visibility,
+        underwater,
     } = m else { return };
     let cmd = &mut *ctx.cmd;
     use floptle_core::WaterKind;
@@ -2484,6 +2485,15 @@ fn water_volume_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
     cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(angular_drag, 0.0..=10.0), "spin drag")
         .changed();
     ui.separator();
+    cmd.inspector_changed |= crate::responsive::check(ui, underwater, "underwater look")
+        .on_hover_text(
+            "Paint the tint and visibility below while the camera is \
+             inside. Off leaves the view alone and keeps everything \
+             else: buoyancy, drag, water.at, and sceneWaterDepth() in \
+             a screen shader. For a game that draws its own underwater \
+             pass.",
+        )
+        .changed();
     ui.horizontal_wrapped(|ui| {
         ui.label("underwater tint");
         cmd.inspector_changed |=
@@ -3841,7 +3851,7 @@ ui.small(
             // still driving the last good pipeline.
             if let Some((compiled, _)) =
                 entry.and_then(|e| e.compiled.as_ref())
-                && !compiled.uniforms.is_empty()
+                && !(compiled.uniforms.is_empty() && compiled.textures.is_empty())
             {
                 crate::responsive::grid(ui, ("pp_shader_rows", i), |ui| {
                         if shader_uniform_rows(
@@ -3850,6 +3860,43 @@ ui.small(
                             &mut pass.params,
                         ) {
                             cmd.inspector_changed = true;
+                        }
+                        // The shader's texture slots. Empty means the image
+                        // the shader itself declares, and says so.
+                        for (t, slot) in compiled.textures.iter().enumerate() {
+                            ui.label(slot);
+                            let file_of = |p: &str| {
+                                Path::new(p)
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| p.to_string())
+                            };
+                            let empty = match compiled.texture_defaults.get(t).and_then(|d| d.as_deref()) {
+                                Some(p) => format!("{} (shader)", file_of(p)),
+                                None => "none".into(),
+                            };
+                            let cur = pass.textures.get(slot).map(|p| file_of(p)).unwrap_or_else(|| empty.clone());
+                            if let Some(pick) = crate::ui_widgets::asset_picker(
+                                ui,
+                                egui::Id::new(("pp_shader_tex", i, t)),
+                                ctx.project_root,
+                                &cur,
+                                Some(empty.as_str()),
+                                ctx.asset_tree,
+                                crate::assets::is_texture,
+                                160.0,
+                            ) {
+                                match pick {
+                                    Some(p) => {
+                                        pass.textures.insert(slot.clone(), p);
+                                    }
+                                    None => {
+                                        pass.textures.remove(slot);
+                                    }
+                                }
+                                cmd.inspector_changed = true;
+                            }
+                            ui.end_row();
                         }
                     });
                 if !pass.params.is_empty()

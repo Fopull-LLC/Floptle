@@ -1344,6 +1344,10 @@ pub enum MatterDoc {
         tint: [f32; 3],
         #[serde(default = "default_water_visibility")]
         visibility: f32,
+        /// The engine's own underwater look. On when the field is absent:
+        /// every scene saved before there was a choice had it.
+        #[serde(default = "on", skip_serializing_if = "is_on")]
+        underwater: bool,
     },
     /// An authored SDF shape — its Material's sdf-stage `.flsl` is the geometry.
     FieldShape {
@@ -1902,11 +1906,25 @@ pub struct ScreenShaderDoc {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub params: std::collections::BTreeMap<String, [f32; 4]>,
+    /// Uniform arrays by name. Usually a script's to fill, and saved only
+    /// when the scene holds some.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub arrays: std::collections::BTreeMap<String, Vec<[f32; 4]>>,
+    /// Texture slot images by slot name, where the pass overrides the
+    /// shader's own.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub textures: std::collections::BTreeMap<String, String>,
 }
 
 impl From<&ScreenShader> for ScreenShaderDoc {
     fn from(s: &ScreenShader) -> Self {
-        Self { shader: s.shader.clone(), enabled: s.enabled, params: s.params.clone() }
+        Self {
+            shader: s.shader.clone(),
+            enabled: s.enabled,
+            params: s.params.clone(),
+            arrays: s.arrays.clone(),
+            textures: s.textures.clone(),
+        }
     }
 }
 
@@ -1916,6 +1934,8 @@ impl ScreenShaderDoc {
             shader: self.shader.clone(),
             enabled: self.enabled,
             params: self.params.clone(),
+            arrays: self.arrays.clone(),
+            textures: self.textures.clone(),
         }
     }
 }
@@ -1951,6 +1971,9 @@ impl From<AoMode> for AoModeDoc {
 
 fn on() -> bool {
     true
+}
+fn is_on(v: &bool) -> bool {
+    *v
 }
 fn default_ao_strength() -> f32 {
     0.7
@@ -2289,6 +2312,7 @@ impl From<&Matter> for MatterDoc {
                 frozen,
                 tint,
                 visibility,
+                underwater,
             } => MatterDoc::WaterVolume {
                 pool: *kind == floptle_core::WaterKind::Pool,
                 radius: *radius,
@@ -2299,6 +2323,7 @@ impl From<&Matter> for MatterDoc {
                 frozen: *frozen,
                 tint: *tint,
                 visibility: *visibility,
+                underwater: *underwater,
             },
             Matter::LightProbes {
                 half_extents,
@@ -2568,6 +2593,7 @@ impl MatterDoc {
                 frozen,
                 tint,
                 visibility,
+                underwater,
             } => Matter::WaterVolume {
                 kind: if *pool {
                     floptle_core::WaterKind::Pool
@@ -2582,6 +2608,7 @@ impl MatterDoc {
                 frozen: *frozen,
                 tint: *tint,
                 visibility: *visibility,
+                underwater: *underwater,
             },
             MatterDoc::LightProbes {
                 half_extents,
@@ -3293,6 +3320,10 @@ pub enum ScriptVec3Doc {
     Fast,
 }
 
+/// The anisotropy a project takes when it sets none: sharp ground and water
+/// into the distance for a small cost on the texture units.
+pub const DEFAULT_ANISOTROPY: u32 = 8;
+
 /// Project-wide render settings — the PS1/PS2-style knobs that apply to every
 /// scene. Saved to `project.ron`, edited in the editor's Project Settings.
 ///
@@ -3557,6 +3588,12 @@ pub struct ProjectConfigDoc {
     /// [`March`](FogMethodDoc::March).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fog_method: Option<FogMethodDoc>,
+    /// How many samples a mipmapped texture takes along a surface seen at a
+    /// grazing angle: 1, 2, 4, 8 or 16. `None` (every file from before the
+    /// setting, and a new project until it is changed) is
+    /// [`DEFAULT_ANISOTROPY`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anisotropy: Option<u8>,
     /// How a render scale is brought up to the screen; see [`UpscaleDoc`].
     /// `None` means the file predates the setting and resolves to
     /// [`Bilinear`](UpscaleDoc::Bilinear).
@@ -3672,6 +3709,7 @@ impl ProjectConfigDoc {
             wheel_friction: Some(WheelFrictionDoc::Single),
             terrain_shape: Some(TerrainShapeDoc::Natural),
             fog_method: Some(FogMethodDoc::Grid),
+            anisotropy: None,
             upscale: Some(UpscaleDoc::Fsr1),
             screen_draw_order: Some(ScreenDrawOrderDoc::CallOrder),
             terrain_border: Some(TerrainBorderDoc::Natural),
@@ -3746,6 +3784,14 @@ impl ProjectConfigDoc {
     /// file from before the setting did it bilinearly, and still does.
     pub fn upscale_resolved(&self) -> UpscaleDoc {
         self.upscale.unwrap_or(UpscaleDoc::Bilinear)
+    }
+
+    /// How many samples a mipmapped texture takes at a grazing angle: the
+    /// project's setting, [`DEFAULT_ANISOTROPY`] when it has none. Older
+    /// projects take the default too: it changes how sharp distant ground
+    /// is, and nothing else.
+    pub fn anisotropy_resolved(&self) -> u32 {
+        self.anisotropy.map_or(DEFAULT_ANISOTROPY, u32::from)
     }
 
     /// How this project builds its volumetric fog. A project file from
@@ -5588,6 +5634,23 @@ mod tests {
         assert_eq!(back.antialias, Some(super::AntialiasDoc::Fxaa), "the choice is written down: {text}");
     }
 
+    /// **Texture filtering is 8x unless a project chose otherwise.** A file
+    /// from before the setting and a new project both take the default and
+    /// write nothing for it; a choice is written down and read back.
+    #[test]
+    fn texture_filtering_defaults_to_8x_and_a_choice_is_written_down() {
+        let old: ProjectConfigDoc = ron::from_str("(retro: false)").unwrap();
+        assert_eq!((old.anisotropy, old.anisotropy_resolved()), (None, super::DEFAULT_ANISOTROPY));
+        assert_eq!(super::DEFAULT_ANISOTROPY, 8);
+        let new = ProjectConfigDoc::for_new_project();
+        assert_eq!(new.anisotropy_resolved(), 8);
+        let text = ron::ser::to_string(&new).unwrap();
+        assert!(!text.contains("anisotropy"), "a project that never chose wrote the setting: {text}");
+        let chosen = ProjectConfigDoc { anisotropy: Some(2), ..Default::default() };
+        let back: ProjectConfigDoc = ron::from_str(&ron::ser::to_string(&chosen).unwrap()).unwrap();
+        assert_eq!(back.anisotropy_resolved(), 2, "the choice is written down");
+    }
+
     /// A new project starts at `fast`; an existing one never does. Asserted
     /// together because the contrast is what matters; either one alone reads
     /// as fine.
@@ -7098,11 +7161,20 @@ mod tests {
                     params: [("thickness".to_string(), [2.0, 0.0, 0.0, 0.0])]
                         .into_iter()
                         .collect(),
+                    // A list a scene saved and a slot it re-pointed.
+                    arrays: [("bodies".to_string(), vec![[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])]
+                        .into_iter()
+                        .collect(),
+                    textures: [("pattern".to_string(), "textures/caustic.png".to_string())]
+                        .into_iter()
+                        .collect(),
                 },
                 floptle_core::ScreenShader {
                     shader: "shaders/examples/crtScanlines.flsl".into(),
                     enabled: false,
                     params: Default::default(),
+                    arrays: Default::default(),
+                    textures: Default::default(),
                 },
             ],
         };
@@ -7116,6 +7188,48 @@ mod tests {
             world2.query::<Matter>().filter(|(_, m)| matches!(m, Matter::PostProcess { .. })).collect();
         assert_eq!(posts.len(), 1, "self-heal must not duplicate an authored PostProcess node");
         assert_eq!(*posts[0].1, authored);
+    }
+
+    /// **A Water Volume saved before it had an `underwater` switch keeps its
+    /// look.** The field is absent from every older scene, so absent reads as
+    /// on; a volume left on writes nothing, so an older engine still opens
+    /// the file; and off comes back off.
+    #[test]
+    fn a_water_volume_keeps_its_underwater_look_unless_told_otherwise() {
+        const OLD: &str = r#"(
+    name: "sea",
+    nodes: [
+        (
+            name: "Sea",
+            transform: (translation: (0, 0, 0), rotation: (0, 0, 0, 1), scale: (1, 1, 1)),
+            matter: WaterVolume(radius: 40, tint: (0.1, 0.2, 0.3), visibility: 12),
+        ),
+    ],
+)"#;
+        let look = |world: &World| {
+            world
+                .query::<Matter>()
+                .find_map(|(_, m)| match m {
+                    Matter::WaterVolume { underwater, .. } => Some(*underwater),
+                    _ => None,
+                })
+                .expect("the sea")
+        };
+        let mut world = World::new();
+        spawn_into(&from_ron(OLD).expect("an older scene loads"), &mut world);
+        assert!(look(&world), "an older scene's water lost its underwater look");
+        let text = to_ron(&to_doc("sea", &world)).unwrap();
+        assert!(!text.contains("underwater"), "a default water volume wrote the new field:\n{text}");
+
+        let sea = world.query::<Matter>().find(|(_, m)| matches!(m, Matter::WaterVolume { .. })).map(|(e, _)| e).unwrap();
+        if let Some(Matter::WaterVolume { underwater, .. }) = world.get_mut::<Matter>(sea) {
+            *underwater = false;
+        }
+        let text = to_ron(&to_doc("sea", &world)).unwrap();
+        assert!(text.contains("underwater: false"), "{text}");
+        let mut again = World::new();
+        spawn_into(&from_ron(&text).unwrap(), &mut again);
+        assert!(!look(&again), "a look switched off came back on");
     }
 
     #[test]

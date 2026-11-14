@@ -6,7 +6,7 @@
 //! projections of this one structure. Type checking is edge-level and happens
 //! here; the WGSL emitter (transpile.rs) consumes the checked result.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::stdlib::{self, OpSpec};
 
@@ -123,6 +123,24 @@ pub struct Uniform {
     /// Optional `range(lo, hi)` annotation — Inspector slider bounds.
     pub range: Option<(f32, f32)>,
 }
+
+/// A list of values a script fills: `uniform bodies: vec4[8]`, read in the
+/// shader as `bodies[i]`. It has no default (every element starts at zero) and
+/// no Inspector row; a script writes it whole with `node:setShaderParam`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UniformArray {
+    pub name: String,
+    /// What one element is.
+    pub ty: Ty,
+    /// How many elements, 1..=[`MAX_ARRAY_LEN`].
+    pub len: u32,
+}
+
+/// The longest a uniform array can be, and the most elements a shader's
+/// arrays can hold between them: together they keep the param block a few
+/// kilobytes at its largest.
+pub const MAX_ARRAY_LEN: u32 = 64;
+pub const MAX_ARRAY_ELEMENTS: u32 = 256;
 
 /// The built-in values a shader can read (stage-dependent availability).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -288,6 +306,11 @@ pub enum ExprKind {
     Texture(usize),
     /// A named `let` binding, by index into [`ShaderIr::lets`].
     Let(usize),
+    /// One element of a uniform array (`bodies[i]`): the array, by index into
+    /// [`ShaderIr::arrays`], and the element to read. The element is a float;
+    /// it is rounded down and held inside the array, so no index reads
+    /// outside it.
+    Index(usize, ExprId),
     /// A stdlib op call.
     Call { op: String, args: Vec<CallArg> },
     Binary(BinOp, ExprId, ExprId),
@@ -310,6 +333,8 @@ pub struct ShaderIr {
     pub stage: Option<Stage>,
     pub blend: Blend,
     pub uniforms: Vec<Uniform>,
+    /// Uniform arrays, in declaration order.
+    pub arrays: Vec<UniformArray>,
     /// Texture slot names, in declaration order (= group(3) binding order).
     pub textures: Vec<String>,
     /// Per-slot default image (`texture ramp = "art/ramp.png"`), keyed by slot
@@ -318,6 +343,11 @@ pub struct ShaderIr {
     /// texture shader show its art in the graph's previews (and on a fresh
     /// material) instead of a checkerboard nobody can read.
     pub texture_defaults: BTreeMap<String, String>,
+    /// Slots declared `data` (or `linear`): `texture flow = "flow.png" data`.
+    /// Their bytes are numbers, not colours (a normal map, a flow map, a mask,
+    /// a lookup table), so they are read as stored, 128 as 0.502, and never
+    /// through the sRGB curve that turns 128 into 0.216.
+    pub texture_data: BTreeSet<String>,
     /// The expression arena. `lets` and `outputs` index into it.
     pub exprs: Vec<Expr>,
     /// Ordered named bindings — each is a graph node the artist named.
@@ -349,8 +379,10 @@ impl ShaderIr {
             || self.stage != other.stage
             || self.blend != other.blend
             || self.uniforms != other.uniforms
+            || self.arrays != other.arrays
             || self.textures != other.textures
             || self.texture_defaults != other.texture_defaults
+            || self.texture_data != other.texture_data
             || self.lets.len() != other.lets.len()
             || self.outputs.len() != other.outputs.len()
         {
@@ -384,6 +416,7 @@ fn same_expr(a: &ShaderIr, ea: ExprId, b: &ShaderIr, eb: ExprId) -> bool {
         (ExprKind::Uniform(x), ExprKind::Uniform(y)) => x == y,
         (ExprKind::Texture(x), ExprKind::Texture(y)) => x == y,
         (ExprKind::Let(x), ExprKind::Let(y)) => x == y,
+        (ExprKind::Index(x, ix), ExprKind::Index(y, iy)) => x == y && same_expr(a, *ix, b, *iy),
         (ExprKind::Neg(x), ExprKind::Neg(y)) => same_expr(a, *x, b, *y),
         (ExprKind::Swizzle(x, sx), ExprKind::Swizzle(y, sy)) => {
             sx == sy && same_expr(a, *x, b, *y)
@@ -465,6 +498,36 @@ pub fn check(ir: &ShaderIr) -> Result<Checked, Vec<IrError>> {
     };
     let mut ck = Checked { types: vec![None; ir.exprs.len()], calls: BTreeMap::new() };
     let mut errors = Vec::new();
+
+    // A uniform array lives in the param block of the one stage that has a
+    // script-filled block of its own to grow: the screen pass.
+    if let Some(a) = ir.arrays.first()
+        && stage != Stage::Post
+    {
+        errors.push(IrError::new(
+            format!(
+                "`uniform {}: {}[{}]`: uniform arrays are for screen shaders (`stage post`)",
+                a.name,
+                a.ty.flsl(),
+                a.len
+            ),
+            Span::default(),
+        ));
+    }
+    for a in &ir.arrays {
+        if a.len == 0 || a.len > MAX_ARRAY_LEN {
+            errors.push(IrError::new(
+                format!("`{}` must hold 1 to {MAX_ARRAY_LEN} elements (got {})", a.name, a.len),
+                Span::default(),
+            ));
+        }
+    }
+    if ir.arrays.iter().map(|a| a.len.min(MAX_ARRAY_LEN)).sum::<u32>() > MAX_ARRAY_ELEMENTS {
+        errors.push(IrError::new(
+            format!("a shader's uniform arrays can hold at most {MAX_ARRAY_ELEMENTS} elements between them"),
+            Span::default(),
+        ));
+    }
 
     // Lets are ordered and may only reference earlier lets (the parser
     // guarantees it by construction; graph edits must too), so one pass in
@@ -618,7 +681,7 @@ fn check_per_vertex(ir: &ShaderIr, root: ExprId, errors: &mut Vec<IrError>) {
                 stack.extend(args.iter().map(|a| a.value));
             }
             ExprKind::Binary(_, a, b) => stack.extend([*a, *b]),
-            ExprKind::Neg(a) | ExprKind::Swizzle(a, _) => stack.push(*a),
+            ExprKind::Neg(a) | ExprKind::Swizzle(a, _) | ExprKind::Index(_, a) => stack.push(*a),
         }
     }
 }
@@ -691,6 +754,18 @@ fn infer(
                 e.span,
             ));
             None
+        }
+        ExprKind::Index(a, i) => {
+            let ti = infer(ir, stage, *i, let_ty, ck, errors);
+            if ti.is_some_and(|t| t != Ty::Float) {
+                errors.push(IrError::new(
+                    format!("`{}[…]` takes one number: which element to read", ir.arrays[*a].name),
+                    ir.expr(*i).span,
+                ));
+                None
+            } else {
+                ti.map(|_| ir.arrays[*a].ty)
+            }
         }
         ExprKind::Let(l) => {
             let t = let_ty[*l];

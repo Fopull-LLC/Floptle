@@ -653,7 +653,7 @@ impl Editor {
                 }),
                 Stage::Post => crate::shaders::compile_post_validated(&src).map(|compiled| match post {
                     Some(builder) => {
-                        let built = builder.build(&crate::shaders::post_module_source(&compiled.chunk));
+                        let built = builder.build(&crate::shaders::post_module_source(&compiled.chunk), compiled.textures.len());
                         BuiltShader::Post(compiled, built)
                     }
                     None => BuiltShader::Nothing,

@@ -95,6 +95,8 @@ pub enum Site {
     BinRhs(ExprId),
     NegArg(ExprId),
     SwizArg(ExprId),
+    /// Which element an array read (`bodies[i]`) takes.
+    IndexArg(ExprId),
 }
 
 /// Output names are a tiny closed set — `Copy` keeps [`Site`] copyable.
@@ -169,6 +171,8 @@ pub enum NodeKind {
     Neg,
     /// The swizzle string is editable in the node body.
     Swizzle(String),
+    /// One element of a uniform array (`bodies[i]`); the array's name.
+    Index(String),
     /// A literal at a let/output root — a constant the artist named.
     Constant(InlineVal),
     Input(Input),
@@ -215,6 +219,7 @@ impl GNode {
             },
             NodeKind::Neg => "negate".into(),
             NodeKind::Swizzle(sw) => format!(".{sw}"),
+            NodeKind::Index(name) => format!("{name}[ ]"),
             NodeKind::Constant(_) => "constant".into(),
             NodeKind::Input(i) => i.name().into(),
             NodeKind::Uniform(_) => "uniform".into(),
@@ -601,6 +606,10 @@ impl ViewBuilder<'_> {
                 NodeKind::Swizzle(sw.clone()),
                 vec![port(self, "v".into(), *a, Site::SwizArg(id), false)],
             ),
+            ExprKind::Index(a, i) => (
+                NodeKind::Index(self.ir.arrays[*a].name.clone()),
+                vec![port(self, "element".into(), *i, Site::IndexArg(id), false)],
+            ),
             // References/literals never reach here (visit dispatches them).
             _ => unreachable!("emit_expr takes structural expressions"),
         };
@@ -834,6 +843,10 @@ pub fn site_value(ir: &ShaderIr, site: Site) -> Option<ExprId> {
             ExprKind::Swizzle(a, _) => Some(a),
             _ => None,
         },
+        Site::IndexArg(e) => match ir.expr(e).kind {
+            ExprKind::Index(_, i) => Some(i),
+            _ => None,
+        },
     }
 }
 
@@ -891,6 +904,10 @@ fn set_site(ir: &mut ShaderIr, site: Site, value: ExprId) -> Result<(), EditErro
         Site::SwizArg(e) => match &mut ir.exprs[e.0 as usize].kind {
             ExprKind::Swizzle(a, _) => *a = value,
             _ => return Err("stale swizzle".into()),
+        },
+        Site::IndexArg(e) => match &mut ir.exprs[e.0 as usize].kind {
+            ExprKind::Index(_, i) => *i = value,
+            _ => return Err("stale array read".into()),
         },
     }
     Ok(())
@@ -1111,6 +1128,12 @@ fn find_site_of(ir: &ShaderIr, id: ExprId) -> Option<Site> {
                 }
                 walk(ir, *a, target)
             }
+            ExprKind::Index(_, i) => {
+                if *i == target {
+                    return Some(Site::IndexArg(at));
+                }
+                walk(ir, *i, target)
+            }
             _ => None,
         }
     }
@@ -1143,6 +1166,7 @@ pub fn promote_to_let(ir: &mut ShaderIr, id: ExprId) -> Result<usize, EditError>
         ExprKind::Binary(..) => "mixdown".into(),
         ExprKind::Neg(_) => "neg".into(),
         ExprKind::Swizzle(..) => "part".into(),
+        ExprKind::Index(..) => "element".into(),
         _ => "node".into(),
     };
     let name = fresh_name(ir, &base);
@@ -1173,7 +1197,7 @@ pub fn sort_lets(ir: &mut ShaderIr) -> Result<(), EditError> {
                 collect(ir, *a, out);
                 collect(ir, *b, out);
             }
-            ExprKind::Neg(a) | ExprKind::Swizzle(a, _) => collect(ir, *a, out),
+            ExprKind::Neg(a) | ExprKind::Swizzle(a, _) | ExprKind::Index(_, a) => collect(ir, *a, out),
             _ => {}
         }
     }
@@ -1313,6 +1337,7 @@ pub fn delete_node(ir: &mut ShaderIr, key: &NodeKey) -> Result<(), EditError> {
             ir.textures.remove(t);
             ir.layout.remove(&format!("tex.{name}"));
             ir.texture_defaults.remove(name);
+            ir.texture_data.remove(name);
             for e in ir.exprs.iter_mut() {
                 if let ExprKind::Texture(x) = &mut e.kind
                     && *x > t
@@ -1393,6 +1418,9 @@ pub fn rename_texture(ir: &mut ShaderIr, old: &str, new: &str) -> Result<(), Edi
     }
     if let Some(path) = ir.texture_defaults.remove(old) {
         ir.texture_defaults.insert(new.to_string(), path);
+    }
+    if ir.texture_data.remove(old) {
+        ir.texture_data.insert(new.to_string());
     }
     Ok(())
 }
@@ -1491,6 +1519,7 @@ pub fn duplicate_nodes(ir: &mut ShaderIr, keys: &[NodeKey]) -> Result<Vec<NodeKe
             }
             ExprKind::Neg(a) => ExprKind::Neg(deep_copy(ir, a, remap)),
             ExprKind::Swizzle(a, sw) => ExprKind::Swizzle(deep_copy(ir, a, remap), sw),
+            ExprKind::Index(a, i) => ExprKind::Index(a, deep_copy(ir, i, remap)),
             leaf => leaf,
         };
         ir.push(kind, Span::default())
@@ -1548,6 +1577,9 @@ pub fn paste_nodes(
         if let Some(p) = from.texture_defaults.get(name) {
             ir.texture_defaults.insert(name.clone(), p.clone());
         }
+        if from.texture_data.contains(name) {
+            ir.texture_data.insert(name.clone());
+        }
         Some(ir.textures.len() - 1)
     }
 
@@ -1600,6 +1632,16 @@ pub fn paste_nodes(
             ExprKind::Neg(a) => ExprKind::Neg(copy_expr(ir, from, a, names, depth + 1)),
             ExprKind::Swizzle(a, sw) => {
                 ExprKind::Swizzle(copy_expr(ir, from, a, names, depth + 1), sw)
+            }
+            // The array comes along by name, declared in the target if it is
+            // not there yet.
+            ExprKind::Index(a, i) => {
+                let arr = &from.arrays[a];
+                let at = ir.arrays.iter().position(|x| x.name == arr.name).unwrap_or_else(|| {
+                    ir.arrays.push(arr.clone());
+                    ir.arrays.len() - 1
+                });
+                ExprKind::Index(at, copy_expr(ir, from, i, names, depth + 1))
             }
             leaf => leaf,
         };

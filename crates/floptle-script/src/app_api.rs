@@ -122,6 +122,8 @@ pub struct AppInfo {
     pub antialias: Antialias,
     /// Texture quality: 0 High, 1 Medium, 2 Low (see [`TEXTURE_QUALITIES`]).
     pub texture_quality: u32,
+    /// Anisotropic filtering: 1, 2, 4, 8 or 16 (see [`ANISOTROPY_LEVELS`]).
+    pub anisotropy: u32,
     /// Whether the game's window currently covers the screen. Always `false`
     /// where there is no window (`floptle run`).
     pub fullscreen: bool,
@@ -231,6 +233,8 @@ pub struct AppRequests {
     /// Texture quality, from `app.setTextureQuality`: how many top mip
     /// levels a mipmapped picture loses (0 High, 1 Medium, 2 Low).
     pub texture_quality: Option<u32>,
+    /// Anisotropic filtering, from `app.setAnisotropy`.
+    pub anisotropy: Option<u32>,
 }
 
 impl AppRequests {
@@ -250,12 +254,16 @@ impl AppRequests {
             && self.dynamic_resolution.is_none()
             && self.display_mode.is_none()
             && self.texture_quality.is_none()
+            && self.anisotropy.is_none()
     }
 }
 
 /// The texture qualities `app.setTextureQuality` takes, by how many top mip
 /// levels each leaves out.
 pub const TEXTURE_QUALITIES: [&str; 3] = ["High", "Medium", "Low"];
+
+/// The anisotropic filtering levels `app.setAnisotropy` takes.
+pub const ANISOTROPY_LEVELS: [u32; 5] = [1, 2, 4, 8, 16];
 
 /// What `app.setDynamicResolution{...}` asked for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -444,6 +452,29 @@ pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua
                 };
                 r.borrow_mut().texture_quality = Some(n as u32);
                 i.borrow_mut().texture_quality = n as u32;
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // app.anisotropy() / app.setAnisotropy(1|2|4|8|16): a settings
+        // screen's texture filtering. How many samples a mipmapped texture
+        // takes along ground or water seen at a grazing angle, so it keeps
+        // its detail into the distance. For this session, as the other video
+        // settings are; the project's own setting is the default.
+        let i = info.clone();
+        t.set("anisotropy", lua.create_function(move |_, ()| Ok(i.borrow().anisotropy))?)?;
+        let (r, i) = (req.clone(), info.clone());
+        t.set(
+            "setAnisotropy",
+            lua.create_function(move |_, n: f64| {
+                let Some(&level) = ANISOTROPY_LEVELS.iter().find(|&&l| f64::from(l) == n) else {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "app.setAnisotropy({n}) — the levels are 1, 2, 4, 8 and 16 (1 is off)"
+                    )));
+                };
+                r.borrow_mut().anisotropy = Some(level);
+                i.borrow_mut().anisotropy = level;
                 Ok(())
             })?,
         )?;
@@ -864,6 +895,26 @@ mod tests {
         // At least the sleep; the upper bound only has to rule out a CPU or
         // tick clock, on a runner that may pause this thread.
         assert!(b - a >= 0.039 && b - a < 2.0, "40 ms of wall read as {:.4} s", b - a);
+    }
+
+    /// **`app.setAnisotropy` queues a level, reads it back, and refuses one
+    /// a sampler cannot take.** The answer before any call is the project's.
+    #[test]
+    fn set_anisotropy_queues_reads_back_and_refuses_other_levels() {
+        let lua = Lua::new();
+        let info: SharedAppInfo = Rc::new(RefCell::new(AppInfo { anisotropy: 8, ..Default::default() }));
+        let req: SharedAppRequests = Rc::default();
+        install(&lua, &info, &req).unwrap();
+        assert_eq!(lua.load("return app.anisotropy()").eval::<u32>().unwrap(), 8);
+        assert!(req.borrow().is_empty());
+        assert_eq!(lua.load("app.setAnisotropy(2) return app.anisotropy()").eval::<u32>().unwrap(), 2);
+        assert_eq!(req.borrow().anisotropy, Some(2));
+        assert!(!req.borrow().is_empty(), "an anisotropy request read as an empty frame");
+        for bad in ["3", "0", "32", "8.5"] {
+            let err = lua.load(format!("app.setAnisotropy({bad})")).exec().unwrap_err().to_string();
+            assert!(err.contains("1, 2, 4, 8 and 16"), "{bad}: {err}");
+        }
+        assert_eq!(req.borrow().anisotropy, Some(2), "a refused level changed the request");
     }
 
     #[test]

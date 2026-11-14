@@ -2276,6 +2276,7 @@ mod water_streaming_tests {
                 frozen: false,
                 tint: [0.1, 0.3, 0.4],
                 visibility: 20.0,
+                underwater: true,
             },
         );
 
@@ -2351,6 +2352,7 @@ mod water_streaming_tests {
                 frozen: false,
                 tint: [0.1, 0.3, 0.4],
                 visibility: 20.0,
+                underwater: true,
             },
         );
         let driver = ed.world.spawn();
@@ -2427,6 +2429,7 @@ mod water_density_tests {
                 frozen: false,
                 tint: [0.1, 0.3, 0.4],
                 visibility: 20.0,
+                underwater: true,
             },
         );
         let ball = |ed: &mut Editor, name: &str, x: f64, mass: f32| {
@@ -2474,6 +2477,7 @@ mod water_density_tests {
                 frozen: false,
                 tint: [0.1, 0.3, 0.4],
                 visibility: 20.0,
+                underwater: true,
             },
         );
         let props = (0..20)

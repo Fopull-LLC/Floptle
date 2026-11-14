@@ -188,6 +188,10 @@ mod arrival_tests;
 #[cfg(test)]
 mod tick_overload_tests;
 #[cfg(test)]
+mod underwater_look_tests;
+#[cfg(test)]
+mod water_sheet_tests;
+#[cfg(test)]
 mod tile_physics_tests;
 #[cfg(test)]
 mod template_gen;

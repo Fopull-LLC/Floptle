@@ -609,6 +609,42 @@ impl Raster {
     /// default viewed as a one-layer array), registered as a texture id the
     /// array pipelines bind.
     fn make_array_set(&mut self, gpu: &Gpu, pool_of_kind: [u32; SURFACE_SLOTS]) -> TexId {
+        let bind = self.array_set_bind(gpu, pool_of_kind);
+        // `view` / `_texture` mirror the default, as a set with no base does:
+        // nothing asks an array set for a picture to show.
+        let view = self.default_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let linear_view = super::linear_view_of(&self.default_tex);
+        let id = TexId(self.textures.len() as u32);
+        self.textures.push(TexBind {
+            bind,
+            view,
+            linear_view,
+            sampling: TexSampling::default(),
+            _texture: self.default_tex.clone(),
+            revision: Default::default(),
+        });
+        self.pools.array_ids.insert(id.0);
+        id
+    }
+
+    /// Make again, over the samplers there are now, the bind of every array
+    /// set whose arrays are still the ones it was made over.
+    pub(crate) fn rebind_array_sets(&mut self, gpu: &Gpu) {
+        let sets: Vec<_> = self.pools.array_sets.iter().map(|(k, id)| (*k, *id)).collect();
+        for ((kinds, generations), id) in sets {
+            let now = kinds.map(|p| self.pools.pools.get(p as usize).map_or(0, |p| p.generation));
+            if now != generations {
+                continue;
+            }
+            let bind = self.array_set_bind(gpu, kinds);
+            if let Some(t) = self.textures.get_mut(id.0 as usize) {
+                t.bind = bind;
+            }
+        }
+    }
+
+    /// The group(1) bind of an array set over one array per kind.
+    fn array_set_bind(&mut self, gpu: &Gpu, pool_of_kind: [u32; SURFACE_SLOTS]) -> wgpu::BindGroup {
         // Base and emissive are pictures, read through the sRGB view; the
         // other four are numbers, read raw (see `TexBind::linear_view`).
         let srgb = |k: usize| k == 0 || k == 5;
@@ -642,22 +678,7 @@ impl Raster {
             }
         }
         let slots: [(&wgpu::TextureView, &wgpu::Sampler); SURFACE_SLOTS] = std::array::from_fn(|k| (&views[k], &samplers[k]));
-        let bind = super::make_surface_bind(&gpu.device, &self.pools.layout, "raster-surface-array-set", slots);
-        // `view` / `_texture` mirror the default, as a set with no base does:
-        // nothing asks an array set for a picture to show.
-        let view = self.default_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let linear_view = super::linear_view_of(&self.default_tex);
-        let id = TexId(self.textures.len() as u32);
-        self.textures.push(TexBind {
-            bind,
-            view,
-            linear_view,
-            sampling: TexSampling::default(),
-            _texture: self.default_tex.clone(),
-            revision: Default::default(),
-        });
-        self.pools.array_ids.insert(id.0);
-        id
+        super::make_surface_bind(&gpu.device, &self.pools.layout, "raster-surface-array-set", slots)
     }
 }
 

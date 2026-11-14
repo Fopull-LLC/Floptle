@@ -376,6 +376,19 @@ Missing normals are worked out from the faces. Vertex colours multiply into the
 node's material. A list of the wrong length, an index past the end, or a number
 that is not finite raises, naming the list.
 
+A surface that moves (water, cloth, a cable) is built once with `dynamic = true`
+and rewritten in place with `mesh.update`, which keeps its name, its node and its
+material, allocates nothing, and shows in the frame the script made it in:
+
+```lua
+local sheet = mesh.build{ positions = p, indices = i, colors = c, dynamic = true, indexCapacity = 6 * cells }
+mesh.update(sheet, { positions = p2, colors = c2 })   -- the same vertex count, new values
+mesh.update(sheet, { indices = wetNow })              -- any triangle count up to indexCapacity, or none
+```
+
+Whatever an update leaves out stays as it was. See
+[shaders §4.6](../subsystems/shaders.md) for the whole pattern.
+
 `assets.textureFromPixels(w, h, pixels)` makes a texture from raw RGBA8, row by
 row from the top, as a byte string or a flat list of 0-255, and answers its name
 at once. `assets.release(name)` frees it. Built meshes and textures go when Play

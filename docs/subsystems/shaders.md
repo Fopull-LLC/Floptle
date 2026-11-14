@@ -32,7 +32,7 @@
 >
 > **`stage post` is live** (v0.44): full-screen passes over the finished frame,
 > carried as an ORDERED LIST on the PostProcess node rather than as one slot, so
-> a project stacks its own looks instead of choosing from a fixed menu. Its four
+> a project stacks its own looks instead of choosing from a fixed menu. Its
 > `screen`-category ops — `sceneColor` / `sceneDepth` / `sceneNormal` /
 > `sceneRay` / `screenTexel` — each take an OPTIONAL uv, and that optionality is the design:
 > the default makes a colour grade a one-liner, and passing another pixel's uv
@@ -225,14 +225,18 @@ Start small (the ADR-0007 subset), grow over time. Categories, with examples:
   see [`./materials-and-textures.md`](./materials-and-textures.md).
 - **Screen** (`stage post` only) — `sceneColor`, `sceneDepth`, `sceneNormal`,
   `sceneRay`, `cameraPosition`, `screenTexel`: the finished frame, readable at any pixel rather than only this
-  one. See [`./post-processing.md`](./post-processing.md).
+  one, and `sceneWaterDepth`, how far under water the camera is. A screen
+  shader also declares texture slots (`sample`, `sampleTriplanar`) and
+  **uniform arrays**, `uniform bodies: vec4[8]` read as `bodies[i]`, which a
+  script fills in one call. See [`./post-processing.md`](./post-processing.md).
 - **The mesh and the sky** (`stage fragment`) — `vertexColor` is the colour
   each vertex carries (`mesh.build`'s `colors`, a glTF's COLOR_0, vertex paint;
   white where a mesh has none), so data a game bakes into a mesh, such as a
   river's flow or a lake's depth, reaches the shader. `skyRadiance(dir
   [, roughness])` is the sky the engine captured this frame along a world
   direction, in real light: water reflects `skyRadiance(reflect(-viewDir, n))`
-  rather than a gradient of its own.
+  rather than a gradient of its own. A screen shader reads it too, for a wet
+  sheen or the sky seen up through a water surface.
   **A shader's surface is drawn whole.** Alpha is yours to read: a vertex or
   texture alpha under the material's cutoff cuts no hole in a surface a shader
   draws, so it can carry a mask, a blend weight or a shading channel. Its
@@ -300,6 +304,12 @@ material's `#0B0A16` agree with each other. Making them all correct is a
 colour-management change across the whole engine, not a shader one, and it would
 shift the look of every project that exists; it is on the list, deliberately not
 done quietly.
+
+Textures are the other way round: a slot reads its picture through the sRGB
+curve, so a stored 128 samples as about 0.216. A slot that holds numbers (a
+normal map, a flow map, a mask, a lookup table) says so with `data` (or
+`linear`): `texture flow = "textures/flow.png" data` samples 128 as 0.502, in a
+material shader and in a `stage post` screen shader alike.
 
 ### 4.3 Hooks into the raymarch pass
 
@@ -409,6 +419,82 @@ why. `let`s the colour reads are not restricted, only the ones the offset reads.
 
 The ◈ graph shows `offset` as a second port on the output node; unwiring it
 removes it.
+
+### 4.6 A surface a script moves: `mesh.update` and water's vertex colours
+
+`output offset` moves vertices by a rule. When the *data* moves (a water
+surface following a simulation, cloth, a cable's tube) the script rewrites the
+mesh instead, and the shader reads what it wrote through `vertexColor`.
+
+```lua
+-- once
+local sheet = mesh.build{ positions = p, indices = i, colors = c, dynamic = true, indexCapacity = most }
+node.model = sheet
+node:setMaterial{ shader = "shaders/water.flsl" }
+
+-- whenever it changes
+mesh.update(sheet, { positions = p2, colors = c2, indices = wetNow })
+```
+
+- **`dynamic = true`** at the build is what allows it. The engine keeps the
+  mesh's vertices, so an update gives only what changed: any of `positions`,
+  `normals`, `uvs`, `colors`, `indices`, as lists or buffers. Normals the
+  engine worked out at the build are worked out again when the surface moves;
+  normals a script gave are kept until it gives new ones.
+- **The vertex count is fixed; the triangle count is not.** `indices` may be
+  any length up to `indexCapacity` (the count at the build unless given), or
+  empty for a sheet that is dry for now. A surface whose cells wet and dry
+  keeps one vertex per grid point and changes only its triangles: no
+  degenerate quads, and no fill spent on water that is not there.
+- **Nothing is allocated and nothing is rebound.** The values are written
+  into the mesh's own vertex, index and colour storage: the name, the node,
+  the material and its shader binding all stay, and `perf.counts()`'s
+  `scriptMeshes` does not move. Updates of one mesh in one frame are one
+  write. A 49 × 49 sheet's positions and colours, from buffers, cost about
+  0.1 ms of script time, less than building it.
+- **It shows in the frame it was made in.** Scripts run, the driver writes,
+  the frame is drawn. Until the write the mesh draws what it held, so there
+  is never a frame with neither.
+- A count that does not fit (a list for another vertex count, more indices
+  than the capacity, colours for a mesh built without any) raises at the
+  call, naming the mesh and the list, and changes nothing.
+
+**Water's surface arrives with its data.** `water.surface(id, { colors = true })`
+adds per-vertex colours in the layout a water shader wants:
+
+| lane | holds | scale |
+|---|---|---|
+| `vertexColor.r` | the water's depth over its bed | metres / 16 (16 m and deeper is 1) |
+| `vertexColor.g`, `.b` | its flow along the parent's x and z | m/s / 4 about 0.5: 0.5 is still, 0 and 1 are −4 and +4 m/s |
+| `vertexColor.a` | foam | 0 glassy … 1 white water |
+
+For water the engine simulates (`shape = "sim"`) these are the solver's own:
+its depth, its velocity, and foam where the flow runs faster than its own
+waves (a Froude number past about 1) and at the lip and foot of every fall.
+For a lake or a heightfield the depth is measured down to the ground and the
+flow is the volume's `current`. In the shader:
+
+```
+let depth = vertexColor.r * 16
+let flow  = (vertexColor.gb - 0.5) * 8      // m/s along x and z
+let foam  = vertexColor.a
+```
+
+`fixed = true` makes every grid point a vertex, wet or dry, in the same order
+each time, and marks the answer `dynamic` with room for every cell, so the
+same call feeds `mesh.build` once and `mesh.update` after. `buffers = true`
+hands the arrays over as buffers. `water.surfaceChanged(id)` says whether the
+surface is different from the one last taken, so a still lake costs nothing:
+
+```lua
+local opts = { fixed = true, colors = true, buffers = true }
+local sheet = mesh.build(water.surface(id, opts))
+function update(node, dt)
+  if water.surfaceChanged(id) then
+    mesh.update(sheet, water.surface(id, opts))
+  end
+end
+```
 
 ## 5. Materials reference a compiled shader
 

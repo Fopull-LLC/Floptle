@@ -33,10 +33,32 @@ struct PostChainParams {
 struct PostCam {
     inv_proj: mat4x4<f32>, // clip → view
     inv_view: mat4x4<f32>, // view → world, rotation only (the world is camera-relative)
-    spare: mat4x4<f32>,
+    spare: mat4x4<f32>,    // [0].x = how far under water the camera is (0 in air)
     eye: vec4<f32>,        // xyz = the camera's world position
 };
 @group(1) @binding(1) var<uniform> pc: PostCam;
+// The sky the frame captured (equirectangular, a roughness level per mip), for
+// `skyRadiance`; one black texel when there is none.
+@group(1) @binding(2) var post_env_tex: texture_2d<f32>;
+@group(1) @binding(3) var post_env_samp: sampler;
+
+// The sky seen along world direction `r`, blurred to roughness `rough`: the
+// same lookup a surface's reflection makes in the raster pass, so a screen
+// shader's sheen and a surface's mirror show one sky.
+fn env_radiance(r: vec3<f32>, rough: f32) -> vec3<f32> {
+    let dims = textureDimensions(post_env_tex, 0);
+    if (dims.x <= 1u || dims.y <= 1u) {
+        return vec3<f32>(0.0);
+    }
+    let d = normalize(r);
+    let u = atan2(d.z, d.x) * 0.15915494 + 0.5;
+    let t = acos(clamp(d.y, -1.0, 1.0)) * 0.31830989;
+    let levels = f32(textureNumLevels(post_env_tex) - 1u);
+    let rr = clamp(rough, 0.0, 1.0);
+    let texel = 6.2831853 / max(f32(dims.x), 1.0);
+    let mip = clamp(log2(max(rr * rr, 1e-5) / texel), 0.0, levels);
+    return textureSampleLevel(post_env_tex, post_env_samp, vec2<f32>(u, t), mip).rgb;
+}
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -148,4 +170,10 @@ fn flsl_post_ray(uv: vec2<f32>) -> vec3<f32> {
 // Where the camera is in the world.
 fn flsl_post_camera() -> vec3<f32> {
     return pc.eye.xyz;
+}
+
+// How far under the nearest water surface the camera is, in world units; 0 in
+// air (and in a sealed cave below the waterline).
+fn flsl_post_water_depth() -> f32 {
+    return pc.spare[0].x;
 }

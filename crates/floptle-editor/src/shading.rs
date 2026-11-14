@@ -809,6 +809,18 @@ pub(crate) fn fog_uniforms(l: &Light) -> FogLanes {
     )
 }
 
+/// The water the point `p` is in: how deep, and the look it paints.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct WaterAt {
+    /// Metres under the surface of the deepest water `p` is in, whether or
+    /// not that water has an underwater look; 0 in air. What a screen shader
+    /// reads as `sceneWaterDepth()`.
+    pub depth: f32,
+    /// `(tint, visibility)` of the deepest water with a look that `p` is in:
+    /// the engine's own underwater fog.
+    pub look: Option<([f32; 3], f32)>,
+}
+
 /// The WaterVolume (or water a script declared, with an underwater look) the
 /// point `p` is inside, if any: `(tint, visibility)`.
 ///
@@ -835,12 +847,29 @@ pub(crate) fn underwater_at_open(
     p: floptle_core::math::DVec3,
     roofed: &dyn Fn(floptle_core::math::DVec3, floptle_core::math::DVec3, f64) -> bool,
 ) -> Option<([f32; 3], f32)> {
+    water_at_open(world, declared, p, roofed).look
+}
+
+/// Everything the draw asks about the water at `p`, from one walk of the
+/// scene: the depth a screen shader reads, and the look the fog takes.
+///
+/// The two can come from different water. A volume with its `underwater` look
+/// switched off still counts for the depth (a game drawing its own underwater
+/// pass needs to know it is under), and never for the look.
+pub(crate) fn water_at_open(
+    world: &floptle_core::World,
+    declared: &[floptle_core::water::DeclaredWater],
+    p: floptle_core::math::DVec3,
+    roofed: &dyn Fn(floptle_core::math::DVec3, floptle_core::math::DVec3, f64) -> bool,
+) -> WaterAt {
     use floptle_core::math::DVec3;
     use floptle_core::{Matter, WaterKind};
+    // The deepest water of any kind, and the deepest that paints a look.
+    let mut deepest: Option<(f64, DVec3)> = None;
     let mut best: Option<(f64, [f32; 3], f32, DVec3)> = None;
     for (e, m) in world.query::<Matter>() {
         let Matter::WaterVolume {
-            kind, radius, half_extents, frozen, tint, visibility, ..
+            kind, radius, half_extents, frozen, tint, visibility, underwater, ..
         } = m
         else {
             continue;
@@ -871,21 +900,43 @@ pub(crate) fn underwater_at_open(
                 (half.y - local.y, wt.rotation.as_dquat() * DVec3::Y)
             }
         };
-        if depth > 0.0 && best.is_none_or(|(d, ..)| depth > d) {
+        if depth <= 0.0 {
+            continue;
+        }
+        if deepest.is_none_or(|(d, _)| depth > d) {
+            deepest = Some((depth, up));
+        }
+        if *underwater && best.is_none_or(|(d, ..)| depth > d) {
             best = Some((depth, *tint, visibility.max(0.5), up));
         }
     }
     // Water a script declared looks the same from inside, unless it was
     // declared with no look at all.
     for w in declared {
-        let Some(look) = w.look else { continue };
         let at = w.at(p);
-        if at.depth > 0.0 && best.is_none_or(|(d, ..)| at.depth > d) {
+        if at.depth <= 0.0 {
+            continue;
+        }
+        if deepest.is_none_or(|(d, _)| at.depth > d) {
+            deepest = Some((at.depth, at.up));
+        }
+        if let Some(look) = w.look
+            && best.is_none_or(|(d, ..)| at.depth > d)
+        {
             best = Some((at.depth, look.tint, look.visibility.max(0.5), at.up));
         }
     }
-    let (depth, tint, vis, up) = best?;
-    (!roofed(p, up, depth)).then_some((tint, vis))
+    // Usually one body of water answers both, and the ray that looks for a
+    // roof over it is cast once.
+    let open_depth = deepest.filter(|(depth, up)| !roofed(p, *up, *depth)).map(|(d, _)| d);
+    let look = best.and_then(|(depth, tint, vis, up)| {
+        let open = match deepest {
+            Some((d, _)) if d == depth => open_depth.is_some(),
+            _ => !roofed(p, up, depth),
+        };
+        open.then_some((tint, vis))
+    });
+    WaterAt { depth: open_depth.unwrap_or(0.0) as f32, look }
 }
 
 /// Is there solid, drawn ground between `p` and the water's surface `depth`
@@ -963,7 +1014,13 @@ pub(crate) fn fog_uniforms_and_particles_at(
     roofed: &dyn Fn(floptle_core::math::DVec3, floptle_core::math::DVec3, f64) -> bool,
     cam: floptle_core::math::DVec3,
 ) -> (FogLanes, [f32; 4]) {
-    if let Some((tint, vis)) = underwater_at_open(world, declared, cam, roofed) {
+    fog_uniforms_and_particles_in(l, underwater_at_open(world, declared, cam, roofed))
+}
+
+/// [`fog_uniforms_and_particles_at`], for a camera already known to be under
+/// water with the look `under` (or in air).
+fn fog_uniforms_and_particles_in(l: &Light, under: Option<([f32; 3], f32)>) -> (FogLanes, [f32; 4]) {
+    if let Some((tint, vis)) = under {
         let dither = if l.fog_dither { l.fog_dither_strength.clamp(0.0, 1.0) } else { 0.0 };
         // Start close to the eye: water attenuates from the first centimetre,
         // and a start distance would give you a crisp bubble of clear water
@@ -985,19 +1042,22 @@ pub(crate) fn fog_uniforms_and_particles_at(
 }
 
 /// The fog the screen-space AO pass fades out under, as a linear ramp
-/// `[start, end, on, _]` over view distance.
+/// `[start, end, on, _]` over view distance, and how far under water the
+/// camera is (`sceneWaterDepth` in a screen shader), from one walk of the
+/// scene's water: what a view's post chain is handed each frame.
 ///
-/// The particle pass's lanes, because they are already the one linear answer
-/// for every fog the scene can have: the flat ramp, the volumetric fog's
-/// equivalent, and the water the camera is under.
-pub(crate) fn ao_fog(
+/// The fog is the particle pass's lanes, because they are already the one
+/// linear answer for every fog the scene can have: the flat ramp, the
+/// volumetric fog's equivalent, and the water the camera is under.
+pub(crate) fn ao_fog_and_water_depth(
     world: &floptle_core::World,
     declared: &[floptle_core::water::DeclaredWater],
     roofed: &dyn Fn(floptle_core::math::DVec3, floptle_core::math::DVec3, f64) -> bool,
     cam: floptle_core::math::DVec3,
-) -> [f32; 4] {
+) -> ([f32; 4], f32) {
     let light = world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
-    fog_uniforms_and_particles_at(&light, world, declared, roofed, cam).1
+    let water = water_at_open(world, declared, cam, roofed);
+    (fog_uniforms_and_particles_in(&light, water.look).1, water.depth)
 }
 
 /// Harvest up to 32 proxy shadow occluders from the world's collider shapes —

@@ -118,6 +118,8 @@ fn main() {
             fog: [0.0; 4],
             inv_view: glam::Mat4::IDENTITY.to_cols_array_2d(),
             eye: [0.0; 3],
+            water_depth: 0.0,
+            sky: None,
         };
         post.run_with(&gpu, &settings, Some(&ssao), &out_view, shaders);
         read_rgb(&gpu, &out)

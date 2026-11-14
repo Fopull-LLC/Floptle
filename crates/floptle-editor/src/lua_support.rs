@@ -95,9 +95,9 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|LightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Live component handle (RigidBody / PointLight / Light / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer / Material), nil if the node lacks it.
 ---@field getComponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|LightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Live component handle (RigidBody / PointLight / Light / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer / Material), nil if the node lacks it.
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
----@field setShaderParam fun(self: Node, name: string, x: number, y?: number, z?: number, w?: number) Drive a `.flsl` uniform on this node every tick (a GPU uniform write, never a recompile): the node's Material shader, or its UI element's `stage ui` shader (instruments like the navball). Unset lanes are 0.
+---@field setShaderParam fun(self: Node, name: string, x: number|table, y?: number, z?: number, w?: number) Drive a `.flsl` uniform on this node every tick (a GPU uniform write, never a recompile): the node's Material shader, or its UI element's `stage ui` shader (instruments like the navball). Unset lanes are 0. On the Post Processing node, a list fills a screen shader's uniform array: `{ {x, y, z, w}, ... }`, or a list of numbers for a `float[n]`.
 ---@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, cloudColor {r,g,b}, cloudDarkness (0..1, 1 = storm), cloudHeight (share of atmoHeight), aureole, aureoleSize (the star's glow: strength, spread; 1 = natural), luminosity, starColor, occluderRadius (occlusion culling: radius of the solid core geometry never pierces — chunks fully behind it skip their draws; keep it BELOW the deepest cave/dig; 0 = off), reach (with soi 0, the least the SOI reaches, in its own radii; 4 by default).
----@field setShaderTexture fun(self: Node, slot: string, ref: string) Point one of this node's `.flsl` shader texture SLOTS somewhere else, at runtime. `slot` is the name the shader declares (`texture ramp` gives \"ramp\"); `ref` is a project-relative image path, an `rt:<name>` render target (what another camera sees, live), or \"\" to clear the slot. A shader can declare up to 8 slots.
+---@field setShaderTexture fun(self: Node, slot: string, ref: string) Point one of this node's `.flsl` shader texture SLOTS somewhere else, at runtime. `slot` is the name the shader declares (`texture ramp` gives \"ramp\"); `ref` is a project-relative image path, an `rt:<name>` render target (what another camera sees, live), or \"\" to clear the slot. A shader can declare up to 8 slots. On the Post Processing node it reaches a screen shader's slots: `\"caustics.pattern\"`, or bare for every pass.
 ---@field setMaterial fun(self: Node, t: table) Construction API — SETUP-TIME, not per-frame: set (and create if absent) the node's Material. It inserts the component and queues a deferred write, so call it on transitions and use `setShaderParam` for values that change every tick. Fields: color/emissive/specular/rim (a colour takes {r,g,b}, {x,y,z}, {1,0.5,0.2} or vec3), emissiveStrength, shininess, specularStrength, rimStrength, unlit (bool), ambient, alpha, texture (path or \"rt:<name>\"), sheetCols/sheetRows/cell (spritesheet grid + which cell draws — `cell` is also a live mirror field, see MaterialHandle).
 ---@field setTerrain fun(self: Node, id: number) Construction API: make this node a Terrain volume with the given id (generate its field with `terrain.generatePlanet`).
 ---@field setTerrainFinePaint fun(self: Node, factor: integer|nil) Paint finer than the voxels on this Terrain node: 2 or 4 cells to a voxel side, so a stroke narrower than a voxel keeps its shape. 0 or nil paints whole voxels.
@@ -1982,10 +1982,20 @@ function water.falls(id) end
 ---grid of `cells` across (default 48) laid on its sphere, kept to its basin:
 ---what its centre reaches without crossing the ground, out to a ring under the
 ---shore. `uvs` are metres across the surface. nil for no such water.
+---`colors = true` adds per-vertex colours for a water shader's `vertexColor`:
+---r = depth over the bed (m / 16), g and b = flow along x and z (m/s / 4,
+---about 0.5), a = foam. `fixed = true` keeps every grid point as a vertex and
+---marks the answer `dynamic`, so it goes to `mesh.build` once and then to
+---`mesh.update`. `buffers = true` returns buffers instead of lists.
 ---@param id integer
----@param opts? { cells?: integer }
----@return { positions: number[], normals: number[], uvs: number[], indices: integer[] }|nil
+---@param opts? { cells?: integer, colors?: boolean, fixed?: boolean, buffers?: boolean }
+---@return { positions: number[]|buffer, normals: number[]|buffer, uvs: number[]|buffer, indices: integer[]|buffer, colors?: number[]|buffer, dynamic?: boolean, indexCapacity?: integer }|nil
 function water.surface(id, opts) end
+---Has this water's surface changed since `water.surface(id)` was last called?
+---True before the first call; false over water that stands still.
+---@param id integer
+---@return boolean
+function water.surfaceChanged(id) end
 ---Take away water `water.addVolume` declared. true if there was some.
 ---@param id integer
 ---@return boolean
@@ -2434,9 +2444,21 @@ mesh = {}
 ---owner node is gone (owner) or the next scene load (scene = true).
 ---Any array may be a buffer instead (f32s; indices u32s numbered from 0),
 ---read in one copy: much faster for a big mesh.
----@param spec { positions: number[]|buffer, indices: integer[]|buffer, normals?: number[]|buffer, uvs?: number[]|buffer, colors?: number[]|buffer, owner?: Node, scene?: boolean }
+---`dynamic = true` builds a mesh `mesh.update` can rewrite in place; it may
+---start with no triangles, and `indexCapacity` is how many indices a later
+---update may give it.
+---@param spec { positions: number[]|buffer, indices: integer[]|buffer, normals?: number[]|buffer, uvs?: number[]|buffer, colors?: number[]|buffer, owner?: Node, scene?: boolean, dynamic?: boolean, indexCapacity?: integer }
 ---@return string name
 function mesh.build(spec) end
+---Write new values into a mesh built with `dynamic = true`, in place: any of
+---positions, normals, uvs, colors and indices, as `mesh.build` takes them.
+---The vertex count stays as built; what is left out is kept (normals the
+---engine worked out are worked out again). `indices` may be any length up to
+---the mesh's `indexCapacity`, or empty. Nothing is allocated, and the new
+---values draw in the frame after the script runs.
+---@param name string
+---@param spec { positions?: number[]|buffer, normals?: number[]|buffer, uvs?: number[]|buffer, colors?: number[]|buffer, indices?: integer[]|buffer }
+function mesh.update(name, spec) end
 ---Give a built mesh back. True if it was one.
 ---@param name string
 ---@return boolean

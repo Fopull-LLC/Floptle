@@ -379,7 +379,8 @@ end
 | `water.volumes()` | every water node in the scene. |
 | `water.flowAt(x, y, z)` | the water's velocity there, m/s; zero in still water. |
 | `water.addVolume{...}` | declare a lake or a heightfield of water no node carries; returns an id. |
-| `water.surface(id [, {cells}])` | its surface as the arrays `mesh.build` takes, in the parent's frame. |
+| `water.surface(id [, {cells, colors, fixed, buffers}])` | its surface as the arrays `mesh.build` takes, in the parent's frame. `colors` adds depth, flow and foam per vertex; `fixed` keeps every grid point a vertex, ready for `mesh.update`. |
+| `water.surfaceChanged(id)` | whether the surface moved since `water.surface(id)` last took it. |
 | `water.removeVolume(id)` | take it away again. |
 
 A lake on a round world is part of a sphere about the planet's centre, and only

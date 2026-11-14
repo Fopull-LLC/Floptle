@@ -37,6 +37,9 @@ pub(crate) struct BindContent {
     shader: u32,
     params: Vec<u8>,
     textures: Vec<Option<u32>>,
+    /// Which slots the shader declares `data`: a slot that changes between
+    /// a picture and data binds another view of the same texture.
+    data: Vec<bool>,
 }
 
 /// One material's place in the binding pool: which shared binding it draws
@@ -95,7 +98,7 @@ impl FlslPool {
             return *id;
         }
         let reuse = self.free.pop();
-        let id = raster.set_flsl_binding(gpu, reuse, shader, &content.params, textures);
+        let id = raster.set_flsl_binding_data(gpu, reuse, shader, &content.params, textures, &content.data);
         self.live.insert(content.clone(), (id, 1));
         id
     }
@@ -149,7 +152,16 @@ struct FlslPlan<K> {
     shader: FlslShaderId,
     params: Vec<u8>,
     slot_paths: Vec<Option<String>>,
+    data: Vec<bool>,
 }
+
+/// A material's shader, its packed params, the image path in each slot and
+/// which slots are declared `data`.
+type MaterialPlan = (FlslShaderId, Vec<u8>, Vec<Option<String>>, Vec<bool>);
+
+/// A screen pass's shader, its packed params, and each slot's image path
+/// with whether the slot is declared `data`.
+type PostPlan = (floptle_render::PostShaderId, Vec<u8>, Vec<(Option<String>, bool)>);
 
 /// Apply one resolved [`FlslPlan`] (textures already looked up) to a binding
 /// map: keep the binding when nothing changed, move to the binding already
@@ -163,13 +175,14 @@ fn apply_flsl_bind<K: Eq + std::hash::Hash>(
     pool: &mut FlslPool,
     gpu: &floptle_render::Gpu,
     raster: &mut floptle_render::Raster,
-    // (key, shader, params, resolved textures) — bundled to stay under the
-    // house arg-count limit rather than because they're conceptually one thing.
-    resolved: (K, FlslShaderId, Vec<u8>, Vec<Option<TexId>>),
+    // (key, shader, params, resolved textures, data slots) — bundled to stay
+    // under the house arg-count limit rather than because they're
+    // conceptually one thing.
+    resolved: (K, FlslShaderId, Vec<u8>, Vec<Option<TexId>>, Vec<bool>),
 ) {
-    let (key, shader, params, textures) = resolved;
+    let (key, shader, params, textures, data) = resolved;
     let content =
-        BindContent { shader: shader.0, params, textures: textures.iter().map(|t| t.map(|t| t.0)).collect() };
+        BindContent { shader: shader.0, params, textures: textures.iter().map(|t| t.map(|t| t.0)).collect(), data };
     let Some(b) = binds.get_mut(&key) else {
         let binding = pool.acquire(gpu, raster, &content, shader, &textures);
         binds.insert(key, FlslMatBind { binding, shader, content });
@@ -181,10 +194,10 @@ fn apply_flsl_bind<K: Eq + std::hash::Hash>(
     let alone = pool.live.get(&b.content).is_some_and(|&(_, users)| users == 1);
     if alone && !pool.live.contains_key(&content) {
         pool.live.remove(&b.content);
-        if b.content.shader == content.shader && b.content.textures == content.textures {
+        if b.content.shader == content.shader && b.content.textures == content.textures && b.content.data == content.data {
             raster.write_flsl_params(gpu, b.binding, &content.params);
         } else {
-            b.binding = raster.set_flsl_binding(gpu, Some(b.binding), shader, &content.params, &textures);
+            b.binding = raster.set_flsl_binding_data(gpu, Some(b.binding), shader, &content.params, &textures, &content.data);
         }
         pool.live.insert(content.clone(), (b.binding, 1));
     } else {
@@ -316,7 +329,7 @@ impl Editor {
         // node-level materials, one for the per-part overrides. The plans
         // borrow the world's materials rather than cloning them: in a scene of
         // thousands of parts the clones were most of the cost.
-        let plan_of = |cache: &FlslCache, m: &Material| -> Option<(FlslShaderId, Vec<u8>, Vec<Option<String>>)> {
+        let plan_of = |cache: &FlslCache, m: &Material| -> Option<MaterialPlan> {
             let rel = m.shader.as_deref().unwrap_or_default();
             let (compiled, shader) = cache.get(rel).and_then(|en| en.compiled.as_ref())?;
             let params = compiled.pack_params(
@@ -332,15 +345,15 @@ impl Editor {
                 .zip(&compiled.texture_defaults)
                 .map(|(slot, dflt)| m.shader_textures.get(slot).cloned().or_else(|| dflt.clone()))
                 .collect();
-            Some((*shader, params, slot_paths))
+            Some((*shader, params, slot_paths, compiled.texture_data.clone()))
         };
         let plans: Vec<FlslPlan<Entity>> = self
             .world
             .query::<Material>()
             .filter(|(e, m)| m.shader.is_some() && wanted(e) && !field_shape.contains(e))
             .filter_map(|(e, m)| {
-                let (shader, params, slot_paths) = plan_of(&self.flsl_cache, m)?;
-                Some(FlslPlan { key: e, shader, params, slot_paths })
+                let (shader, params, slot_paths, data) = plan_of(&self.flsl_cache, m)?;
+                Some(FlslPlan { key: e, shader, params, slot_paths, data })
             })
             .collect();
         let obj_plans: Vec<FlslPlan<(Entity, String)>> = self
@@ -351,8 +364,8 @@ impl Editor {
                 om.0.iter().filter(|(_, m)| m.shader.is_some()).map(move |(k, m)| (e, k, m))
             })
             .filter_map(|(e, key, m)| {
-                let (shader, params, slot_paths) = plan_of(&self.flsl_cache, m)?;
-                Some(FlslPlan { key: (e, key.clone()), shader, params, slot_paths })
+                let (shader, params, slot_paths, data) = plan_of(&self.flsl_cache, m)?;
+                Some(FlslPlan { key: (e, key.clone()), shader, params, slot_paths, data })
             })
             .collect();
 
@@ -383,7 +396,7 @@ impl Editor {
             let bind = floptle_core::profile::Span::new();
             apply_flsl_bind(
                 &mut self.flsl_binds, &mut self.flsl_pool, gpu, raster,
-                (plan.key, plan.shader, plan.params, textures),
+                (plan.key, plan.shader, plan.params, textures, plan.data),
             );
             bind_ms += bind.ms();
         }
@@ -402,7 +415,7 @@ impl Editor {
             let bind = floptle_core::profile::Span::new();
             apply_flsl_bind(
                 &mut self.obj_flsl_binds, &mut self.flsl_pool, gpu, raster,
-                (plan.key, plan.shader, plan.params, textures),
+                (plan.key, plan.shader, plan.params, textures, plan.data),
             );
             bind_ms += bind.ms();
         }
@@ -1167,19 +1180,46 @@ impl Editor {
             self.ensure_post_shader(p);
         }
 
-        let passes: Vec<(floptle_render::PostShaderId, Vec<u8>)> = listed
+        // Plan each pass from the compile cache, then resolve its texture
+        // slots (which may load an image) and hand the list over. The pass's
+        // own image wins; a slot it leaves alone shows the one the shader
+        // declares, and a slot with neither reads white.
+        let plans: Vec<PostPlan> = listed
             .iter()
             .filter(|s| s.enabled)
             .filter_map(|s| {
                 let (compiled, id) =
                     self.post_flsl_cache.get(&s.shader).and_then(|e| e.compiled.as_ref())?;
-                Some((*id, compiled.pack_params(&|name| s.params.get(name).copied())))
+                let params = compiled.pack_params_with(
+                    &|name| s.params.get(name).copied(),
+                    &|name| s.arrays.get(name).map(Vec::as_slice),
+                );
+                let slots = compiled
+                    .textures
+                    .iter()
+                    .zip(&compiled.texture_defaults)
+                    .map(|(slot, dflt)| s.textures.get(slot).cloned().or_else(|| dflt.clone()))
+                    .zip(compiled.texture_data.iter().copied().chain(std::iter::repeat(false)))
+                    .collect();
+                Some((*id, params, slots))
             })
             .collect();
+        let mut passes = Vec::with_capacity(plans.len());
+        for (shader, params, slots) in plans {
+            let textures = slots
+                .iter()
+                .map(|(path, data): &(Option<String>, bool)| {
+                    let id = self.ensure_texture(path.as_deref()?)?;
+                    let (gpu, raster) = (self.gpu.as_ref()?, self.raster.as_mut()?);
+                    raster.texture_binding_data(gpu, id, *data)
+                })
+                .collect();
+            passes.push(floptle_render::PostPass { shader, params, textures });
+        }
         let (Some(gpu), Some(reg)) = (self.gpu.as_ref(), self.post_shaders.as_mut()) else {
             return;
         };
-        reg.set_passes(gpu, &passes);
+        reg.set_pass_list(gpu, &passes);
     }
 
     /// Compile (or hot-reload) one `stage post` `.flsl`. Keeps the last good
@@ -1222,7 +1262,12 @@ impl Editor {
             }
         };
         let compile = floptle_core::profile::Span::new();
-        let outcome = compile_post_validated(&src);
+        let outcome = compile_post_validated(&src).and_then(|compiled| {
+            match self.gpu.as_ref().map(|gpu| floptle_render::PostShaders::fits(gpu, compiled.textures.len())) {
+                Some(Err(why)) => Err(why),
+                _ => Ok(compiled),
+            }
+        });
         self.note_asset(rel, "shaderCompile", compile.ms());
         match outcome {
             Ok(compiled) => {
@@ -1230,7 +1275,7 @@ impl Editor {
                     return;
                 };
                 let build = floptle_core::profile::Span::new();
-                let built = builder.build(&post_module_source(&compiled.chunk));
+                let built = builder.build(&post_module_source(&compiled.chunk), compiled.textures.len());
                 self.note_asset(rel, "pipelineCompile", build.ms());
                 self.install_post_flsl(rel, mtime, compiled, built);
             }

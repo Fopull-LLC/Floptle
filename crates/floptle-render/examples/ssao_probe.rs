@@ -78,6 +78,8 @@ fn main() {
         fog: [0.0; 4],
         inv_view: glam::Mat4::IDENTITY.to_cols_array_2d(),
         eye: [0.0; 3],
+        water_depth: 0.0,
+        sky: None,
     };
     let base = PostSettings {
         bloom: false,

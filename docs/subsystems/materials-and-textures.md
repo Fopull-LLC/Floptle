@@ -126,6 +126,18 @@ Material(
 > - Raster surfaces only (meshes, primitives, map geometry) — blobs/SDF matter
 >   have no UVs to window.
 
+### Texture filtering at a grazing angle
+
+A mipmapped (`SmoothMipmaps`) picture seen low across, such as a floor, a road
+or a water surface, would drop to the mip level of its footprint's longest
+side and smear to a blur a few metres out. Anisotropic filtering takes extra
+samples along the footprint instead, so the detail holds into the distance.
+**Project Settings > Rendering > Texture filtering** sets how many: 1x (plain
+trilinear), 2x, 4x, 8x (the default, for older projects too) or 16x. A game
+can offer it to players with `app.setAnisotropy(level)`, for the session.
+Pixel-art and plain smooth pictures are not affected. Changing the level
+remakes the samplers once, on the frame it changes.
+
 ### Cutout mips
 
 A cutout material (`alpha_cutoff`) draws a pixel where its picture's alpha

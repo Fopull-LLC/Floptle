@@ -761,18 +761,21 @@ impl Editor {
         if let (Some(gpu), Some(post)) = (self.gpu.as_ref(), self.game_post.as_ref()) {
             let post_shaders = self.post_shaders.as_ref();
             let proj = cam.proj_matrix(aspect);
-            let ssao_frame = floptle_render::SsaoFrame {
-                depth: &depth,
-                proj: proj.to_cols_array_2d(),
-                inv_proj: proj.inverse().to_cols_array_2d(),
-                fog: crate::shading::ao_fog(
+            let (fog, water_depth) = crate::shading::ao_fog_and_water_depth(
                     &self.world,
                     &self.script_host.declared_water(),
                     &crate::shading::roofed_by(self.sim.as_ref()),
                     cam.world_position,
-                ),
+                );
+            let ssao_frame = floptle_render::SsaoFrame {
+                depth: &depth,
+                proj: proj.to_cols_array_2d(),
+                inv_proj: proj.inverse().to_cols_array_2d(),
+                fog,
                 inv_view: cam.view_matrix().inverse().to_cols_array_2d(),
                 eye: cam.world_position.as_vec3().to_array(),
+                water_depth,
+                sky: self.raymarch.as_ref().map(|r| r.env_view()),
             };
             let out = if scaled_on {
                 retro_views.as_ref().map(|(c, _)| c.clone()).unwrap_or_else(|| cv.clone())

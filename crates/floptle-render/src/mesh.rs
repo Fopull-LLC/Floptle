@@ -113,6 +113,13 @@ impl GpuMesh {
     /// yields a valid, drawable-as-nothing mesh instead of a zero-size buffer (which
     /// wgpu rejects); `index_count` of 0 then draws nothing.
     pub fn upload(gpu: &Gpu, data: &MeshData) -> Self {
+        Self::upload_reserving(gpu, data, 0)
+    }
+
+    /// [`upload`](Self::upload), with an index buffer that has room for
+    /// `index_capacity` indices (when that is more than `data` has): a mesh
+    /// whose triangle count a later rewrite may raise without a new buffer.
+    pub fn upload_reserving(gpu: &Gpu, data: &MeshData, index_capacity: usize) -> Self {
         let vsize = (std::mem::size_of_val(data.vertices.as_slice()) as u64)
             .max(std::mem::size_of::<Vertex>() as u64);
         let vbuf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -123,7 +130,7 @@ impl GpuMesh {
         });
         gpu.queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&data.vertices));
 
-        let isize = (std::mem::size_of_val(data.indices.as_slice()) as u64).max(4);
+        let isize = (data.indices.len().max(index_capacity).max(1) as u64) * 4;
         let ibuf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mesh-indices"),
             size: isize,

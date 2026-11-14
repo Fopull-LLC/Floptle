@@ -4198,6 +4198,43 @@ mod texture_quality_tests {
         assert_eq!(bytes(&ed), whole, "High did not bring the texture back whole");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// **Texture filtering follows the project, and a script can change it
+    /// for the run.** The renderer takes the project's level with the rest
+    /// of its look (8 for a project that never chose); `app.setAnisotropy(2)`
+    /// moves it on the next frame, and Stop puts the project's back.
+    #[test]
+    fn texture_filtering_follows_the_project_and_a_script_sets_it_for_the_run() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_aniso_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts/menu.lua"), "function start() app.setAnisotropy(2) said = app.anisotropy() end\n").unwrap();
+        ed.project_root = dir.clone();
+        ed.apply_project_look();
+        assert_eq!(ed.raster.as_ref().unwrap().anisotropy(), 8, "a project that never chose filters at 8x");
+        ed.project.anisotropy = Some(16);
+        ed.apply_project_look();
+        assert_eq!(ed.raster.as_ref().unwrap().anisotropy(), 16, "the project's setting did not reach the renderer");
+
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(e, floptle_core::Scripts(vec![floptle_core::ScriptInst::new("menu")]));
+        ed.toggle_play();
+        assert!(ed.playing, "did not enter play");
+        ed.play_step(1.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        ed.apply_app_requests();
+        ed.apply_project_look();
+        let said: u32 = ed.script_host.instance_env(e.index(), "menu").unwrap().get("said").unwrap();
+        assert_eq!((said, ed.raster.as_ref().unwrap().anisotropy()), (2, 2), "the script's level did not reach the renderer");
+
+        ed.toggle_play();
+        ed.apply_project_look();
+        assert_eq!(ed.project.anisotropy, Some(16), "the run's level was left in the project");
+        assert_eq!(ed.raster.as_ref().unwrap().anisotropy(), 16, "Stop did not put the project's level back");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Spring bones every node using model `path` swings by unless it has its

@@ -194,6 +194,11 @@ impl Editor {
         if let Some(raster) = self.raster.as_mut() {
             raster.set_retro_defaults(self.project.retro_artefacts());
             raster.set_refraction_default(self.project.glass_refraction_resolved());
+            // A no-op unless the level changed; a change remakes the samplers
+            // and the binds that hold them, once.
+            if let Some(gpu) = self.gpu.as_ref() {
+                raster.set_anisotropy(gpu, self.project.anisotropy_resolved());
+            }
         }
     }
 

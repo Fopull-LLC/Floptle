@@ -49,6 +49,9 @@ pub struct CompiledFragment {
     /// binds when the material leaves the slot empty (see
     /// [`ShaderIr::texture_defaults`](crate::ir::ShaderIr::texture_defaults)).
     pub texture_defaults: Vec<Option<String>>,
+    /// Which slots are declared `data`, aligned with [`Self::textures`]:
+    /// bound through a view that reads the bytes as stored, not as sRGB.
+    pub texture_data: Vec<bool>,
     /// chunk line (0-based) → `.flsl` source span, for naga error mapping.
     pub line_map: Vec<(u32, Span)>,
     /// The shader declares `output offset`: the chunk carries the `vs_flsl`
@@ -199,6 +202,7 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
             .iter()
             .map(|t| ir.texture_defaults.get(t).cloned())
             .collect(),
+        texture_data: ir.textures.iter().map(|t| ir.texture_data.contains(t)).collect(),
         line_map: w.line_map,
         displaced,
     })
@@ -228,7 +232,7 @@ fn emit_offset(ir: &ShaderIr, ck: &Checked, w: &mut Writer) -> Result<(), Transp
             }
             ExprKind::Call { args, .. } => stack.extend(args.iter().map(|a| a.value)),
             ExprKind::Binary(_, a, b) => stack.extend([*a, *b]),
-            ExprKind::Neg(a) | ExprKind::Swizzle(a, _) => stack.push(*a),
+            ExprKind::Neg(a) | ExprKind::Swizzle(a, _) | ExprKind::Index(_, a) => stack.push(*a),
             _ => {}
         }
     }
@@ -523,6 +527,26 @@ impl<'a> Writer<'a> {
                     // Sky uniforms ride the raymarch globals' dedicated `sky_uniforms` array.
                     EmitCtx::Sky => format!("G.sky_uniforms[{u}u]{access}"),
                 }
+            }
+            ExprKind::Index(a, i) => {
+                if !matches!(self.ctx, EmitCtx::Post) {
+                    return Err(TranspileError::new("uniform arrays are for screen shaders (`stage post`)", e.span));
+                }
+                let arr = &self.ir.arrays[*a];
+                let access = match arr.ty {
+                    Ty::Float => ".x",
+                    Ty::Vec2 => ".xy",
+                    Ty::Vec3 => ".xyz",
+                    Ty::Vec4 => "",
+                };
+                // Rounded down and held inside the array: an index a shader
+                // worked out can be off the end, and reading past a uniform
+                // block is a different answer on every backend.
+                format!(
+                    "P.a{a}[u32(clamp({}, 0.0, {}.0))]{access}",
+                    self.emit(*i)?,
+                    arr.len.saturating_sub(1)
+                )
             }
             ExprKind::Let(l) => format!("l{l}_{}", self.ir.lets[*l].0),
             ExprKind::Binary(op, a, b) => {
@@ -1044,33 +1068,82 @@ pub fn transpile_ui(ir: &ShaderIr, ck: &Checked) -> Result<CompiledUi, Transpile
 }
 
 /// A compiled Post-stage shader: a `fs_flsl_post` entry point over the post
-/// chain's full-screen `VsOut` + a group(2) params UBO. Concatenate as
-/// `POST_PRELUDE + POST_FIELD_SHIM + SUPPORT + chunk`.
+/// chain's full-screen `VsOut` + a group(2) params UBO and the shader's
+/// texture slots. Concatenate as `POST_PRELUDE + POST_FIELD_SHIM + SUPPORT +
+/// chunk`.
 #[derive(Clone, Debug)]
 pub struct CompiledPost {
     pub name: String,
     pub chunk: String,
     /// Exposed uniforms in param-block slot order (one vec4 each).
     pub uniforms: Vec<ir::Uniform>,
+    /// Texture slot names, in group(2) binding order (binding 1+2i / 2+2i).
+    pub textures: Vec<String>,
+    /// Each slot's default image path, aligned with [`Self::textures`]: what
+    /// binds when the scene's pass leaves the slot alone.
+    pub texture_defaults: Vec<Option<String>>,
+    /// Which slots are declared `data`, aligned with [`Self::textures`].
+    pub texture_data: Vec<bool>,
+    /// Uniform arrays, in param-block order: after the uniforms and the
+    /// texture slots' tiling lanes, one vec4 per element.
+    pub arrays: Vec<ir::UniformArray>,
     /// chunk line (0-based) → `.flsl` source span, for naga error mapping.
     pub line_map: Vec<(u32, Span)>,
 }
 
+/// The tiling a screen pass samples its slots with: the image as it is, and a
+/// triplanar projection one world unit a tile. (A screen pass has no Material
+/// whose slots could say otherwise; scale the coordinate in the shader.)
+const POST_TILING: TilingPack = TilingPack { a: [1.0, 1.0, 0.0, 0.0], b: [0.0, 0.0, 1.0, 4.0] };
+
 impl CompiledPost {
+    /// vec4 lanes ahead of the arrays: the uniforms and two per texture slot.
+    fn array_base(&self) -> usize {
+        self.uniforms.len() + 2 * self.textures.len()
+    }
+
     /// Size in bytes of the group(2) params UBO (never zero — an empty block
     /// still binds 16 bytes).
     pub fn param_block_size(&self) -> u64 {
-        (self.uniforms.len().max(1) * 16) as u64
+        let lanes = self.array_base() + self.arrays.iter().map(|a| a.len as usize).sum::<usize>();
+        (lanes.max(1) * 16) as u64
     }
 
     /// Pack uniform values (overrides where given, declared defaults otherwise).
+    /// Every array element is zero: see [`Self::pack_params_with`].
     pub fn pack_params(&self, overrides: &dyn Fn(&str) -> Option<[f32; 4]>) -> Vec<u8> {
+        self.pack_params_with(overrides, &|_| None)
+    }
+
+    /// [`Self::pack_params`], with the uniform arrays a script filled.
+    /// `arrays(name)` is that array's elements in order; elements it does not
+    /// reach are zero and elements past the declared length are dropped.
+    pub fn pack_params_with<'a>(
+        &self,
+        overrides: &dyn Fn(&str) -> Option<[f32; 4]>,
+        arrays: &dyn Fn(&str) -> Option<&'a [[f32; 4]]>,
+    ) -> Vec<u8> {
         let mut out = vec![0u8; self.param_block_size() as usize];
-        for (i, u) in self.uniforms.iter().enumerate() {
-            let v = overrides(&u.name).unwrap_or(u.default);
+        let mut write = |slot: usize, v: [f32; 4]| {
             for (l, val) in v.iter().enumerate() {
-                out[i * 16 + l * 4..i * 16 + l * 4 + 4].copy_from_slice(&val.to_le_bytes());
+                out[slot * 16 + l * 4..slot * 16 + l * 4 + 4].copy_from_slice(&val.to_le_bytes());
             }
+        };
+        for (i, u) in self.uniforms.iter().enumerate() {
+            write(i, overrides(&u.name).unwrap_or(u.default));
+        }
+        for i in 0..self.textures.len() {
+            write(self.uniforms.len() + 2 * i, POST_TILING.a);
+            write(self.uniforms.len() + 2 * i + 1, POST_TILING.b);
+        }
+        let mut base = self.array_base();
+        for a in &self.arrays {
+            if let Some(vals) = arrays(&a.name) {
+                for (i, v) in vals.iter().take(a.len as usize).enumerate() {
+                    write(base + i, *v);
+                }
+            }
+            base += a.len as usize;
         }
         out
     }
@@ -1086,10 +1159,9 @@ pub fn transpile_post(ir: &ShaderIr, ck: &Checked) -> Result<CompiledPost, Trans
     if ir.stage != Some(Stage::Post) {
         return Err(TranspileError::new("not a post shader", Span::default()));
     }
-    if !ir.textures.is_empty() {
+    if ir.textures.len() > MAX_TEXTURE_SLOTS {
         return Err(TranspileError::new(
-            "post shaders can't declare texture slots yet — the frame, its depth and \
-             its normals are already bound",
+            format!("a shader can declare at most {MAX_TEXTURE_SLOTS} texture slots"),
             Span::default(),
         ));
     }
@@ -1103,14 +1175,27 @@ pub fn transpile_post(ir: &ShaderIr, ck: &Checked) -> Result<CompiledPost, Trans
     let mut w = Writer::new(ir, ck, EmitCtx::Post);
     w.line(format!("// generated from shader `{}` — edit the .flsl, not this", ir.name), None);
     w.line("struct FlslPostParams {".into(), None);
-    if ir.uniforms.is_empty() {
+    if ir.uniforms.is_empty() && ir.textures.is_empty() && ir.arrays.is_empty() {
         w.line("    _pad: vec4<f32>,".into(), None);
     }
     for (i, u) in ir.uniforms.iter().enumerate() {
         w.line(format!("    u{i}: vec4<f32>, // {}", u.name), None);
     }
+    for (i, name) in ir.textures.iter().enumerate() {
+        w.line(format!("    t{i}a: vec4<f32>, // {name} tiling: count.xy, offset.xy"), None);
+        w.line(format!("    t{i}b: vec4<f32>, // {name} tiling: mode, rot, scale, blend"), None);
+    }
+    for (i, a) in ir.arrays.iter().enumerate() {
+        w.line(format!("    a{i}: array<vec4<f32>, {}>, // {}", a.len, a.name), None);
+    }
     w.line("};".into(), None);
     w.line("@group(2) @binding(0) var<uniform> P: FlslPostParams;".into(), None);
+    // One sampler a slot, never one shared between them: the OpenGL backend
+    // pairs each texture with a single sampler.
+    for (i, name) in ir.textures.iter().enumerate() {
+        w.line(format!("@group(2) @binding({}) var flsl_tex{i}: texture_2d<f32>; // {name}", 1 + 2 * i), None);
+        w.line(format!("@group(2) @binding({}) var flsl_samp{i}: sampler;", 2 + 2 * i), None);
+    }
     w.line(String::new(), None);
 
     w.line("fn flsl_post_surface(in: VsOut) -> vec4<f32> {".into(), None);
@@ -1143,6 +1228,10 @@ pub fn transpile_post(ir: &ShaderIr, ck: &Checked) -> Result<CompiledPost, Trans
         name: ir.name.clone(),
         chunk: w.out,
         uniforms: ir.uniforms.clone(),
+        textures: ir.textures.clone(),
+        texture_defaults: ir.textures.iter().map(|t| ir.texture_defaults.get(t).cloned()).collect(),
+        texture_data: ir.textures.iter().map(|t| ir.texture_data.contains(t)).collect(),
+        arrays: ir.arrays.clone(),
         line_map: w.line_map,
     })
 }
