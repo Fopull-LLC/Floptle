@@ -35,29 +35,34 @@ struct RasterGlobals {
     // because a .flsl `output offset` runs in the vertex stage, which cannot
     // see the field globals the fragment stage reads it from.
     time: vec4<f32>,
+    // The near cascade: a second, smaller sun map beside the first in the
+    // same texture. Its matrix, then lanes laid out like `sun_map`, then
+    // [depth bias, hand-over band in its uv, the far map's share of the
+    // texture's width (0 = all of it), -]. `sun_near.x` 0 is off.
+    sun_near_vp: mat4x4<f32>,
+    sun_near: vec4<f32>,
+    sun_near_extra: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: RasterGlobals;
 @group(0) @binding(12) var sun_map_tex: texture_depth_2d;
 @group(0) @binding(13) var sun_map_samp: sampler_comparison;
 
-// How much sun reaches `p` (camera-relative) on a surface facing `n`, from the
-// sun shadow map, or -1 when the map is off and the field march decides. A
-// point outside the map is in the sun: the map reaches most of the shadow
-// distance, and past its edge the fade beats a hard seam.
-fn sun_map_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
-    if (g.sun_map.x < 0.5) {
-        return -1.0;
-    }
-    let clip = g.sun_vp * vec4<f32>(p + n * g.sun_map.z, 1.0);
+// How much of the texture's width the far map takes: all of it, or the left
+// half when the near cascade sits beside it.
+fn sun_far_share() -> f32 {
+    return select(1.0, g.sun_near_extra.z, g.sun_near_extra.z > 0.0);
+}
+
+// One cascade's filtered look, at `clip` (the point in its clip space, already
+// offset along the normal). `lanes` is [on, filter radius in texels, normal
+// offset, one texel in uv], `bias` its depth bias, and `slot` places it in the
+// shared texture: x = its share of the width, y = where it starts.
+fn sun_cascade_vis(vp: mat4x4<f32>, lanes: vec4<f32>, bias: f32, slot: vec2<f32>, clip: vec4<f32>, n: vec3<f32>) -> f32 {
     let uv = vec2<f32>(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
-    let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-    if (edge <= 0.0 || clip.z >= 1.0) {
-        return 1.0;
-    }
     // Each tap compares against the surface's OWN plane where that tap
     // looks, not the depth at the centre (receiver-plane bias). The disc
-    // reaches `sun_map.y` texels out, and a surface the sun meets at a graze
+    // reaches `lanes.y` texels out, and a surface the sun meets at a graze
     // climbs through the map's depth across that reach: with one depth for
     // every tap, the far side of the disc found the surface itself in front,
     // and a low sun drew stripes over every floor that crawled as the view
@@ -66,43 +71,91 @@ fn sun_map_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
     // (orthographic, affine) matrix: the rows that make u and v, and the
     // surface's normal, fix how far along the surface a step in uv is, and
     // the depth row says what depth that step adds.
-    let gx = vec3<f32>(g.sun_vp[0].x, g.sun_vp[1].x, g.sun_vp[2].x);
-    let gy = vec3<f32>(g.sun_vp[0].y, g.sun_vp[1].y, g.sun_vp[2].y);
-    let gz = vec3<f32>(g.sun_vp[0].z, g.sun_vp[1].z, g.sun_vp[2].z);
+    let gx = vec3<f32>(vp[0].x, vp[1].x, vp[2].x);
+    let gy = vec3<f32>(vp[0].y, vp[1].y, vp[2].y);
+    let gz = vec3<f32>(vp[0].z, vp[1].z, vp[2].z);
     let det = dot(gx, cross(gy, n));
     var grad = vec2<f32>(0.0);
     if (abs(det) > 1e-12) {
         grad = vec2<f32>(2.0 * dot(gz, cross(gy, n)), -2.0 * dot(gz, cross(n, gx))) / det;
         // Nearly edge-on to the sun the slope runs away; its shading is dark
         // there anyway. Capped at a 1:8 climb per texel's worth of uv.
-        let cap = 8.0 * g.sun_extra.x / max(g.sun_map.w, 1e-6);
+        let cap = 8.0 * bias / max(lanes.w, 1e-6);
         let len = length(grad);
         if (len > cap) {
             grad = grad * (cap / len);
         }
     }
     // The constant part, and the half texel each hardware 2×2 compare spans.
-    let depth = clip.z - g.sun_extra.x - length(grad) * g.sun_map.w * 0.5;
+    let depth = clip.z - bias - length(grad) * lanes.w * 0.5;
     // A rotated 12-tap disc, each tap itself a 2×2 hardware compare: soft
     // enough at the default radius that the texel grid never shows.
-    let r = g.sun_map.y * g.sun_map.w;
+    let r = lanes.y * lanes.w;
     var taps = array<vec2<f32>, 12>(
         vec2<f32>(-0.326, -0.406), vec2<f32>(-0.840, -0.074), vec2<f32>(-0.696, 0.457),
         vec2<f32>(-0.203, 0.621), vec2<f32>(0.962, -0.195), vec2<f32>(0.473, -0.480),
         vec2<f32>(0.519, 0.767), vec2<f32>(0.185, -0.893), vec2<f32>(0.507, 0.064),
         vec2<f32>(0.896, 0.412), vec2<f32>(-0.322, -0.933), vec2<f32>(-0.792, -0.598),
     );
+    // Kept half a texel inside its own slot, so no tap's 2×2 reaches into the
+    // other cascade. Alone in the texture this is what the sampler's
+    // clamp-to-edge does anyway.
+    let lo = lanes.w * 0.5;
     var lit = 0.0;
     for (var i = 0; i < 12; i++) {
         let o = taps[i] * r;
-        lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, uv + o, depth + dot(grad, o));
+        let at = vec2<f32>(clamp(uv.x + o.x, lo, 1.0 - lo) * slot.x + slot.y, uv.y + o.y);
+        lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, at, depth + dot(grad, o));
     }
-    let vis = lit / 12.0;
+    return lit / 12.0;
+}
+
+// The far map's answer at `p`. A point outside it is in the sun: the map
+// reaches most of the shadow distance, and past its edge the fade beats a
+// hard seam.
+fn sun_far_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
+    let clip = g.sun_vp * vec4<f32>(p + n * g.sun_map.z, 1.0);
+    let uv = vec2<f32>(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
+    let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    if (edge <= 0.0 || clip.z >= 1.0) {
+        return 1.0;
+    }
+    let vis = sun_cascade_vis(g.sun_vp, g.sun_map, g.sun_extra.x, vec2<f32>(sun_far_share(), 0.0), clip, n);
     // The last few percent of the map fade to sun, so its edge is never a line.
     return mix(1.0, vis, clamp(edge / 0.04, 0.0, 1.0));
 }
+
+// How much sun reaches `p` (camera-relative) on a surface facing `n`, from the
+// sun shadow map, or -1 when the map is off and the field march decides.
+//
+// With the near cascade on, a point inside the near map reads it alone, and
+// across the band at its edge the answer hands over to the far map, so the
+// change in detail has no line. Chosen by where the point falls in the near
+// map rather than by a distance from the camera: the near map is a box along
+// the sun, and every point it picks is one it holds, filter taps included.
+fn sun_map_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
+    if (g.sun_map.x < 0.5) {
+        return -1.0;
+    }
+    if (g.sun_near.x > 0.5) {
+        let clip = g.sun_near_vp * vec4<f32>(p + n * g.sun_near.z, 1.0);
+        let uv = vec2<f32>(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
+        let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+        if (edge > 0.0 && clip.z > 0.0 && clip.z < 1.0) {
+            let share = sun_far_share();
+            let near = sun_cascade_vis(g.sun_near_vp, g.sun_near, g.sun_near_extra.x, vec2<f32>(1.0 - share, share), clip, n);
+            let w = clamp(edge / max(g.sun_near_extra.y, 1e-6), 0.0, 1.0);
+            if (w >= 1.0) {
+                return near;
+            }
+            return mix(sun_far_vis(p, n), near, w);
+        }
+    }
+    return sun_far_vis(p, n);
+}
 // One look at the sun map for the fog's shafts (see raymarch.wgsl's
-// `fog_sun_tap`): -1 with no map, and the field march decides.
+// `fog_sun_tap`): -1 with no map, and the field march decides. The far map
+// only: the air needs no near detail.
 fn fog_sun_tap(p: vec3<f32>) -> f32 {
     if (g.sun_map.x < 0.5) {
         return -1.0;
@@ -115,11 +168,14 @@ fn fog_sun_tap(p: vec3<f32>) -> f32 {
     // Four looks over the map's blur radius, as the fog pass takes them.
     let r = g.sun_map.y * g.sun_map.w;
     let d = clip.z - g.sun_extra.x;
+    let s = vec2<f32>(sun_far_share(), 1.0);
+    let lo = g.sun_map.w * 0.5;
+    let at = vec4<f32>(clamp(uv.x - 0.5 * r, lo, 1.0 - lo), uv.y - 0.5 * r, clamp(uv.x + 0.5 * r, lo, 1.0 - lo), uv.y + 0.5 * r);
     var lit = 0.0;
-    lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, uv + vec2<f32>(-0.5, -0.5) * r, d);
-    lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, uv + vec2<f32>(0.5, -0.5) * r, d);
-    lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, uv + vec2<f32>(-0.5, 0.5) * r, d);
-    lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, uv + vec2<f32>(0.5, 0.5) * r, d);
+    lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, at.xy * s, d);
+    lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, at.zy * s, d);
+    lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, at.xw * s, d);
+    lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, at.zw * s, d);
     return lit * 0.25;
 }
 

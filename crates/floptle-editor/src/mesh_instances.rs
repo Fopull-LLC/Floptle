@@ -97,7 +97,7 @@ pub(crate) fn prepass_and_bind(
         // The fog's shafts read the sun map the raster drew this frame (it
         // draws it before the prepass), on the raster's own terms.
         rm.fog_sun_vp = globals.sun_vp;
-        rm.fog_sun = [globals.sun_map[0], globals.sun_extra[0], 3.0 * globals.sun_map[1] * globals.sun_map[3], 0.0];
+        rm.fog_sun = [globals.sun_map[0], globals.sun_extra[0], 3.0 * globals.sun_map[1] * globals.sun_map[3], raster.sun_map_far_share()];
         let size = depth_tex.size();
         raymarch.march_fog(gpu, rm, (size.width, size.height));
     }

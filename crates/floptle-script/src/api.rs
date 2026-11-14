@@ -914,6 +914,10 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("shadowSteps".to_string(), l.shadow_steps as f64),
                 ("shadowMap".to_string(), f64::from(l.shadow_map)),
                 ("shadowMapSize".to_string(), l.shadow_map_size as f64),
+                ("shadowNearDistance".to_string(), l.shadow_near_distance as f64),
+                ("shadowNearAlways".to_string(), f64::from(l.shadow_near_always)),
+                ("shadowNormalOffset".to_string(), l.shadow_normal_offset as f64),
+                ("shadowDepthBias".to_string(), l.shadow_depth_bias as f64),
                 ("contactShadows".to_string(), f64::from(l.contact_shadows)),
                 ("contactLength".to_string(), l.contact_length as f64),
                 ("contactSteps".to_string(), l.contact_steps as f64),
@@ -2243,6 +2247,12 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     // A power of two from 512 to 4096; the map is made again
                     // at the new size on the next frame.
                     "shadowMapSize" => l.shadow_map_size = (val.clamp(512.0, 4096.0) as u32).next_power_of_two(),
+                    // 0 is one map; the near cascade reaches at most as far
+                    // as the shadow map itself can.
+                    "shadowNearDistance" => l.shadow_near_distance = v.clamp(0.0, 400.0),
+                    "shadowNearAlways" => l.shadow_near_always = val != 0.0,
+                    "shadowNormalOffset" => l.shadow_normal_offset = v.clamp(0.0, 16.0),
+                    "shadowDepthBias" => l.shadow_depth_bias = v.clamp(0.0, 16.0),
                     "contactShadows" => l.contact_shadows = val != 0.0,
                     "contactLength" => l.contact_length = v.clamp(0.01, 20.0),
                     "contactSteps" => l.contact_steps = (val.max(2.0) as u32).min(32),

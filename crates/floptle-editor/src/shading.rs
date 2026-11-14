@@ -657,25 +657,78 @@ pub(crate) fn shadow_uniforms(l: &Light) -> ([f32; 4], [f32; 4], [f32; 4]) {
     )
 }
 
-/// The sun shadow map's lanes for this view (`Light::shadow_map`): the
-/// matrix, then [on, filter radius in texels, normal offset, one texel in uv],
-/// then [depth bias]. All zero, and the march decides, unless the sun casts
-/// and the map is asked for.
+/// The sun shadow map's lanes for one view, as the raster globals carry them
+/// ([`SunMapLanes::apply`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct SunMapLanes {
+    /// The far map's matrix, then [on, filter radius in texels, normal
+    /// offset, one texel in uv], then [depth bias].
+    pub vp: [[f32; 4]; 4],
+    pub map: [f32; 4],
+    pub extra: [f32; 4],
+    /// The near cascade's, laid out the same, then [depth bias, hand-over
+    /// band]. All zero when the view has no near cascade.
+    pub near_vp: [[f32; 4]; 4],
+    pub near: [f32; 4],
+    pub near_extra: [f32; 4],
+}
+
+impl SunMapLanes {
+    /// Write these lanes into a frame's raster globals.
+    pub(crate) fn apply(&self, g: &mut floptle_render::Globals) {
+        g.sun_vp = self.vp;
+        g.sun_map = self.map;
+        g.sun_extra = self.extra;
+        g.sun_near_vp = self.near_vp;
+        g.sun_near = self.near;
+        g.sun_near_extra = self.near_extra;
+    }
+}
+
+/// How far into the near cascade, in its uv, it hands over to the far map:
+/// a band a fifth of its half-width wide (about 7 m at the default 40 m), so
+/// the change in detail is a blend rather than a line.
+const SUN_NEAR_BAND: f32 = 0.1;
+
+/// The near cascade's reach for this Lighting node, or `None` for one map:
+/// `shadow_near_distance` is 0, or not under half the shadow reach (the near
+/// map would cover most of what the far one does), or the reach is within
+/// `Light::SHADOW_NEAR_FROM_DISTANCE` and the scene did not ask for the
+/// cascade always.
+pub(crate) fn sun_near_distance(l: &Light) -> Option<f32> {
+    // NaN (a script's 0/0) is off too.
+    if l.shadow_near_distance.is_nan() || l.shadow_near_distance <= 0.0 {
+        return None;
+    }
+    let near = l.shadow_near_distance.clamp(8.0, 400.0);
+    let reach = l.shadow_distance.clamp(8.0, 400.0);
+    if near * 2.0 > reach {
+        return None;
+    }
+    if !l.shadow_near_always && reach <= Light::SHADOW_NEAR_FROM_DISTANCE {
+        return None;
+    }
+    Some(near)
+}
+
+/// The sun shadow map's lanes for this view (`Light::shadow_map`): the far
+/// map, and the near cascade when [`sun_near_distance`] asks for one. All
+/// zero, and the march decides, unless the sun casts and the map is asked
+/// for.
 ///
 /// In stars mode the map is drawn toward the brightest star at the camera,
 /// `star0` (its position relative to the camera, from [`star_uniforms`]), and
 /// only that star reads it; the others keep the march. A system has several
 /// stars, but one lights the ground at a time, and marching it for every lit
 /// pixel cost a room three times what the same view cost outdoors.
-#[allow(clippy::type_complexity)]
 pub(crate) fn sun_map_lanes(
     l: &Light,
     sun: [f32; 4],
     star0: Option<[f32; 4]>,
     view_proj: floptle_core::math::Mat4,
     camera: floptle_core::math::DVec3,
-) -> ([[f32; 4]; 4], [f32; 4], [f32; 4]) {
-    let off = ([[0.0; 4]; 4], [0.0; 4], [0.0; 4]);
+) -> SunMapLanes {
+    let off = SunMapLanes::default();
     if !(l.shadows && l.shadow_map) {
         return off;
     }
@@ -692,13 +745,27 @@ pub(crate) fn sun_map_lanes(
         return off;
     }
     let size = floptle_render::sun_map_size_for(l.shadow_map_size);
-    let (vp, texel) = floptle_render::sun_shadow_matrix(to_sun, view_proj, l.shadow_distance, size, camera);
-    let size = size as f32;
     // Softness widens the filter: 1.5 texels hard, about 7.5 at full softness.
     let radius = 1.5 + 6.0 * l.shadow_softness.clamp(0.0, 1.0);
-    // The map's depth runs over the box's whole reach toward the sun.
-    let range = texel * size + 300.0;
-    (vp.to_cols_array_2d(), [1.0, radius, texel * 1.5, 1.0 / size], [texel * 2.0 / range, 0.0, 0.0, 0.0])
+    let offset = l.shadow_normal_offset.clamp(0.0, 16.0);
+    let bias = l.shadow_depth_bias.clamp(0.0, 16.0);
+    // One cascade's lanes over `distance`: its matrix, texel and lanes. The
+    // map's depth runs over the box's whole reach toward the sun, and the
+    // offset and bias are in its own texels.
+    let cascade = |distance: f32| {
+        let (vp, texel) = floptle_render::sun_shadow_matrix(to_sun, view_proj, distance, size, camera);
+        let range = texel * size as f32 + 300.0;
+        (vp.to_cols_array_2d(), texel, [1.0, radius, texel * offset, 1.0 / size as f32], texel * bias / range)
+    };
+    let (vp, _, map, far_bias) = cascade(l.shadow_distance);
+    let mut lanes = SunMapLanes { vp, map, extra: [far_bias, 0.0, 0.0, 0.0], ..off };
+    if let Some(near) = sun_near_distance(l) {
+        let (near_vp, _, near_map, near_bias) = cascade(near);
+        lanes.near_vp = near_vp;
+        lanes.near = near_map;
+        lanes.near_extra = [near_bias, SUN_NEAR_BAND, 0.0, 0.0];
+    }
+    lanes
 }
 
 /// The contact-shadow lane. Reported off when the sun's shadows are off, because
@@ -2236,5 +2303,54 @@ mod ao_tests {
         assert_eq!(wants(AoMode::Sdf, 0.6), (false, true));
         assert_eq!(wants(AoMode::Sdf, 0.0), (false, false), "SDF AO at no strength still marched");
         assert_eq!(wants(AoMode::Off, 0.6), (false, false));
+    }
+}
+
+#[cfg(test)]
+mod sun_cascade_tests {
+    use super::*;
+
+    fn lit(distance: f32, size: u32) -> Light {
+        Light { shadows: true, shadow_map: true, shadow_distance: distance, shadow_map_size: size, ..Light::default() }
+    }
+
+    /// **The near cascade is drawn past a long reach, at any map size, and
+    /// never at the default reach.** A scene at 150 m keeps its one map
+    /// whether the map is 512 or 4096 texels; Solar's 178 m and 364 m get the
+    /// cascade; 0 turns it off; `shadow_near_always` draws it at 150 m; and a
+    /// near distance not under half the reach is no cascade.
+    #[test]
+    fn the_near_cascade_is_drawn_past_a_long_reach_only() {
+        for size in [512, 1024, 2048, 4096] {
+            assert_eq!(sun_near_distance(&lit(150.0, size)), None, "150 m at {size}");
+            assert_eq!(sun_near_distance(&lit(178.0, size)), Some(Light::SHADOW_NEAR_DISTANCE), "178 m at {size}");
+            assert_eq!(sun_near_distance(&lit(364.0, size)), Some(Light::SHADOW_NEAR_DISTANCE), "364 m at {size}");
+        }
+        assert_eq!(sun_near_distance(&Light { shadow_near_distance: 0.0, ..lit(364.0, 2048) }), None);
+        assert_eq!(sun_near_distance(&Light { shadow_near_always: true, ..lit(150.0, 2048) }), Some(Light::SHADOW_NEAR_DISTANCE));
+        assert_eq!(sun_near_distance(&Light { shadow_near_always: true, ..lit(60.0, 2048) }), None, "40 m is not under half of 60 m");
+        assert_eq!(sun_near_distance(&Light { shadow_near_distance: 200.0, ..lit(364.0, 2048) }), None);
+    }
+
+    /// The far map's lanes are what they always were at the default offset
+    /// and bias, a scene without the cascade has its near lanes zero, and
+    /// the two knobs scale the offset and the bias in texels.
+    #[test]
+    fn the_sun_map_lanes_keep_their_old_values_and_take_the_knobs() {
+        let vp = floptle_core::math::Mat4::perspective_rh(1.0, 1.0, 0.1, 1000.0);
+        let sun = [0.5, 0.8, 0.3, 0.0];
+        let at = |l: &Light| sun_map_lanes(l, sun, None, vp, DVec3::ZERO);
+        let plain = at(&lit(150.0, 2048));
+        let texel = 150.0 * 0.85 * 2.0 / 2048.0;
+        assert!((plain.map[2] - texel * 1.5).abs() < 1e-6, "normal offset {} for a texel of {texel}", plain.map[2]);
+        assert!((plain.extra[0] - texel * 2.0 / (texel * 2048.0 + 300.0)).abs() < 1e-9);
+        assert_eq!((plain.near, plain.near_extra), ([0.0; 4], [0.0; 4]), "no cascade at 150 m");
+        let tuned = at(&Light { shadow_normal_offset: 3.0, shadow_depth_bias: 1.0, ..lit(150.0, 2048) });
+        assert!((tuned.map[2] - plain.map[2] * 2.0).abs() < 1e-6 && (tuned.extra[0] - plain.extra[0] * 0.5).abs() < 1e-9);
+        let far = at(&lit(364.0, 2048));
+        assert_eq!(far.near[0], 1.0, "the cascade is on at 364 m");
+        let near_texel = 40.0 * 0.85 * 2.0 / 2048.0;
+        assert!((far.near[2] - near_texel * 1.5).abs() < 1e-6, "the near map's offset is in its own texels");
+        assert_eq!(far.near_extra[1], SUN_NEAR_BAND);
     }
 }

@@ -184,7 +184,8 @@ struct Globals {
     // marches its own. y, z = its size, w = its row stride. Appended at the END.
     fog_cache: vec4<f32>,
     // The sun shadow map's matrix, and x = 1 when the fog may read it, y = its
-    // depth bias, z = its blur radius in map coordinates (`fog_sun_tap`).
+    // depth bias, z = its blur radius in map coordinates (`fog_sun_tap`),
+    // w = its share of the texture's width (0 = all of it).
     // Appended at the END.
     fog_sun_vp: mat4x4<f32>,
     fog_sun: vec4<f32>,
