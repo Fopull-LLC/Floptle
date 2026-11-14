@@ -3003,6 +3003,7 @@ impl ScriptHost {
             Rc::new(RefCell::new(Vec::new()));
         let water_freeze: Rc<RefCell<Vec<(u32, bool)>>> = Rc::new(RefCell::new(Vec::new()));
         let water_declared: Rc<RefCell<Vec<floptle_core::water::DeclaredWater>>> = Rc::default();
+        let water_surfaces = crate::water_api::SurfaceBook::default();
         crate::water_api::install_water_api(
             &lua,
             crate::water_api::WaterShared {
@@ -3012,6 +3013,7 @@ impl ScriptHost {
                 next_id: Rc::default(),
                 colliders: colliders.clone(),
                 sim_origin: sim_origin.clone(),
+                surfaces: water_surfaces.clone(),
             },
         );
 
@@ -3623,6 +3625,7 @@ impl ScriptHost {
             water_volumes,
             water_freeze,
             water_declared,
+            water_surfaces,
             scatter_sources,
             scatter_owners,
             scatter_settled,
@@ -4240,6 +4243,18 @@ impl ScriptHost {
         }
     }
 
+    /// What the engine's simulation of declared water `id` knows at each
+    /// point of its grid this frame (the bed, the foam), for the per-vertex
+    /// colours `water.surface` gives.
+    pub fn set_water_report(&self, id: u32, report: floptle_core::water::SimReport) {
+        self.water_surfaces.set_report(id, report);
+    }
+
+    /// Has [`Self::set_water_report`] been called for declared water `id`?
+    pub fn has_water_report(&self, id: u32) -> bool {
+        self.water_surfaces.has_report(id)
+    }
+
     /// Where a simulated volume's water pours off drops now, for
     /// `water.falls`.
     pub fn set_water_falls(&self, id: u32, falls: Vec<floptle_core::water::WaterFall>) {
@@ -4251,6 +4266,7 @@ impl ScriptHost {
     /// Drop every declared water — a scene switch, like [`Self::clear_weather`].
     pub fn clear_declared_water(&mut self) {
         self.water_declared.borrow_mut().clear();
+        self.water_surfaces.retain(&|_| false);
     }
 
     /// Drain `water.setFrozen(node, on)` calls made this frame.
@@ -6615,6 +6631,12 @@ impl ScriptHost {
     /// to upload and register under each request's `name`.
     pub fn take_mesh_requests(&self) -> Vec<crate::MeshRequest> {
         self.meshes.borrow_mut().take_requests()
+    }
+
+    /// What `mesh.update` changed since the last call, one entry a mesh, for
+    /// the driver to write into each mesh's own buffers.
+    pub fn take_mesh_updates(&self) -> Vec<crate::MeshUpdate> {
+        self.meshes.borrow_mut().take_updates()
     }
 
     /// Meshes `mesh.free` gave back since the last call.

@@ -1057,6 +1057,8 @@ pub struct Raster {
     /// CPU mirror of `vpaint_buf`, kept so blocks can be appended (and the buffer
     /// re-created when it outgrows its capacity) without a readback.
     vpaint_cpu: Vec<u32>,
+    /// How many times a mesh has been rewritten in place (`rewrite_mesh`).
+    mesh_rewrites: u64,
     /// The TERRAIN color store: chunk-mesh per-vertex colors, read in `vs` exactly like
     /// `vpaint` but through its own base offset. Separate from `vpaint` for two reasons,
     /// both learned rather than guessed:
@@ -2182,6 +2184,7 @@ impl Raster {
             globals_buf,
             vpaint_buf,
             vpaint_cpu,
+            mesh_rewrites: 0,
             tpaint_buf,
             tpaint_len: 1, // slot 0 is the reserved dummy
             tpaint_free: HashMap::new(),
@@ -4323,8 +4326,27 @@ impl Raster {
         texture: Option<&TextureData>,
         sampling: TexSampling,
     ) -> MeshId {
+        self.register_reserving(gpu, data, texture, sampling, 0)
+    }
+
+    /// Register a mesh that will be rewritten in place
+    /// ([`Self::rewrite_mesh`]): as [`Self::register`], with room in its
+    /// index buffer for `index_capacity` indices, so its triangle count can
+    /// later rise that far without a new buffer.
+    pub fn register_rewritable(&mut self, gpu: &Gpu, data: &MeshData, index_capacity: usize) -> MeshId {
+        self.register_reserving(gpu, data, None, TexSampling::default(), index_capacity)
+    }
+
+    fn register_reserving(
+        &mut self,
+        gpu: &Gpu,
+        data: &MeshData,
+        texture: Option<&TextureData>,
+        sampling: TexSampling,
+        index_capacity: usize,
+    ) -> MeshId {
         let id = MeshId(self.meshes.len() as u32);
-        let gpu_mesh = GpuMesh::upload(gpu, data);
+        let gpu_mesh = GpuMesh::upload_reserving(gpu, data, index_capacity);
         // A short/long color stream would silently misalign paint against geometry —
         // drop it rather than paint the wrong vertices.
         let paint_base = match data.colors.as_ref() {
@@ -4495,6 +4517,86 @@ impl Raster {
         let id = MeshId(self.meshes.len() as u32);
         self.meshes.push(clone);
         Some(id)
+    }
+
+    /// Rewrite a registered mesh in place: new vertices, new vertex colours
+    /// and new triangles, any of the three, written into the buffers the
+    /// mesh already has. Nothing is allocated and nothing is rebound: the
+    /// mesh keeps its id, its texture binding and its block in the colour
+    /// store, and every instance drawing it draws the new values from the
+    /// next pass on. The writes are queued together, so no frame sees some
+    /// of them.
+    ///
+    /// The mesh must be able to hold what it is given, or it is left
+    /// untouched and the reason is returned: `vertices` the same count it
+    /// was registered with, `colors` one a vertex on a mesh registered with
+    /// colours, `indices` no more than its index buffer has room for
+    /// ([`Self::register_rewritable`]). No indices at all is a mesh that
+    /// draws nothing for now.
+    pub fn rewrite_mesh(
+        &mut self,
+        gpu: &Gpu,
+        id: MeshId,
+        vertices: Option<&[Vertex]>,
+        colors: Option<&[[u8; 4]]>,
+        indices: Option<&[u32]>,
+    ) -> Result<(), String> {
+        let Some(m) = self.meshes.get(id.0 as usize) else {
+            return Err("there is no such mesh".into());
+        };
+        let held = (m.gpu_mesh.vbuf.size() / std::mem::size_of::<Vertex>() as u64) as usize;
+        if let Some(v) = vertices
+            && v.len() != held
+        {
+            return Err(format!("{} vertices for a mesh of {held}", v.len()));
+        }
+        if let Some(c) = colors {
+            if m.paint_base == 0 {
+                return Err("vertex colours for a mesh registered without any".into());
+            }
+            if c.len() != held {
+                return Err(format!("{} vertex colours for a mesh of {held} vertices", c.len()));
+            }
+        }
+        if let Some(i) = indices {
+            let room = (m.gpu_mesh.ibuf.size() / 4) as usize;
+            if i.len() > room {
+                return Err(format!("{} indices for a mesh with room for {room}", i.len()));
+            }
+        }
+        let paint_base = m.paint_base;
+        if let Some(c) = colors {
+            self.paint_restore(gpu, paint_base, c);
+        }
+        let m = &mut self.meshes[id.0 as usize];
+        if let Some(v) = vertices {
+            gpu.queue.write_buffer(&m.gpu_mesh.vbuf, 0, bytemuck::cast_slice(v));
+            m.reach = mesh_reach(v);
+        }
+        if let Some(i) = indices {
+            if !i.is_empty() {
+                gpu.queue.write_buffer(&m.gpu_mesh.ibuf, 0, bytemuck::cast_slice(i));
+            }
+            m.gpu_mesh.index_count = i.len() as u32;
+        }
+        self.mesh_rewrites += 1;
+        Ok(())
+    }
+
+    /// How many times [`Self::rewrite_mesh`] has written a mesh in place.
+    pub fn mesh_rewrites(&self) -> u64 {
+        self.mesh_rewrites
+    }
+
+    /// How many indices mesh `id` draws now.
+    pub fn mesh_index_count(&self, id: MeshId) -> u32 {
+        self.meshes.get(id.0 as usize).map_or(0, |m| m.gpu_mesh.index_count)
+    }
+
+    /// Mesh `id`'s vertex and index buffers: what a test holds "rewritten in
+    /// place, nothing allocated" against.
+    pub fn mesh_buffers(&self, id: MeshId) -> Option<(&wgpu::Buffer, &wgpu::Buffer)> {
+        self.meshes.get(id.0 as usize).map(|m| (&m.gpu_mesh.vbuf, &m.gpu_mesh.ibuf))
     }
 
     /// Re-upload a registered mesh's vertex data in place (its buffer is `COPY_DST`).

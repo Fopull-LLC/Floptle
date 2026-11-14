@@ -30,7 +30,7 @@ each group, and meant to be searched.
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 36
 - [pathfinding — nav.*](#pathfinding--nav) — 26
-- [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 11
+- [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 12
 - [weather — wind](#weather--wind) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 12
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 38
@@ -46,7 +46,7 @@ each group, and meant to be searched.
 - [animation — node:animator](#animation--nodeanimator) — 33
 - [particles — effects from script](#particles--effects-from-script) — 16
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 36
-- [assets](#assets) — 19
+- [assets](#assets) — 20
 - [debug gizmos](#debug-gizmos) — 5
 - [lua stdlib](#lua-stdlib) — 43
 
@@ -3262,7 +3262,11 @@ water.setFrozen(node, true) — freeze a water volume. Freezing is a STATE, not 
 
 ### `water.surface`
 
-water.surface(id [, { cells = 48 }]) → the arrays mesh.build takes for that declared water's surface, in its parent's frame: mesh.build(water.surface(id)) on a node at the parent's origin draws exactly the surface water.at answers for. A lake is the part of its sphere in its basin: what its centre reaches without crossing the ground, out to a ring under the shore (with no physics running, the whole disc out past its farthest shore); uvs are metres. nil for no such water.
+water.surface(id [, { cells = 48, colors = false, fixed = false, buffers = false }]) → the arrays mesh.build takes for that declared water's surface, in its parent's frame: mesh.build(water.surface(id)) on a node at the parent's origin draws exactly the surface water.at answers for. A lake is the part of its sphere in its basin: what its centre reaches without crossing the ground, out to a ring under the shore (with no physics running, the whole disc out past its farthest shore); uvs are metres. nil for no such water. colors = true adds per-vertex colours a water shader reads as vertexColor: r = the water's depth over its bed (metres / 16, so 16 m and deeper is 1), g and b = its flow along the parent's x and z (m/s / 4 about 0.5: 0.5 is still, 0 and 1 are -4 and +4 m/s), a = foam, 0 glassy to 1 white water. For water the engine simulates these are the solver's own depth and flow, and foam where the flow outruns its waves or pours off a drop; for a lake or a heightfield the depth is measured down to the ground and the flow is the volume's current. fixed = true makes every point of the grid a vertex, wet or dry, in the same order every time, and adds dynamic = true and indexCapacity to the answer: mesh.build(s) once, then mesh.update(name, water.surface(id, { fixed = true, ... })) rewrites the same sheet as cells wet and dry. buffers = true hands the arrays over as buffers, read in one copy.
+
+### `water.surfaceChanged`
+
+water.surfaceChanged(id) → true when that declared water's surface is not what water.surface(id) last returned: the engine's simulation moved it, or it was given a new level. True before the first water.surface call and for water that is not there; false over a lake that stands still, so a game updates a sheet only when there is something new: if water.surfaceChanged(id) then mesh.update(sheet, water.surface(id, { fixed = true, colors = true })) end.
 
 ### `water.volumes`
 
@@ -4874,15 +4878,19 @@ assets.writeText("charts/neon.txt", text [, { async = true }] [, function(ok, er
 
 ### `mesh`
 
-Meshes a script builds while the game runs: mesh.build and mesh.free. A built mesh is a name like "mesh:3" that goes wherever a model path does — node.model, scatter.create{ asset = }.
+Meshes a script builds while the game runs: mesh.build, mesh.update and mesh.free. A built mesh is a name like "mesh:3" that goes wherever a model path does — node.model, scatter.create{ asset = }.
 
 ### `mesh.build`
 
-mesh.build{ positions =, indices = [, normals =, uvs =, colors =, owner = node | scene = true ] } → name — build a mesh from numbers: a procedural plant, a fairing fitted to a part, a rope. positions is x, y, z per vertex (local space); indices is three per triangle, numbering vertices from 1 (from 0 in a buffer, see below), wound counter-clockwise seen from the front; normals x, y, z per vertex (left out, they are worked out from the faces, smooth); uvs u, v per vertex (0, 0 at the texture's top-left); colors r, g, b, a per vertex, 0–1, multiplied into the material. Vertex alpha fades the surface only when it blends: give the mesh a material with alpha below 1 (alpha = 0.999 is enough). On an opaque material, vertex alpha below 0.5 cuts a hole instead, as a texture's alpha does. Answers a name at once: node.model = name draws it from the next frame, with the node's own material (node:setMaterial{ texture = assets.textureFromPixels(...) }). At most 1 048 576 vertices and 3 145 728 indices. A missing or uneven list, an index out of range, or a non-finite number raises, naming the list. Kept until mesh.free(name) or Stop, a scene load included; or until the owner node is gone (owner = node) or the next scene load (scene = true), so a mesh built per level goes with the level. perf.resources() lists the ones still held. One material per mesh: a part in two materials is two meshes. A host that draws nothing still answers a name, and nothing draws it. A Mesh collider does not read a built mesh. Any of the arrays may instead be a buffer (buffer.create, then buffer.writef32 for positions, normals, uvs and colors, buffer.writeu32 for indices numbered from 0 as the GPU numbers them): a list is read into the engine a number at a time, which for a 45,000-vertex mesh was 12 ms of the frame, and a buffer in one copy, several times faster. Build a big mesh (a far planet's surface, a terrain patch) in buffers.
+mesh.build{ positions =, indices = [, normals =, uvs =, colors =, owner = node | scene = true, dynamic = true, indexCapacity = n ] } → name — build a mesh from numbers: a procedural plant, a fairing fitted to a part, a rope. positions is x, y, z per vertex (local space); indices is three per triangle, numbering vertices from 1 (from 0 in a buffer, see below), wound counter-clockwise seen from the front; normals x, y, z per vertex (left out, they are worked out from the faces, smooth); uvs u, v per vertex (0, 0 at the texture's top-left); colors r, g, b, a per vertex, 0–1, multiplied into the material. Vertex alpha fades the surface only when it blends: give the mesh a material with alpha below 1 (alpha = 0.999 is enough). On an opaque material, vertex alpha below 0.5 cuts a hole instead, as a texture's alpha does. Answers a name at once: node.model = name draws it from the next frame, with the node's own material (node:setMaterial{ texture = assets.textureFromPixels(...) }). At most 1 048 576 vertices and 3 145 728 indices. A missing or uneven list, an index out of range, or a non-finite number raises, naming the list. Kept until mesh.free(name) or Stop, a scene load included; or until the owner node is gone (owner = node) or the next scene load (scene = true), so a mesh built per level goes with the level. perf.resources() lists the ones still held. One material per mesh: a part in two materials is two meshes. A host that draws nothing still answers a name, and nothing draws it. A Mesh collider does not read a built mesh. Any of the arrays may instead be a buffer (buffer.create, then buffer.writef32 for positions, normals, uvs and colors, buffer.writeu32 for indices numbered from 0 as the GPU numbers them): a list is read into the engine a number at a time, which for a 45,000-vertex mesh was 12 ms of the frame, and a buffer in one copy, several times faster. Build a big mesh (a far planet's surface, a terrain patch) in buffers. dynamic = true builds a mesh meant to be rewritten with mesh.update (a water sheet, cloth, a cable): the engine keeps its vertices, so an update can leave out what did not change. A dynamic mesh may start with no triangles (indices = {}), and indexCapacity = n gives its index buffer room for n indices, so an update can raise the triangle count that far.
 
 ### `mesh.free`
 
 mesh.free(name) → true if it was a mesh mesh.build made — give it back. Nodes still wearing it draw nothing; the name is never handed out again.
+
+### `mesh.update`
+
+mesh.update(name, { positions =, normals =, uvs =, colors =, indices = }) — write new values into a mesh built with dynamic = true, in place: any of the five, each a list or a buffer exactly as mesh.build takes them. The vertex count stays the one it was built with (a list of another length is refused, naming the mesh and the list); whatever is left out stays as it was, except that normals the engine worked out at the build are worked out again when positions or indices change (normals a script gives are kept until it gives new ones). indices may be shorter or longer than before, up to the mesh's indexCapacity, or empty to draw nothing for now: a sheet whose cells wet and dry changes its triangle count without a rebuild. colors need a mesh built with colors. The name, the node wearing it, its material and its GPU buffers all stay: nothing is allocated, and the new values are in the frame drawn after the script runs (until then the mesh draws what it had; there is no frame with neither). Several updates of one mesh in a frame are one write. A 49 x 49 sheet's positions and colours from buffers cost about 0.1 ms of script time, less than building it. The table mesh.build took, or water.surface gave, is an update as it stands. A mesh not built dynamic, or one that was freed, raises.
 
 ## debug gizmos
 

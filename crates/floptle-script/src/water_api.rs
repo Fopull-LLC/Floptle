@@ -74,6 +74,63 @@ pub(crate) struct WaterShared {
     /// lake's sphere lies in its basin and which runs under the ground.
     pub colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>>,
     pub sim_origin: Rc<RefCell<glam::DVec3>>,
+    /// What `water.surface` needs beyond the declared water itself.
+    pub surfaces: SurfaceBook,
+}
+
+/// What `water.surface` and `water.surfaceChanged` keep between calls: the
+/// engine's own report on each simulated grid, and what each surface looked
+/// like when a script last took it.
+#[derive(Clone, Default)]
+pub struct SurfaceBook {
+    /// Per declared-water id, refreshed by the driver as the sim steps.
+    pub(crate) reports: Rc<RefCell<std::collections::HashMap<u32, floptle_core::water::SimReport>>>,
+    /// Per declared-water id, [`surface_stamp`] at the last `water.surface`.
+    pub(crate) taken: Rc<RefCell<std::collections::HashMap<u32, u64>>>,
+}
+
+impl SurfaceBook {
+    /// The driver's report on simulated water `id` this frame.
+    pub fn set_report(&self, id: u32, report: floptle_core::water::SimReport) {
+        self.reports.borrow_mut().insert(id, report);
+    }
+
+    /// Has the driver reported on simulated water `id` yet?
+    pub fn has_report(&self, id: u32) -> bool {
+        self.reports.borrow().contains_key(&id)
+    }
+
+    /// Forget water that is gone.
+    pub fn retain(&self, live: &dyn Fn(u32) -> bool) {
+        self.reports.borrow_mut().retain(|id, _| live(*id));
+        self.taken.borrow_mut().retain(|id, _| live(*id));
+    }
+}
+
+/// A number that changes when a surface does: its levels and flow for a
+/// grid, its sphere for a lake. What `water.surfaceChanged` compares, so it
+/// answers for water the engine moves, water a script re-levels and water
+/// that never moves alike.
+fn surface_stamp(surface: &Surface) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match surface {
+        Surface::Lake { radius, axis, reach } => {
+            for v in [*radius, axis.x, axis.y, axis.z, *reach] {
+                h.write_u64(v.to_bits());
+            }
+        }
+        Surface::Grid(g) => {
+            for l in &g.levels {
+                h.write_u32(l.to_bits());
+            }
+            for f in &g.flow {
+                h.write_u32(f[0].to_bits());
+                h.write_u32(f[1].to_bits());
+            }
+        }
+    }
+    h.finish()
 }
 
 /// What `water.at` says about the deepest water at a point: a scene volume or
@@ -130,6 +187,46 @@ pub(crate) struct SurfaceMesh {
     pub uvs: Vec<[f64; 2]>,
     /// 0-based, three per triangle.
     pub indices: Vec<u32>,
+    /// Per vertex, when asked for ([`SurfaceLook`]): r = the water's depth
+    /// over its bed (metres / 16), g and b = its flow along the frame's x
+    /// and z (m/s / 4, about 0.5, so 0.5 is still), a = foam, each 0..1.
+    pub colors: Vec<[f32; 4]>,
+    /// The most indices this surface can ever have: every cell wet.
+    pub index_capacity: usize,
+}
+
+/// How deep colours reach: a depth of this many metres or more is r = 1.
+pub(crate) const COLOR_DEPTH: f64 = 16.0;
+/// How fast colours reach: a flow of this many m/s along an axis is the end
+/// of the g or b lane.
+pub(crate) const COLOR_FLOW: f64 = 4.0;
+
+/// What `water.surface` is asked for beyond the triangles.
+#[derive(Default)]
+pub(crate) struct SurfaceLook<'a> {
+    /// Every point of the surface's grid is a vertex, wet or dry, in the
+    /// same order every time: the vertex count never changes, so the result
+    /// rewrites a mesh in place (`mesh.update`). Triangles are still only
+    /// where it is wet.
+    pub fixed: bool,
+    /// Per-vertex colours, from these.
+    pub colors: Option<SurfaceColors<'a>>,
+}
+
+/// Where a surface's per-vertex colours come from.
+pub(crate) struct SurfaceColors<'a> {
+    /// The engine's simulation of the grid, when it runs one.
+    pub report: Option<&'a floptle_core::water::SimReport>,
+    /// The water's depth at a point of the surface in its frame, for water
+    /// no simulation reports on.
+    pub depth: &'a dyn Fn(glam::DVec3) -> f64,
+    /// The current everywhere in it, on top of a grid's own flow.
+    pub current: glam::Vec3,
+}
+
+fn surface_color(depth: f64, flow: [f64; 2], foam: f64) -> [f32; 4] {
+    let lane = |v: f64| (0.5 + (v / COLOR_FLOW).clamp(-1.0, 1.0) * 0.5) as f32;
+    [(depth / COLOR_DEPTH).clamp(0.0, 1.0) as f32, lane(flow[0]), lane(flow[1]), foam.clamp(0.0, 1.0) as f32]
 }
 
 /// [`surface_mesh_in`] with no ground: a lake's whole disc.
@@ -146,8 +243,27 @@ pub(crate) fn surface_mesh(surface: &Surface, cells: usize) -> SurfaceMesh {
 /// crossing ground, and the shore triangles around them. A lake's sphere
 /// carries on past its spill point over lower ground outside the basin, and
 /// drawing it there put water where there is none.
+#[cfg(test)]
 pub(crate) fn surface_mesh_in(surface: &Surface, cells: usize, under: &dyn Fn(glam::DVec3) -> bool) -> SurfaceMesh {
-    let mut m = SurfaceMesh { positions: Vec::new(), normals: Vec::new(), uvs: Vec::new(), indices: Vec::new() };
+    surface_mesh_with(surface, cells, under, &SurfaceLook::default())
+}
+
+/// [`surface_mesh_in`], with what `look` asks for: a fixed vertex layout,
+/// per-vertex colours.
+pub(crate) fn surface_mesh_with(
+    surface: &Surface,
+    cells: usize,
+    under: &dyn Fn(glam::DVec3) -> bool,
+    look: &SurfaceLook,
+) -> SurfaceMesh {
+    let mut m = SurfaceMesh {
+        positions: Vec::new(),
+        normals: Vec::new(),
+        uvs: Vec::new(),
+        indices: Vec::new(),
+        colors: Vec::new(),
+        index_capacity: 0,
+    };
     match surface {
         Surface::Lake { radius, axis, reach } => {
             let a = axis.try_normalize().unwrap_or(glam::DVec3::Y);
@@ -174,8 +290,13 @@ pub(crate) fn surface_mesh_in(surface: &Surface, cells: usize, under: &dyn Fn(gl
                     m.positions.push(dir * *radius);
                     m.normals.push(dir);
                     m.uvs.push([u, v]);
+                    if let Some(c) = &look.colors {
+                        let depth = (c.depth)(dir * *radius);
+                        m.colors.push(surface_color(depth, [c.current.x as f64, c.current.z as f64], 0.0));
+                    }
                 }
             }
+            m.index_capacity = n * n * 6;
             // The basin: flood from the centre across points not under ground.
             let side = n + 1;
             let wet: Vec<bool> = index.iter().map(|&k| k != u32::MAX && !under(m.positions[k as usize])).collect();
@@ -218,24 +339,53 @@ pub(crate) fn surface_mesh_in(surface: &Surface, cells: usize, under: &dyn Fn(gl
                 }
             }
             push_quads(&mut m.indices, &index, n + 1, n + 1);
-            compact(&mut m);
+            // A fixed layout keeps every point of the disc, used or not.
+            if !look.fixed {
+                compact(&mut m);
+            }
         }
         Surface::Grid(g) => {
             let mut index = vec![u32::MAX; g.columns * g.rows];
+            let report = look.colors.as_ref().and_then(|c| c.report);
+            // Where a dry point of a fixed layout sits: on the bed when the
+            // sim says where that is, else level with the water there is, so
+            // the mesh's bounds stay the water's.
+            let wet_mean = {
+                let (sum, n) = g.levels.iter().filter(|l| l.is_finite()).fold((0.0f64, 0u32), |(s, n), l| (s + *l as f64, n + 1));
+                if n > 0 { sum / n as f64 } else { 0.0 }
+            };
             for j in 0..g.rows {
                 for i in 0..g.columns {
-                    let l = g.levels[j * g.columns + i];
-                    if !l.is_finite() {
+                    let k = j * g.columns + i;
+                    let l = g.levels[k];
+                    let wet = l.is_finite();
+                    if !wet && !look.fixed {
                         continue;
                     }
+                    let ground = report.and_then(|r| r.ground.get(k)).copied().filter(|v| v.is_finite());
+                    let y = if wet { l as f64 } else { ground.map_or(wet_mean, f64::from) };
                     let (x, z) = (g.x0 + i as f64 * g.cell, g.z0 + j as f64 * g.cell);
-                    index[j * g.columns + i] = m.positions.len() as u32;
-                    m.positions.push(glam::DVec3::new(x, l as f64, z));
+                    if wet {
+                        index[k] = m.positions.len() as u32;
+                    }
+                    m.positions.push(glam::DVec3::new(x, y, z));
                     m.normals.push(glam::DVec3::Y);
                     m.uvs.push([x, z]);
+                    if let Some(c) = &look.colors {
+                        let depth = match (wet, ground) {
+                            (false, _) => 0.0,
+                            (true, Some(ground)) => (l - ground).max(0.0) as f64,
+                            (true, None) => (c.depth)(glam::DVec3::new(x, y, z)),
+                        };
+                        let own = g.flow.get(k).copied().unwrap_or([0.0; 2]);
+                        let flow = if wet { [(own[0] + c.current.x) as f64, (own[1] + c.current.z) as f64] } else { [0.0; 2] };
+                        let foam = if wet { report.and_then(|r| r.foam.get(k)).copied().unwrap_or(0.0) } else { 0.0 };
+                        m.colors.push(surface_color(depth, flow, foam as f64));
+                    }
                 }
             }
             push_quads(&mut m.indices, &index, g.columns, g.rows);
+            m.index_capacity = g.columns.saturating_sub(1) * g.rows.saturating_sub(1) * 6;
         }
     }
     m
@@ -244,7 +394,14 @@ pub(crate) fn surface_mesh_in(surface: &Surface, cells: usize, under: &dyn Fn(gl
 /// Drop the vertices no triangle uses, renumbering the rest.
 fn compact(m: &mut SurfaceMesh) {
     let mut used = vec![u32::MAX; m.positions.len()];
-    let mut out = SurfaceMesh { positions: Vec::new(), normals: Vec::new(), uvs: Vec::new(), indices: Vec::new() };
+    let mut out = SurfaceMesh {
+        positions: Vec::new(),
+        normals: Vec::new(),
+        uvs: Vec::new(),
+        indices: Vec::new(),
+        colors: Vec::new(),
+        index_capacity: m.index_capacity,
+    };
     for &i in &m.indices {
         let i = i as usize;
         if used[i] == u32::MAX {
@@ -252,6 +409,9 @@ fn compact(m: &mut SurfaceMesh) {
             out.positions.push(m.positions[i]);
             out.normals.push(m.normals[i]);
             out.uvs.push(m.uvs[i]);
+            if let Some(c) = m.colors.get(i) {
+                out.colors.push(*c);
+            }
         }
         out.indices.push(used[i]);
     }
@@ -604,17 +764,31 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
         }
     }
 
-    // water.surface(id [, { cells = 48 }]) → the arrays mesh.build takes, for
-    // the surface of declared water in its parent's frame: so the lake that
-    // is drawn is the lake `water.at` answers for, and a game writes no mesh
-    // code to fit one.
+    // water.surface(id [, { cells = 48, colors = false, fixed = false,
+    // buffers = false }]) → the arrays mesh.build takes, for the surface of
+    // declared water in its parent's frame: so the lake that is drawn is the
+    // lake `water.at` answers for, and a game writes no mesh code to fit one.
+    //
+    // `colors` adds what a water shader reads per vertex as `vertexColor`:
+    // depth, flow and foam. `fixed` keeps every point of the grid as a
+    // vertex so the count never changes, and the answer goes to mesh.update
+    // as it stands. `buffers` hands the arrays over as buffers, which
+    // mesh.build and mesh.update read in one copy.
     {
         let s = shared.clone();
         if let Ok(f) = lua.create_function(move |lua, (id, opts): (u32, Option<Table>)| {
+            const CALL: &str = "water.surface";
             if let Some(o) = &opts {
-                crate::opts::check_keys(o, &["cells"], "water.surface")?;
+                crate::opts::check_keys(o, &["cells", "colors", "fixed", "buffers"], CALL)?;
             }
-            let cells = opts.and_then(|o| o.get::<Option<f64>>("cells").ok().flatten()).unwrap_or(48.0);
+            let flag = |key: &str| -> mlua::Result<bool> {
+                Ok(match &opts {
+                    Some(o) => crate::opts::opt_bool(o, CALL, key)?.unwrap_or(false),
+                    None => false,
+                })
+            };
+            let (colors, fixed, buffers) = (flag("colors")?, flag("fixed")?, flag("buffers")?);
+            let cells = opts.as_ref().and_then(|o| o.get::<Option<f64>>("cells").ok().flatten()).unwrap_or(48.0);
             let cells = (cells.round() as usize).clamp(2, 512);
             let declared = s.declared.borrow();
             let Some(w) = declared.iter().find(|w| w.id == id) else { return Ok(Value::Nil) };
@@ -623,6 +797,10 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
             // physics) nothing is, and the lake is its whole disc.
             let cols = s.colliders.borrow();
             let origin = *s.sim_origin.borrow();
+            let up_at = |local: glam::DVec3| match &w.surface {
+                Surface::Lake { .. } => (w.frame.to_world(local.normalize_or_zero()) - w.frame.origin).normalize_or_zero(),
+                Surface::Grid(_) => (w.frame.to_world(glam::DVec3::Y) - w.frame.origin).normalize_or_zero(),
+            };
             let under = |local: glam::DVec3| -> bool {
                 if cols.is_empty() {
                     return false;
@@ -636,22 +814,78 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
                 let from = (at + up * height - origin).as_vec3();
                 floptle_physics::raycast_colliders(&cols, from, -up.as_vec3(), height as f32 - 0.01, !0).is_some()
             };
-            let m = surface_mesh_in(&w.surface, cells, &under);
+            // The water's depth at a point of the surface, for water no sim
+            // reports on: down to the ground the level has there, no deeper
+            // than the water's own bed or than a colour can say.
+            let reach = w.floor.min(COLOR_DEPTH);
+            let depth = |local: glam::DVec3| -> f64 {
+                if cols.is_empty() {
+                    return reach;
+                }
+                let from = (w.frame.to_world(local) - origin).as_vec3();
+                floptle_physics::raycast_colliders(&cols, from, -up_at(local).as_vec3(), reach as f32, !0)
+                    .map_or(reach, |hit| f64::from(hit.distance))
+            };
+            let reports = s.surfaces.reports.borrow();
+            let look = SurfaceLook {
+                fixed,
+                colors: colors.then(|| SurfaceColors { report: reports.get(&id), depth: &depth, current: w.current }),
+            };
+            let m = surface_mesh_with(&w.surface, cells, &under, &look);
+            s.surfaces.taken.borrow_mut().insert(id, surface_stamp(&w.surface));
             let out = lua.create_table()?;
-            let flat = |vals: &mut dyn Iterator<Item = f64>| -> mlua::Result<Table> {
+            // A list of numbers, or the same numbers as a buffer of f32s.
+            let floats = |vals: &mut dyn Iterator<Item = f64>| -> mlua::Result<Value> {
+                if buffers {
+                    let bytes: Vec<u8> = vals.flat_map(|v| (v as f32).to_le_bytes()).collect();
+                    return Ok(Value::Buffer(lua.create_buffer(bytes)?));
+                }
                 let t = lua.create_table()?;
                 for (i, v) in vals.enumerate() {
                     t.raw_set(i + 1, v)?;
                 }
-                Ok(t)
+                Ok(Value::Table(t))
             };
-            out.set("positions", flat(&mut m.positions.iter().flat_map(|p| p.to_array()))?)?;
-            out.set("normals", flat(&mut m.normals.iter().flat_map(|n| n.to_array()))?)?;
-            out.set("uvs", flat(&mut m.uvs.iter().flat_map(|u| *u))?)?;
-            out.set("indices", flat(&mut m.indices.iter().map(|&i| f64::from(i) + 1.0))?)?;
+            out.set("positions", floats(&mut m.positions.iter().flat_map(|p| p.to_array()))?)?;
+            out.set("normals", floats(&mut m.normals.iter().flat_map(|n| n.to_array()))?)?;
+            out.set("uvs", floats(&mut m.uvs.iter().flat_map(|u| *u))?)?;
+            if colors {
+                out.set("colors", floats(&mut m.colors.iter().flat_map(|c| c.map(f64::from)))?)?;
+            }
+            // A list numbers vertices from 1, a buffer of u32s from 0: what
+            // mesh.build reads each as.
+            if buffers {
+                let bytes: Vec<u8> = m.indices.iter().flat_map(|i| i.to_le_bytes()).collect();
+                out.set("indices", lua.create_buffer(bytes)?)?;
+            } else {
+                let t = lua.create_table()?;
+                for (i, v) in m.indices.iter().enumerate() {
+                    t.raw_set(i + 1, f64::from(*v) + 1.0)?;
+                }
+                out.set("indices", t)?;
+            }
+            if fixed {
+                out.set("dynamic", true)?;
+                out.set("indexCapacity", m.index_capacity)?;
+            }
             Ok(Value::Table(out))
         }) {
             let _ = t.set("surface", f);
+        }
+    }
+
+    // water.surfaceChanged(id) → has this water's surface changed since
+    // `water.surface(id)` was last called? True before the first call, and
+    // for an id that is not there; false over a lake that stands still, so a
+    // game rebuilds or updates a sheet only when there is something new.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |_, id: u32| {
+            let declared = s.declared.borrow();
+            let Some(w) = declared.iter().find(|w| w.id == id) else { return Ok(true) };
+            Ok(s.surfaces.taken.borrow().get(&id) != Some(&surface_stamp(&w.surface)))
+        }) {
+            let _ = t.set("surfaceChanged", f);
         }
     }
 
@@ -690,6 +924,7 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
             let mut d = s.declared.borrow_mut();
             let before = d.len();
             d.retain(|w| w.id != id);
+            s.surfaces.retain(&|live| live != id);
             Ok(d.len() != before)
         }) {
             let _ = t.set("removeVolume", f);
@@ -776,6 +1011,7 @@ mod tests {
             next_id: Rc::default(),
             colliders: Rc::default(),
             sim_origin: Rc::default(),
+            surfaces: SurfaceBook::default(),
         };
         install_water_api(&lua, shared.clone());
         (lua, shared)
@@ -946,6 +1182,178 @@ mod tests {
             .eval()
             .unwrap();
         assert!(verts > 100 && tris > 100 && nothing, "{verts} {tris} {nothing}");
+    }
+
+    /// A 3 × 2 grid a sim has run: level 1 over a bed that steps down, the
+    /// last point of the first row dry, water moving along +x.
+    fn run_grid() -> (Surface, floptle_core::water::SimReport) {
+        let nan = f32::NAN;
+        let grid = HeightGrid {
+            x0: 0.0,
+            z0: 0.0,
+            cell: 1.0,
+            columns: 3,
+            rows: 2,
+            levels: vec![1.0, 1.0, nan, 1.0, 1.0, 1.0],
+            flow: vec![[2.0, 0.0], [2.0, 0.0], [0.0, 0.0], [-4.0, 1.0], [0.0, 0.0], [9.0, -9.0]],
+        };
+        let report = floptle_core::water::SimReport {
+            ground: vec![0.0, -3.0, 1.5, -15.0, -40.0, 0.5],
+            foam: vec![0.0, 0.25, 0.9, 1.0, 0.0, 0.5],
+        };
+        (Surface::Grid(std::sync::Arc::new(grid)), report)
+    }
+
+    /// **A simulated surface carries depth, flow and foam per vertex.** Red
+    /// is the water's depth over its bed (16 m and deeper is 1), green and
+    /// blue its flow along x and z about 0.5 (±4 m/s the ends), alpha the
+    /// foam: what a water shader reads as `vertexColor` with no pass over
+    /// the grid in Lua. The volume's own current is added to the flow.
+    #[test]
+    fn a_simulated_surface_carries_depth_flow_and_foam_per_vertex() {
+        let (surface, report) = run_grid();
+        let depth = |_: glam::DVec3| -> f64 { panic!("a sim's depth is its own, never a ray") };
+        let look = |current: glam::Vec3| SurfaceLook {
+            fixed: false,
+            colors: Some(SurfaceColors { report: Some(&report), depth: &depth, current }),
+        };
+        let m = surface_mesh_with(&surface, 0, &|_| false, &look(glam::Vec3::ZERO));
+        assert_eq!(m.positions.len(), 5, "the dry point is left out");
+        assert_eq!(m.colors.len(), 5, "one colour a vertex");
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-6);
+        assert!(near(m.colors[0], [1.0 / 16.0, 0.75, 0.5, 0.0]), "{:?}", m.colors[0]);
+        assert!(near(m.colors[1], [4.0 / 16.0, 0.75, 0.5, 0.25]), "{:?}", m.colors[1]);
+        // The second row: 16 m deep exactly, flowing back along x and across.
+        assert!(near(m.colors[2], [1.0, 0.0, 0.625, 1.0]), "{:?}", m.colors[2]);
+        assert!(near(m.colors[3], [1.0, 0.5, 0.5, 0.0]), "deeper than a colour can say is 1: {:?}", m.colors[3]);
+        assert!(near(m.colors[4], [0.5 / 16.0, 1.0, 0.0, 0.5]), "a flow past the ends is held at them: {:?}", m.colors[4]);
+        // No colours asked for: none made.
+        assert!(surface_mesh(&surface, 0).colors.is_empty());
+        // A current everywhere in the volume rides on the grid's own flow.
+        let m = surface_mesh_with(&surface, 0, &|_| false, &look(glam::Vec3::new(-2.0, 7.0, 2.0)));
+        assert!(near(m.colors[0], [1.0 / 16.0, 0.5, 0.75, 0.0]), "{:?}", m.colors[0]);
+    }
+
+    /// **A fixed layout never changes its vertex count.** Every point of the
+    /// grid is a vertex, the dry one lying on the bed with no depth, no flow
+    /// and no triangle through it; when it floods, only the triangles and
+    /// the values change. That is what lets `mesh.update` rewrite the sheet.
+    #[test]
+    fn a_fixed_surface_keeps_every_point_wet_or_dry() {
+        let (surface, report) = run_grid();
+        let depth = |_: glam::DVec3| 0.0;
+        let look = SurfaceLook {
+            fixed: true,
+            colors: Some(SurfaceColors { report: Some(&report), depth: &depth, current: glam::Vec3::ZERO }),
+        };
+        let m = surface_mesh_with(&surface, 0, &|_| false, &look);
+        assert_eq!(m.positions.len(), 6, "every point of a 3 × 2 grid");
+        assert_eq!(m.positions[2], glam::DVec3::new(2.0, 1.5, 0.0), "the dry point lies on the bed");
+        assert_eq!(m.colors[2], [0.0, 0.5, 0.5, 0.0], "and carries nothing");
+        assert_eq!(m.indices.len(), 3 * 3);
+        assert!(m.indices.iter().all(|&i| i != 2), "a triangle runs through the dry point");
+        assert_eq!(m.index_capacity, 2 * 6, "room for both cells, wet");
+
+        // Flooded: the same six vertices, more triangles.
+        let Surface::Grid(g) = &surface else { unreachable!() };
+        let mut wet = (**g).clone();
+        wet.levels[2] = 1.75;
+        let m2 = surface_mesh_with(&Surface::Grid(std::sync::Arc::new(wet)), 0, &|_| false, &look);
+        assert_eq!(m2.positions.len(), 6);
+        assert_eq!(m2.indices.len(), 4 * 3);
+        assert_eq!(m2.positions[2].y, 1.75);
+        assert!((m2.colors[2][0] - 0.25 / 16.0).abs() < 1e-6);
+
+        // A lake's fixed layout keeps its whole disc, basin or not.
+        let lake = Surface::Lake { radius: 805.0, axis: glam::DVec3::Y, reach: 60.0 };
+        let along = |p: glam::DVec3| p.normalize().dot(glam::DVec3::Y).clamp(-1.0, 1.0).acos() * 805.0;
+        let rim = |p: glam::DVec3| (30.0..40.0).contains(&along(p));
+        let fixed = SurfaceLook { fixed: true, colors: None };
+        let (whole, basin) = (surface_mesh_with(&lake, 16, &|_| false, &fixed), surface_mesh_with(&lake, 16, &rim, &fixed));
+        assert_eq!(whole.positions.len(), basin.positions.len());
+        assert!(basin.indices.len() < whole.indices.len());
+        assert_eq!(whole.index_capacity, 16 * 16 * 6);
+    }
+
+    /// **Water no sim reports on takes its depth from the ground under it.**
+    /// The depth function is asked at each wet vertex; a lake's flow is the
+    /// volume's current and it has no foam.
+    #[test]
+    fn standing_water_takes_its_depth_from_what_it_is_asked() {
+        let lake = Surface::Lake { radius: 805.0, axis: glam::DVec3::Y, reach: 20.0 };
+        let depth = |p: glam::DVec3| if p.x > 0.0 { 8.0 } else { 2.0 };
+        let look = SurfaceLook {
+            fixed: false,
+            colors: Some(SurfaceColors { report: None, depth: &depth, current: glam::Vec3::new(1.0, 0.0, 0.0) }),
+        };
+        let m = surface_mesh_with(&lake, 8, &|_| false, &look);
+        assert_eq!(m.colors.len(), m.positions.len());
+        for (p, c) in m.positions.iter().zip(&m.colors) {
+            let want = if p.x > 0.0 { 0.5 } else { 0.125 };
+            assert_eq!(*c, [want, 0.625, 0.5, 0.0], "at {p:?}");
+        }
+    }
+
+    /// **From Lua the sheet is built once and rewritten.** `fixed` marks the
+    /// answer `dynamic` with room for every cell, so it goes to `mesh.build`
+    /// and then to `mesh.update` as it stands, as lists or as buffers; and
+    /// `water.surfaceChanged` says when there is something new to write.
+    #[test]
+    fn a_fixed_surface_builds_a_mesh_once_and_updates_it() {
+        let (lua, shared) = host();
+        let book: Rc<RefCell<crate::mesh_api::MeshBook>> = Rc::default();
+        crate::mesh_api::install(&lua, book.clone()).unwrap();
+        lua.load(
+            r#"id = water.addVolume{ shape = "heightfield", origin = vec3(0, 0, 0), cell = 1, columns = 3, rows = 2,
+                                      levels = { 1, 1, 0/0, 1, 1, 1 } }
+               before = water.surfaceChanged(id)
+               local s = water.surface(id, { fixed = true, colors = true })
+               verts, tris, cap, lists = #s.positions // 3, #s.indices // 3, s.indexCapacity, type(s.positions) == "table"
+               sheet = mesh.build(s)
+               after = water.surfaceChanged(id)"#,
+        )
+        .exec()
+        .unwrap();
+        let g = lua.globals();
+        assert_eq!(
+            (g.get::<i64>("verts").unwrap(), g.get::<i64>("tris").unwrap(), g.get::<i64>("cap").unwrap(), g.get::<bool>("lists").unwrap()),
+            (6, 3, 12, true)
+        );
+        assert!(g.get::<bool>("before").unwrap(), "a surface nobody has taken is new");
+        assert!(!g.get::<bool>("after").unwrap(), "a surface just taken has not changed");
+        let built = book.borrow_mut().take_requests().remove(0);
+        assert_eq!((built.positions.len(), built.index_capacity, built.colors.is_some()), (6, 12, true));
+
+        // The dry point floods (what the engine's sim does each frame).
+        {
+            let mut d = shared.declared.borrow_mut();
+            let Surface::Grid(old) = &d[0].surface else { unreachable!() };
+            let mut wet = (**old).clone();
+            wet.levels[2] = 1.5;
+            d[0].surface = Surface::Grid(std::sync::Arc::new(wet));
+        }
+        lua.load(
+            r#"changed = water.surfaceChanged(id)
+               local s = water.surface(id, { fixed = true, colors = true, buffers = true })
+               bufs = type(s.positions) == "buffer" and type(s.indices) == "buffer" and type(s.colors) == "buffer"
+               mesh.update(sheet, s)
+               still = water.surfaceChanged(id)
+               gone = water.surfaceChanged(999)"#,
+        )
+        .exec()
+        .unwrap();
+        assert!(g.get::<bool>("changed").unwrap(), "the flood went unnoticed");
+        assert!(g.get::<bool>("bufs").unwrap(), "`buffers = true` gave lists");
+        assert!(!g.get::<bool>("still").unwrap());
+        assert!(g.get::<bool>("gone").unwrap(), "water that is not there has nothing to keep");
+        let u = book.borrow_mut().take_updates().remove(0);
+        assert_eq!(u.vertices.unwrap().positions[2], [2.0, 1.5, 0.0]);
+        assert_eq!(u.indices.unwrap().len(), 4 * 3, "the flooded cell's triangles");
+        assert_eq!(u.colors.unwrap().len(), 6);
+        assert_eq!(book.borrow().live.len(), 1, "the update made a second mesh");
+
+        let e = lua.load("water.surface(id, { colours = true })").exec().unwrap_err().to_string();
+        assert!(e.contains("colours"), "{e}");
     }
 
     /// A frozen sea has no inside. A swim controller must not think the player

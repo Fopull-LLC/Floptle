@@ -413,6 +413,82 @@ why. `let`s the colour reads are not restricted, only the ones the offset reads.
 The ◈ graph shows `offset` as a second port on the output node; unwiring it
 removes it.
 
+### 4.6 A surface a script moves: `mesh.update` and water's vertex colours
+
+`output offset` moves vertices by a rule. When the *data* moves (a water
+surface following a simulation, cloth, a cable's tube) the script rewrites the
+mesh instead, and the shader reads what it wrote through `vertexColor`.
+
+```lua
+-- once
+local sheet = mesh.build{ positions = p, indices = i, colors = c, dynamic = true, indexCapacity = most }
+node.model = sheet
+node:setMaterial{ shader = "shaders/water.flsl" }
+
+-- whenever it changes
+mesh.update(sheet, { positions = p2, colors = c2, indices = wetNow })
+```
+
+- **`dynamic = true`** at the build is what allows it. The engine keeps the
+  mesh's vertices, so an update gives only what changed: any of `positions`,
+  `normals`, `uvs`, `colors`, `indices`, as lists or buffers. Normals the
+  engine worked out at the build are worked out again when the surface moves;
+  normals a script gave are kept until it gives new ones.
+- **The vertex count is fixed; the triangle count is not.** `indices` may be
+  any length up to `indexCapacity` (the count at the build unless given), or
+  empty for a sheet that is dry for now. A surface whose cells wet and dry
+  keeps one vertex per grid point and changes only its triangles: no
+  degenerate quads, and no fill spent on water that is not there.
+- **Nothing is allocated and nothing is rebound.** The values are written
+  into the mesh's own vertex, index and colour storage: the name, the node,
+  the material and its shader binding all stay, and `perf.counts()`'s
+  `scriptMeshes` does not move. Updates of one mesh in one frame are one
+  write. A 49 × 49 sheet's positions and colours, from buffers, cost about
+  0.1 ms of script time, less than building it.
+- **It shows in the frame it was made in.** Scripts run, the driver writes,
+  the frame is drawn. Until the write the mesh draws what it held, so there
+  is never a frame with neither.
+- A count that does not fit (a list for another vertex count, more indices
+  than the capacity, colours for a mesh built without any) raises at the
+  call, naming the mesh and the list, and changes nothing.
+
+**Water's surface arrives with its data.** `water.surface(id, { colors = true })`
+adds per-vertex colours in the layout a water shader wants:
+
+| lane | holds | scale |
+|---|---|---|
+| `vertexColor.r` | the water's depth over its bed | metres / 16 (16 m and deeper is 1) |
+| `vertexColor.g`, `.b` | its flow along the parent's x and z | m/s / 4 about 0.5: 0.5 is still, 0 and 1 are −4 and +4 m/s |
+| `vertexColor.a` | foam | 0 glassy … 1 white water |
+
+For water the engine simulates (`shape = "sim"`) these are the solver's own:
+its depth, its velocity, and foam where the flow runs faster than its own
+waves (a Froude number past about 1) and at the lip and foot of every fall.
+For a lake or a heightfield the depth is measured down to the ground and the
+flow is the volume's `current`. In the shader:
+
+```
+let depth = vertexColor.r * 16
+let flow  = (vertexColor.gb - 0.5) * 8      // m/s along x and z
+let foam  = vertexColor.a
+```
+
+`fixed = true` makes every grid point a vertex, wet or dry, in the same order
+each time, and marks the answer `dynamic` with room for every cell, so the
+same call feeds `mesh.build` once and `mesh.update` after. `buffers = true`
+hands the arrays over as buffers. `water.surfaceChanged(id)` says whether the
+surface is different from the one last taken, so a still lake costs nothing:
+
+```lua
+local opts = { fixed = true, colors = true, buffers = true }
+local sheet = mesh.build(water.surface(id, opts))
+function update(node, dt)
+  if water.surfaceChanged(id) then
+    mesh.update(sheet, water.surface(id, opts))
+  end
+end
+```
+
 ## 5. Materials reference a compiled shader
 
 A **material** binds a compiled shader plus its **param block** (uniform values,

@@ -117,14 +117,20 @@ impl Editor {
     }
 
     /// Upload what `mesh.build` made since the last call, under its `mesh:`
-    /// name, and let go of what `mesh.free` gave back. A host that draws
-    /// nothing registers nothing: the name still exists for the script, and
-    /// nothing draws it.
+    /// name, write what `mesh.update` changed into the meshes that are
+    /// already there, and let go of what `mesh.free` gave back. A host that
+    /// draws nothing registers nothing: the name still exists for the
+    /// script, and nothing draws it.
+    ///
+    /// This runs after the scripts and before the frame is drawn, so an
+    /// update shows in the frame it was made in. Until its writes are in the
+    /// queue the mesh draws what it held: there is no frame with neither.
     pub(crate) fn pump_runtime_meshes(&mut self) {
         for name in self.script_host.take_mesh_releases() {
             self.release_runtime_mesh(&name);
         }
         let requests = self.script_host.take_mesh_requests();
+        let updates = self.script_host.take_mesh_updates();
         let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else { return };
         for req in requests {
             let vertices: Vec<floptle_render::Vertex> = req
@@ -134,13 +140,40 @@ impl Editor {
                 .zip(&req.uvs)
                 .map(|((p, n), uv)| floptle_render::Vertex { pos: *p, normal: *n, uv: *uv })
                 .collect();
-            let size = req.positions.iter().fold(0.0f32, |m, p| m.max(p[0].abs()).max(p[1].abs()).max(p[2].abs())) * 2.0;
+            let size = built_mesh_size(&req.positions);
             let data = floptle_render::MeshData { vertices, indices: req.indices, colors: req.colors };
-            let id = raster.register(gpu, &data, None);
+            let id = raster.register_rewritable(gpu, &data, req.index_capacity);
             self.mesh_registry.insert(
                 req.name,
-                crate::MeshAsset { merged: None, parts: vec![id], part_meta: Vec::new(), tex_filter: None, size: size.max(1e-3), rig: None },
+                crate::MeshAsset { merged: None, parts: vec![id], part_meta: Vec::new(), tex_filter: None, size, rig: None },
             );
+        }
+        for update in updates {
+            // Freed in the same frame it was updated: there is nothing to write.
+            let Some(asset) = self.mesh_registry.get_mut(&update.name) else { continue };
+            let Some(&id) = asset.parts.first() else { continue };
+            let vertices: Option<Vec<floptle_render::Vertex>> = update.vertices.as_ref().map(|v| {
+                v.positions
+                    .iter()
+                    .zip(&v.normals)
+                    .zip(&v.uvs)
+                    .map(|((p, n), uv)| floptle_render::Vertex { pos: *p, normal: *n, uv: *uv })
+                    .collect()
+            });
+            match raster.rewrite_mesh(gpu, id, vertices.as_deref(), update.colors.as_deref(), update.indices.as_deref()) {
+                Ok(()) => {
+                    if let Some(v) = &update.vertices {
+                        asset.size = built_mesh_size(&v.positions);
+                    }
+                }
+                // The script host checked the update against the mesh it
+                // built, so this is the two disagreeing about what that was.
+                Err(why) => self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("mesh.update(\"{}\") was not applied: {why}", update.name),
+                    None,
+                ),
+            }
         }
     }
 
@@ -169,6 +202,12 @@ impl Editor {
             self.release_runtime_texture(&n);
         }
     }
+}
+
+/// A built mesh's size as a model's is kept: the longest side of the box
+/// about its origin that holds it.
+fn built_mesh_size(positions: &[[f32; 3]]) -> f32 {
+    (positions.iter().fold(0.0f32, |m, p| m.max(p[0].abs()).max(p[1].abs()).max(p[2].abs())) * 2.0).max(1e-3)
 }
 
 #[cfg(test)]

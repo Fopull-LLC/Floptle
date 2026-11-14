@@ -329,7 +329,7 @@ pub mod data_api;
 mod cloud_api;
 pub mod decal_api;
 pub mod mesh_api;
-pub use mesh_api::MeshRequest;
+pub use mesh_api::{MeshRequest, MeshUpdate, MeshVertices};
 pub use texture_api::TextureRequest;
 pub use capture_api::{CaptureCamera, CaptureFormat, CaptureRequest, MAX_CAPTURE_SIDE, NO_RENDERER};
 pub use compute_api::{ComputeBind, ComputeRequest};
@@ -1020,6 +1020,9 @@ pub struct ScriptHost {
     water_freeze: Rc<RefCell<Vec<(u32, bool)>>>,
     /// Water scripts declared with `water.addVolume`.
     water_declared: Rc<RefCell<Vec<floptle_core::water::DeclaredWater>>>,
+    /// What `water.surface` keeps between calls, and the engine's report on
+    /// each simulated grid.
+    water_surfaces: water_api::SurfaceBook,
     /// Scatter sources scripts declared — resolved into
     /// drawable instances by the driver, never into scene nodes.
     scatter_sources: scatter_api::Sources,

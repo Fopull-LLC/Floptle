@@ -1913,10 +1913,20 @@ function water.falls(id) end
 ---grid of `cells` across (default 48) laid on its sphere, kept to its basin:
 ---what its centre reaches without crossing the ground, out to a ring under the
 ---shore. `uvs` are metres across the surface. nil for no such water.
+---`colors = true` adds per-vertex colours for a water shader's `vertexColor`:
+---r = depth over the bed (m / 16), g and b = flow along x and z (m/s / 4,
+---about 0.5), a = foam. `fixed = true` keeps every grid point as a vertex and
+---marks the answer `dynamic`, so it goes to `mesh.build` once and then to
+---`mesh.update`. `buffers = true` returns buffers instead of lists.
 ---@param id integer
----@param opts? { cells?: integer }
----@return { positions: number[], normals: number[], uvs: number[], indices: integer[] }|nil
+---@param opts? { cells?: integer, colors?: boolean, fixed?: boolean, buffers?: boolean }
+---@return { positions: number[]|buffer, normals: number[]|buffer, uvs: number[]|buffer, indices: integer[]|buffer, colors?: number[]|buffer, dynamic?: boolean, indexCapacity?: integer }|nil
 function water.surface(id, opts) end
+---Has this water's surface changed since `water.surface(id)` was last called?
+---True before the first call; false over water that stands still.
+---@param id integer
+---@return boolean
+function water.surfaceChanged(id) end
 ---Take away water `water.addVolume` declared. true if there was some.
 ---@param id integer
 ---@return boolean
@@ -2365,9 +2375,21 @@ mesh = {}
 ---owner node is gone (owner) or the next scene load (scene = true).
 ---Any array may be a buffer instead (f32s; indices u32s numbered from 0),
 ---read in one copy: much faster for a big mesh.
----@param spec { positions: number[]|buffer, indices: integer[]|buffer, normals?: number[]|buffer, uvs?: number[]|buffer, colors?: number[]|buffer, owner?: Node, scene?: boolean }
+---`dynamic = true` builds a mesh `mesh.update` can rewrite in place; it may
+---start with no triangles, and `indexCapacity` is how many indices a later
+---update may give it.
+---@param spec { positions: number[]|buffer, indices: integer[]|buffer, normals?: number[]|buffer, uvs?: number[]|buffer, colors?: number[]|buffer, owner?: Node, scene?: boolean, dynamic?: boolean, indexCapacity?: integer }
 ---@return string name
 function mesh.build(spec) end
+---Write new values into a mesh built with `dynamic = true`, in place: any of
+---positions, normals, uvs, colors and indices, as `mesh.build` takes them.
+---The vertex count stays as built; what is left out is kept (normals the
+---engine worked out are worked out again). `indices` may be any length up to
+---the mesh's `indexCapacity`, or empty. Nothing is allocated, and the new
+---values draw in the frame after the script runs.
+---@param name string
+---@param spec { positions?: number[]|buffer, normals?: number[]|buffer, uvs?: number[]|buffer, colors?: number[]|buffer, indices?: integer[]|buffer }
+function mesh.update(name, spec) end
 ---Give a built mesh back. True if it was one.
 ---@param name string
 ---@return boolean

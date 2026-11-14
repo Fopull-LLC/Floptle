@@ -82,6 +82,37 @@ impl HeightGrid {
     }
 }
 
+/// What the engine's simulation of a grid knows at each of its points beyond
+/// the level and the flow: the ground under the water, and how broken the
+/// surface is. `water.surface` turns these into per-vertex colours, so a
+/// water shader has depth and foam without a pass over the grid in Lua.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SimReport {
+    /// The bed's height at each point, in the grid's frame: the surface
+    /// level less this is the water's depth, and a dry point lies on it.
+    pub ground: Vec<f32>,
+    /// 0 (glassy) to 1 (white water) at each point: [`foam`], and 1 where
+    /// the water pours off a drop.
+    pub foam: Vec<f32>,
+}
+
+/// How broken the surface of water `depth` metres deep is when it runs at
+/// `speed` m/s, 0 to 1. It is the flow's Froude number, speed over the speed
+/// of a wave in water that deep: under about 0.6 a river runs smooth, and
+/// past 1 (faster than its own waves) it is white water. A film too thin to
+/// carry foam has none, so a drying bank does not sparkle.
+pub fn foam(depth: f32, speed: f32) -> f32 {
+    if depth.is_nan() || depth <= 0.0 {
+        return 0.0;
+    }
+    let froude = speed / (9.81 * depth).sqrt();
+    let smooth = |lo: f32, hi: f32, x: f32| {
+        let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    smooth(0.6, 1.4, froude) * smooth(0.02, 0.10, depth)
+}
+
 /// One body of water a script declared.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeclaredWater {
@@ -257,6 +288,21 @@ mod tests {
         let q = DVec3::new(b.sin(), b.cos(), 0.0) * 800.0;
         assert_eq!(w.at(q).depth, 0.0);
         assert!(w.at(q).above.is_infinite());
+    }
+
+    /// **Foam is white water, not every ripple.** A deep slow river is
+    /// glassy, the same river run shallow and fast is white, and a film on a
+    /// drying bank has none however fast it creeps.
+    #[test]
+    fn foam_follows_the_flow_running_faster_than_its_own_waves() {
+        assert_eq!(foam(2.0, 0.5), 0.0, "a deep slow river");
+        assert_eq!(foam(0.0, 3.0), 0.0, "dry ground");
+        assert_eq!(foam(f32::NAN, 3.0), 0.0, "a dry point's depth is not a number");
+        assert!(foam(0.3, 3.0) > 0.99, "0.3 m deep at 3 m/s outruns its waves: {}", foam(0.3, 3.0));
+        let mid = foam(0.5, 2.2);
+        assert!(mid > 0.1 && mid < 0.9, "near the speed of its own waves it is partly broken: {mid}");
+        assert!(foam(0.01, 1.0) == 0.0, "a film has no foam: {}", foam(0.01, 1.0));
+        assert!(foam(0.3, 3.0) > foam(0.3, 1.5), "faster is whiter");
     }
 
     /// **It turns with its planet.** Declared in the planet's frame, the lake
