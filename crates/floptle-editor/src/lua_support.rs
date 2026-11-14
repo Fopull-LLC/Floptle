@@ -389,6 +389,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field isPlaying fun(self: AudioSourceHandle): boolean Is the source audible right now?
 ---@field isLoading fun(self: AudioSourceHandle): boolean True from play until its clip has been read in the background; it reads as playing, from 0 seconds, meanwhile.
 ---@field position fun(self: AudioSourceHandle): number Playhead in seconds.
+---@field audible fun(self: AudioSourceHandle): number The gain the listener gets from it (volume × distance falloff), 0 while loading, paused or stopped.
 
 ---Something that walks the navmesh, returned by `nav.agent(node)`. Order it with
 ---`moveTo` and read `state` as it goes — the engine steps the whole crowd once a
@@ -441,6 +442,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field isPlaying fun(self: SoundHandle): boolean Still audible (false once finished)?
 ---@field isLoading fun(self: SoundHandle): boolean True from audio.play until its clip has been read in the background; it reads as playing meanwhile, and what you do to it (seek, pause, volume, stop) applies when it starts.
 ---@field position fun(self: SoundHandle): number Playhead in seconds.
+---@field audible fun(self: SoundHandle): number The gain the listener gets from it (volume × distance falloff, 0..1 at volume 1), 0 while loading, paused or ended.
 
 ---A mixer track handle from `audio.track(name)` — live control of the
 ---project mixer. Changes hold for the whole play session, across
@@ -492,6 +494,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field stopAll fun() Stop every playing sound (sources and one-shots).
 ---@field limit fun(group: string, maxVoices: integer?) Cap how many sounds a voice group plays at once; nil lifts the cap. At the cap a new sound replaces the lowest-priority voice, then the quietest at the listener, or is dropped if it ranks below them all.
 ---@field groupCount fun(group: string): integer How many voices a voice group is playing, as the mixer last counted them.
+---@field duration fun(clip: string): number? The clip's length in seconds, or nil until it has been read (asking starts the read).
 ---@field setWorldLowpass fun(hz: number?) Muffle every sound out in the world above `hz` (under water, in a vacuum suit), sparing `listenerSpace` and flat ones; nil or 0 clears it.
 ---@field track fun(name: string): AudioTrackHandle? A mixer track handle (\"Master\" or a track name from the Mixer tab); nil when the mixer has no such track.
 ---@field tracks fun(): AudioTrackInfo[] Every mixer track, Master first, as this play session has it.

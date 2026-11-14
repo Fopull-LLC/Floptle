@@ -1750,6 +1750,10 @@ pub enum AudioCmd {
     GroupLimit { group: String, max: Option<u32> },
     /// `audio.setWorldLowpass(hz)` — 0 clears it.
     WorldLowpass { hz: f32 },
+    /// `audio.duration(clip)` asked about a clip nothing has read yet: read
+    /// it in the background so the answer comes, without keeping it longer
+    /// than any other idle clip.
+    Decode { clip: String },
 }
 
 /// Live playback state of one sound / source, mirrored for script reads.
@@ -1762,6 +1766,9 @@ pub struct AudioPlayState {
     /// Asked to play, and its clip is still being decoded: `playing` is
     /// already true and it starts from `position` once the clip is in.
     pub loading: bool,
+    /// The gain the listener gets from it, after its volume and distance:
+    /// `handle:audible()`. 0 while loading, paused or ended.
+    pub audible: f64,
 }
 
 /// The audio mirror the editor feeds before each `run`: script one-shots by
@@ -1779,6 +1786,10 @@ pub struct AudioInfo {
     /// Voices playing per voice group, as the mixer last counted them —
     /// `audio.groupCount`.
     pub groups: Vec<(String, u32)>,
+    /// Every clip decoded this session, by the name it was asked for, with
+    /// its length in seconds: `audio.duration`. Shared, because it only grows
+    /// and is handed over every frame.
+    pub durations: std::sync::Arc<HashMap<String, f64>>,
 }
 
 /// One mixer track as a script reads it.

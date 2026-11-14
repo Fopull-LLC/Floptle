@@ -131,6 +131,17 @@ voice that had just ended.
   `audio.groupCount`.
 - Limits live in the core and are cleared by `reset` (Play stopped).
 
+## What scripts read back
+
+`VoiceStatus` (published after every callback with the other status) carries
+`audible`: `volume × distance gain` at the listener, the same `heard` number
+voice stealing ranks by, 0 while paused or stopping. Scripts read it as
+`s:audible()`. Clip lengths are a control-side fact: `ClipCache` records each
+clip's length in seconds when its decode lands, in an `Arc<HashMap>` it hands
+to the script mirror every frame (cloned only on a frame a clip arrives),
+and keeps after the clip itself is evicted. `audio.duration` reads that, and
+a miss queues `AudioCmd::Decode`, an unpinned background read.
+
 ## The per-voice low-pass
 
 Each voice has one `LowPass` (two one-poles, 12 dB an octave, coefficient

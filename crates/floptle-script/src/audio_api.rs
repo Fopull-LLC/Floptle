@@ -268,6 +268,17 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
         )?;
     }
     {
+        // s:audible() → the gain the listener gets from it, 0..1 at volume 1.
+        let inf = b.info.clone();
+        methods.set(
+            "audible",
+            lua.create_function(move |_, this: Table| {
+                let id: u32 = this.raw_get("__sound")?;
+                Ok(inf.borrow().sounds.get(&id).map_or(0.0, |s| s.audible))
+            })?,
+        )?;
+    }
+    {
         let inf = b.info.clone();
         methods.set(
             "isLoading",
@@ -536,6 +547,22 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
         )?;
     }
     {
+        // audio.duration(clip) → its length in seconds, or nil until it has
+        // been read; asking starts the read.
+        let inf = b.info.clone();
+        let cmds = b.commands.clone();
+        audio.set(
+            "duration",
+            lua.create_function(move |_, clip: String| {
+                if let Some(secs) = inf.borrow().durations.get(&clip) {
+                    return Ok(Some(*secs));
+                }
+                cmds.borrow_mut().push(AudioCmd::Decode { clip });
+                Ok(None)
+            })?,
+        )?;
+    }
+    {
         // audio.groupCount(group) → how many voices the group is playing.
         let inf = b.info.clone();
         audio.set(
@@ -604,6 +631,16 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
             lua.create_function(move |_, this: Table| {
                 let e: u32 = this.raw_get("__id")?;
                 Ok(inf.borrow().sources.get(&e).map(|s| s.position).unwrap_or(0.0))
+            })?,
+        )?;
+    }
+    {
+        let inf = b.info.clone();
+        smethods.set(
+            "audible",
+            lua.create_function(move |_, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                Ok(inf.borrow().sources.get(&e).map_or(0.0, |s| s.audible))
             })?,
         )?;
     }

@@ -242,7 +242,7 @@ impl AudioEngine {
             v.insert(
                 id,
                 VoiceEntry {
-                    st: VoiceStatus { playing: true, paused: false, position_secs: 0.0 },
+                    st: VoiceStatus { playing: true, paused: false, position_secs: 0.0, audible: 0.0 },
                     seen: false,
                 },
             );
@@ -270,7 +270,7 @@ impl AudioEngine {
             v.insert(
                 id,
                 VoiceEntry {
-                    st: VoiceStatus { playing: true, paused: false, position_secs: 0.0 },
+                    st: VoiceStatus { playing: true, paused: false, position_secs: 0.0, audible: 0.0 },
                     seen: false,
                 },
             );

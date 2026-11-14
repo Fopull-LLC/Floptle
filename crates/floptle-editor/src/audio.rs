@@ -42,6 +42,7 @@ impl Waiting {
             paused: self.paused,
             position: self.seek.unwrap_or(0.0) as f64,
             loading: true,
+            audible: 0.0,
         }
     }
 }
@@ -762,6 +763,13 @@ impl AudioSystem {
                         eng.set_group_limit(&group, max.map(|n| n as usize));
                     }
                 }
+                AudioCmd::Decode { clip } => {
+                    // Nothing is read on a host with no output: no sound
+                    // will ever play there to need it.
+                    if self.engine().is_some() {
+                        self.clips.decode(root, &clip);
+                    }
+                }
                 AudioCmd::WorldLowpass { hz } => {
                     if let Some(eng) = self.engine() {
                         eng.set_world_lowpass(hz);
@@ -817,7 +825,7 @@ impl AudioSystem {
 
     /// Build the playback mirror scripts read (`sound:isPlaying()` etc.).
     pub fn script_info(&mut self) -> AudioInfo {
-        let mut info = AudioInfo::default();
+        let mut info = AudioInfo { durations: self.clips.durations(), ..Default::default() };
         if let Some(m) = &self.runtime_mixer {
             info.mixer = true;
             let row = |t: &floptle_audio::TrackDesc, master: bool| floptle_script::TrackInfo {
@@ -858,6 +866,7 @@ impl AudioSystem {
                             paused: st.paused,
                             position: st.position_secs as f64,
                             loading: false,
+                            audible: st.audible as f64,
                         },
                     );
                 }
@@ -871,6 +880,7 @@ impl AudioSystem {
                             paused: st.paused,
                             position: st.position_secs as f64,
                             loading: false,
+                            audible: st.audible as f64,
                         },
                     );
                 }
@@ -1107,6 +1117,54 @@ mod tests {
         assert!((helmet - open).abs() < open * 0.01, "a listener-space sound was muffled: {helmet} vs {open}");
         let cleared = heard(500.0, false, true);
         assert!((cleared - open).abs() < open * 0.01, "clearing the medium left it dull: {cleared} vs {open}");
+    }
+
+    /// **`audio.duration` comes back once the clip is read, and stays.** A
+    /// clip nothing has played is read when asked about (`Decode`), and
+    /// its length reaches the script mirror; it stays known after the cache
+    /// drops the clip itself. `s:audible()` reads the gain the mixer worked
+    /// out at the listener: a sound 51 m off at volume 0.8 on a linear
+    /// falloff reads 0.8 times that falloff.
+    #[test]
+    fn a_clips_duration_and_a_sounds_audible_gain_reach_the_script_mirror() {
+        let root = project("duration", &["long.ogg", "hit.ogg"]);
+        let world = World::default();
+        let (mut a, mut render) = offline(fixed(36_000));
+        // No room for an idle clip: one read only for its length is dropped
+        // as soon as it is in.
+        a.clips = ClipCache::with_decoder(fixed(36_000), 0);
+        assert!(a.script_info().durations.get("audio/long.ogg").is_none(), "known before it was read");
+        a.apply_script_commands(&world, &root, vec![AudioCmd::Decode { clip: "audio/long.ogg".into() }]);
+        let t = Instant::now();
+        while a.script_info().durations.get("audio/long.ogg").is_none() && t.elapsed() < Duration::from_secs(5) {
+            a.pump(&world, &root);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(a.script_info().durations.get("audio/long.ogg"), Some(&0.75), "36 000 samples at 48 kHz");
+        a.pump(&world, &root);
+        assert_eq!(a.clips.status("audio/long.ogg"), Some(false), "the fixture: the idle clip was dropped");
+        assert_eq!(a.script_info().durations.get("audio/long.ogg"), Some(&0.75), "its length went with it");
+
+        let params = PlayParams {
+            volume: 0.8,
+            min_distance: 2.0,
+            max_distance: 100.0,
+            falloff: floptle_audio::Falloff::Linear,
+            end: EndBehavior::Loop,
+            ..Default::default()
+        };
+        a.apply_script_commands(
+            &world,
+            &root,
+            vec![AudioCmd::Play { handle: 4, clip: "audio/hit.ogg".into(), at: AudioAt::Pos([0.0, 0.0, -51.0]), params: Box::new(params) }],
+        );
+        until_live(&mut a, &world, &root, 4);
+        a.advance(&world, &root, Listener::default());
+        render(256);
+        let want = 0.8 * floptle_audio::spatial::distance_gain(floptle_audio::Falloff::Linear, 51.0, 2.0, 100.0) as f64;
+        let got = a.script_info().sounds.get(&4).map(|s| s.audible);
+        assert!(got.is_some_and(|g| (g - want).abs() < 1e-5), "audible read {got:?}, not {want}");
+        assert_eq!(a.script_info().durations.get("audio/hit.ogg"), Some(&0.75), "a played clip's length is known too");
     }
 
     /// A playlist polls `isPlaying()` to know when a track has ended. A track

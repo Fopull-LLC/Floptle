@@ -228,6 +228,10 @@ pub struct VoiceStatus {
     pub paused: bool,
     /// Playhead in seconds.
     pub position_secs: f32,
+    /// The gain the listener gets from it: its volume times its distance
+    /// falloff, before its track. 0..1 at a volume of 1 or less; 0 while
+    /// paused or fading out.
+    pub audible: f32,
 }
 
 /// Everything the audio thread mixes: voices → tracks → master.
@@ -559,6 +563,7 @@ impl AudioCore {
                 Some(c) if c.sample_rate > 0 => (v.pos / c.sample_rate as f64) as f32,
                 _ => 0.0,
             },
+            audible: if v.done || v.paused || v.stopping { 0.0 } else { v.heard(&self.listener) },
         })
     }
 
@@ -1106,6 +1111,35 @@ mod tests {
         core.render(&mut l, &mut r);
         let open = through_the_medium(0.0, true, at, PlayParams::default());
         assert!((peak(&l[2400..]) - open).abs() < open * 0.01, "the medium outlived a reset");
+    }
+
+    /// **`audible` is what the listener gets: volume times distance gain.**
+    /// A flat sound at half volume reads 0.5; a placed one reads its volume
+    /// times the falloff at its distance, and follows it when it moves; a
+    /// paused or stopping one reads 0.
+    #[test]
+    fn audible_is_the_volume_times_the_distance_gain() {
+        let mut core = AudioCore::new(48_000.0, 128);
+        let loop_at = |volume: f32| PlayParams {
+            volume,
+            end: EndBehavior::Loop,
+            min_distance: 2.0,
+            max_distance: 100.0,
+            falloff: crate::Falloff::Linear,
+            ..Default::default()
+        };
+        core.play(1, tone_clip(48_000, 0.5), None, loop_at(0.5));
+        core.play(2, tone_clip(48_000, 0.5), Some(DVec3::new(0.0, 0.0, -51.0)), loop_at(0.8));
+        let heard = |core: &AudioCore, id| core.status(id).unwrap().audible;
+        assert!((heard(&core, 1) - 0.5).abs() < 1e-6, "a flat sound at half volume: {}", heard(&core, 1));
+        let want = 0.8 * crate::spatial::distance_gain(crate::Falloff::Linear, 51.0, 2.0, 100.0);
+        assert!(want > 0.1 && want < 0.6, "the fixture: a gain well inside the range ({want})");
+        assert!((heard(&core, 2) - want).abs() < 1e-5, "placed 51 m off: {} vs {want}", heard(&core, 2));
+        core.move_voice(2, DVec3::new(0.0, 0.0, -1.0));
+        assert!((heard(&core, 2) - 0.8).abs() < 1e-6, "moved inside minDistance: {}", heard(&core, 2));
+        core.set_paused(1, true);
+        core.stop(2);
+        assert_eq!((heard(&core, 1), heard(&core, 2)), (0.0, 0.0), "paused and stopping sounds are not heard");
     }
 
     /// Twenty looping voices' worth of render, to let a stolen voice fade out

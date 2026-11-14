@@ -724,7 +724,7 @@ fn node_sound_handle_and_component_mirror() {
     let mut info = AudioInfo::default();
     info.sources.insert(
         e.index(),
-        AudioPlayState { playing: true, paused: false, position: 0.5, loading: false },
+        AudioPlayState { playing: true, paused: false, position: 0.5, loading: false, audible: 0.0 },
     );
     host.set_audio_info(info);
     host.run(&mut world, &dir, 0.1, 0.1);
@@ -1386,4 +1386,44 @@ fn the_world_lowpass_and_listener_space_reach_the_engine() {
     assert_eq!(hz, vec![600.0, 0.0, 0.0], "{cmds:?}");
     let spaces: Vec<bool> = cmds.iter().filter_map(|c| match c { AudioCmd::Play { params, .. } => Some(params.listener_space), _ => None }).collect();
     assert_eq!(spaces, vec![true, false], "{cmds:?}");
+}
+
+/// **A script reads a clip's length and how loud a sound reaches it.**
+/// `audio.duration` answers from the mirror once the clip is in and is nil
+/// before, asking for the clip to be read; `s:audible()` and
+/// `node:sound():audible()` read the gain the mixer published.
+#[test]
+fn duration_and_audible_read_the_mirror() {
+    let dir = std::env::temp_dir().join("floptle_script_test_duration_audible");
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "len",
+        "function start(node)\n\
+         \x20 local s = audio.play('audio/splash.ogg', 1, 2, 3)\n\
+         \x20 node.x = audio.duration('audio/splash.ogg') or -1\n\
+         \x20 node.y = audio.duration('audio/new.ogg') or -1\n\
+         \x20 node.z = s:audible()\n\
+         \x20 print(tostring(node:sound():audible()))\n\
+         end\n",
+    );
+    let (mut world, e) = world_with_script("len");
+    let mut host = ScriptHost::new();
+    let mut info = AudioInfo {
+        durations: std::sync::Arc::new(HashMap::from([("audio/splash.ogg".to_string(), 1.25)])),
+        ..Default::default()
+    };
+    // The handle audio.play hands out first, as the mixer would report it.
+    info.sounds.insert(1, AudioPlayState { playing: true, audible: 0.375, ..Default::default() });
+    info.sources.insert(e.index(), AudioPlayState { playing: true, audible: 0.5, ..Default::default() });
+    host.set_audio_info(info);
+    host.run(&mut world, &dir, 0.1, 0.1);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let tr = world.get::<Transform>(e).unwrap().translation;
+    assert_eq!((tr.x, tr.y, tr.z), (1.25, -1.0, 0.375), "duration of a known clip, nil for one not in, audible");
+    let said = host.drain_logs().into_iter().map(|l| l.msg).collect::<Vec<_>>().join("\n");
+    assert_eq!(said, "0.5", "node:sound():audible()");
+    let cmds = host.take_audio_commands();
+    let asked: Vec<&str> = cmds.iter().filter_map(|c| match c { AudioCmd::Decode { clip } => Some(clip.as_str()), _ => None }).collect();
+    assert_eq!(asked, vec!["audio/new.ogg"], "only the clip not in yet is read: {cmds:?}");
 }

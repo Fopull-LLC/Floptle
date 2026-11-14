@@ -207,6 +207,7 @@ local s = audio.play("audio/roar.ogg", bossNode, {
 | `s:seek(secs)` | jump the playhead |
 | `s:isPlaying()` / `s:position()` | playback state |
 | `s:isLoading()` | its clip is still being read (see below) |
+| `s:audible()` | the gain reaching the listener: volume × distance falloff (0..1 at volume 1); 0 while loading, paused or ended |
 
 The first time a clip is played, its file is read and decoded in the
 background, and the sound starts once that is done: a frame later for a
@@ -226,6 +227,24 @@ A preloaded clip is kept until it has been played. After that, clips nothing
 is playing are kept while they fit in 64 MB, and the least recently played
 goes first. A dropped clip is read again the next time it plays.
 `assets.preload` takes sound files too, beside models.
+
+`audio.duration(clip)` is a clip's length in seconds, or nil until it has
+been read: asking about a clip nothing has played or preloaded starts the
+read, so it answers a frame or so later, and once known the length stays
+known for the play session. It replaces a length typed into a script by
+hand:
+
+```lua
+local line = audio.play("audio/vo/line_04.ogg")
+local secs = audio.duration("audio/vo/line_04.ogg")   -- nil on the first frame of a cold clip
+if secs then after(secs + 0.3, nextLine) end
+```
+
+`s:audible()` (and `node:sound():audible()`) is the gain the listener gets
+from a sound, the same number the mixer plays it at before its track's fader:
+its volume times the distance falloff. A caption that fades with distance, or
+a guard that "hears" a footstep above 0.1, reads it rather than copying the
+falloff maths.
 
 `endBehavior = "Destroy"` on a node-following sound despawns that node when
 the sound finishes — spawn a node, hang a sound on it, and it cleans itself up.
