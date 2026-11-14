@@ -143,6 +143,11 @@ impl AnchoredCollider {
         self.shape.ray_cast(o - self.offset, rd, tmax)
     }
 
+    /// Whether the collider is terrain (see [`CollisionShape::is_terrain`]).
+    pub fn is_terrain(&self) -> bool {
+        self.shape.is_terrain()
+    }
+
     /// [`CollisionShape::ground_cast`] from sim-frame `o`.
     pub fn ground_cast(&self, o: Vec3, rd: Vec3, tmax: f32) -> crate::RayAnswer {
         self.shape.ground_cast(o - self.offset, rd, tmax)
@@ -570,7 +575,7 @@ pub fn raycast_colliders(
     max_dist: f32,
     mask: u32,
 ) -> Option<RayHit> {
-    cast_colliders(colliders, origin, dir, max_dist, mask, &[], false)
+    cast_colliders(colliders, origin, dir, max_dist, mask, &[], false, &|_| true)
 }
 
 /// [`raycast_colliders`], passing through every collider whose node is in
@@ -584,16 +589,31 @@ pub fn raycast_colliders_excluding(
     mask: u32,
     exclude: &[u32],
 ) -> Option<RayHit> {
-    cast_colliders(colliders, origin, dir, max_dist, mask, exclude, false)
+    cast_colliders(colliders, origin, dir, max_dist, mask, exclude, false, &|_| true)
 }
 
 /// [`raycast_colliders`], asking each collider its
 /// [`ground_cast`](crate::CollisionShape::ground_cast) answer: the ray a
 /// scatter prop is dropped onto the ground with.
 pub fn raycast_ground_colliders(colliders: &[AnchoredCollider], origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
-    cast_colliders(colliders, origin, dir, max_dist, !0, &[], true)
+    cast_colliders(colliders, origin, dir, max_dist, !0, &[], true, &|_| true)
 }
 
+/// [`raycast_ground_colliders`] over only the colliders `keep` accepts: the
+/// rest are passed through as if they were not there. `keep` is asked only
+/// of colliders the ray's path crosses, so a costly answer is paid for a
+/// handful of colliders, not the level.
+pub fn raycast_ground_colliders_where(
+    colliders: &[AnchoredCollider],
+    origin: Vec3,
+    dir: Vec3,
+    max_dist: f32,
+    keep: &dyn Fn(&AnchoredCollider) -> bool,
+) -> Option<RayHit> {
+    cast_colliders(colliders, origin, dir, max_dist, !0, &[], true, keep)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cast_colliders(
     colliders: &[AnchoredCollider],
     origin: Vec3,
@@ -602,6 +622,7 @@ fn cast_colliders(
     mask: u32,
     exclude: &[u32],
     ground: bool,
+    keep: &dyn Fn(&AnchoredCollider) -> bool,
 ) -> Option<RayHit> {
     // A march stops within 0.02 of a surface, so a box grazed by that much
     // must still be marched.
@@ -633,6 +654,9 @@ fn cast_colliders(
             None => Some((0.0, max_dist)),
         };
         let Some((t0, t1)) = span else { continue };
+        if !keep(c) {
+            continue;
+        }
         let answer = if ground { c.ground_cast(origin, rd, max_dist) } else { c.ray_cast(origin, rd, max_dist) };
         match answer {
             crate::RayAnswer::March => {
@@ -1484,6 +1508,18 @@ impl PhysicsWorld {
     /// [`CollisionShape::ground_cast`]).
     pub fn raycast_ground(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
         raycast_ground_colliders(&self.colliders, origin, dir, max_dist)
+    }
+
+    /// [`Self::raycast_ground`] over only the colliders `keep` accepts (see
+    /// [`raycast_ground_colliders_where`]).
+    pub fn raycast_ground_where(
+        &self,
+        origin: Vec3,
+        dir: Vec3,
+        max_dist: f32,
+        keep: &dyn Fn(&AnchoredCollider) -> bool,
+    ) -> Option<RayHit> {
+        raycast_ground_colliders_where(&self.colliders, origin, dir, max_dist, keep)
     }
 
     /// Bring the collider broadphase up to date for queries made between
@@ -5316,6 +5352,28 @@ mod ray_identity_tests {
         let h = raycast_colliders(&cols, Vec3::new(0.0, 5.0, 0.0), -Vec3::Y, 20.0, !0)
             .expect("the ray hits the box");
         assert_eq!(h.eid, Some(42), "the ray hit a node and would not say which");
+    }
+
+    /// A ground ray told to pass a collider by goes through it to what is
+    /// below, whether that is answered exactly (a box) or marched (terrain);
+    /// told to keep everything, it stops where the plain ground ray does.
+    #[test]
+    fn a_ground_ray_passes_through_the_colliders_it_is_told_to() {
+        let t = floptle_field::Terrain::flat([24, 12, 24], [0.0, 0.0, 0.0], [12.0, 6.0, 12.0], 0.0, [0.5; 3]);
+        let terrain = tagged(Box::new(crate::ChunkTerrain::new(floptle_field::ChunkField::from_dense(&t.baked, 0.5))), 1);
+        assert!(terrain.is_terrain(), "a terrain field is terrain");
+        let roof = tagged(Box::new(BoxShape::new(Vec3::new(0.0, 3.0, 0.0), Vec3::new(2.0, 0.5, 2.0), Quat::IDENTITY)), 2);
+        assert!(!roof.is_terrain(), "a box is not terrain");
+        let cols = vec![terrain, roof];
+        let (o, d) = (Vec3::new(0.3, 5.0, 0.2), -Vec3::Y);
+        let plain = raycast_ground_colliders(&cols, o, d, 20.0).expect("the ray lands");
+        let all = raycast_ground_colliders_where(&cols, o, d, 20.0, &|_| true).expect("the ray lands");
+        assert_eq!((plain.eid, plain.distance), (all.eid, all.distance), "keeping everything changed the answer");
+        assert_eq!(plain.eid, Some(2), "the roof is the first thing under the ray");
+        let ground = raycast_ground_colliders_where(&cols, o, d, 20.0, &|c| c.is_terrain()).expect("the terrain is below");
+        assert_eq!(ground.eid, Some(1), "the ray stopped at a collider it was told to pass");
+        assert!((ground.distance - 5.0).abs() < 0.1, "landed {} below, not on the ground 5 below", ground.distance);
+        assert!(raycast_ground_colliders_where(&cols, o, d, 20.0, &|_| false).is_none(), "passing everything still hit");
     }
 
     /// An anonymous collider — a test fixture, anything registered without a

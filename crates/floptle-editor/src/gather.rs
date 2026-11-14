@@ -2322,6 +2322,7 @@ impl Editor {
             &self.scatter_protos,
             &self.scatter_proto_radius,
             &mut self.scatter_cache,
+            &self.moved_statics,
             true,
             cam.world_position,
             &frustum,

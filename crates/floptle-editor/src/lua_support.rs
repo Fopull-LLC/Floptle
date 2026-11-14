@@ -1821,7 +1821,7 @@ scatter = {}
 ---per instance and never while chunks build — placement has to stay a pure
 ---function of the seed, or walking away and back would regrow a different
 ---world. Density 0 generates no instance at all.
----@param opts { tint?: number[], emissive?: number[], emissiveStrength?: number, bend?: number, asset?: string, lod?: { asset: string, distance: number }[], seed?: number, center?: Vec3, radius?: number, halfX?: number, halfZ?: number, perChunk?: number, chunk?: number, align?: string, scaleMin?: number, scaleMax?: number, range?: number, fade?: number, density?: fun(x: number, y: number, z: number): number | number[], densityRows?: number }
+---@param opts { tint?: number[], emissive?: number[], emissiveStrength?: number, bend?: number, asset?: string, lod?: { asset: string, distance: number }[], seed?: number, center?: Vec3, radius?: number, halfX?: number, halfZ?: number, perChunk?: number, chunk?: number, align?: string, scaleMin?: number, scaleMax?: number, range?: number, fade?: number, density?: fun(x: number, y: number, z: number): number | number[], densityRows?: number, settleOn?: string }
 ---@return integer
 function scatter.create(opts) end
 ---Instances within `radius` of a point, nearest first. What a harvest verb aims
@@ -1861,6 +1861,14 @@ function scatter.remove(id, instanceId) end
 ---@param instanceId? integer
 ---@return integer restored
 function scatter.restore(id, instanceId) end
+---Drop instances onto the ground again where they stand, keeping their ids:
+---one by id, or every one within `radius` of `point`. For ground that changed
+---under them (a crate carried off), without remove and restore.
+---@param id integer
+---@param instanceOrPoint number|Vec3
+---@param radius? number
+---@return boolean queued
+function scatter.resettle(id, instanceOrPoint, radius) end
 ---The instance ids this source has lost. Save THIS (a handful of numbers), not
 ---every prop you ever saw.
 ---@param id integer

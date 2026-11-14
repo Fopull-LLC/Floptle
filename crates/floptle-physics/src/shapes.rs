@@ -102,6 +102,12 @@ pub trait CollisionShape {
     fn chunk_terrain_mut(&mut self) -> Option<&mut ChunkTerrain> {
         None
     }
+    /// Whether this shape is terrain: the ground a world is made of, rather
+    /// than something standing on it. What a scatter source set to settle on
+    /// terrain alone lets its props rest on.
+    fn is_terrain(&self) -> bool {
+        self.chunk_terrain().is_some()
+    }
     /// An exact answer to "where does the ray from `o` along unit `rd` first
     /// meet this shape, within `tmax`", when the shape has one cheaper than a
     /// sphere march. [`RayAnswer::March`] (the default) hands the ray to the
@@ -476,6 +482,9 @@ pub struct SdfTerrain {
 }
 
 impl CollisionShape for SdfTerrain {
+    fn is_terrain(&self) -> bool {
+        true
+    }
     fn distance(&self, p: Vec3) -> f32 {
         self.terrain.sample([p.x, p.y, p.z])
     }

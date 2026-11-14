@@ -1046,6 +1046,8 @@ pub struct ScriptHost {
     scatter_settled: scatter_api::Settled,
     /// The points bending props away, by the script that set them.
     scatter_interactors: scatter_api::Interactors,
+    /// Props scripts asked to be dropped onto the ground again.
+    scatter_resettles: scatter_api::Resettles,
     /// The winds scripts declared (`weather.*`) and the clock they blow by.
     weather: weather_api::WeatherShared,
     /// The last source id handed out — where a rebuild's own sources start.
