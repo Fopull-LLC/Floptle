@@ -1171,8 +1171,28 @@ const COLLISION_MESH_FRAMES: u64 = 2;
 /// outranks everything.
 const OFF_BODY_PENALTY: i32 = 100_000;
 
+/// What the drawn-mesh pool's threads are called (`terrain_worker`).
+pub(crate) const DRAWN_POOL: &str = "terrain-remesh";
+
+/// What the collision-mesh pool's threads are called (`collision_worker`,
+/// started the first time an edit or a mark needs a collision mesh). A name
+/// of its own, so a thread list or a profiler tells the two pools apart: with
+/// one name between them, two pools of four read as eight threads of one.
+pub(crate) const COLLISION_POOL: &str = "terrain-collide";
+
 impl TerrainWorker {
-    pub(crate) fn spawn() -> Self {
+    /// The pool that makes drawn chunk meshes.
+    pub(crate) fn spawn_drawn() -> Self {
+        Self::spawn(DRAWN_POOL)
+    }
+
+    /// The pool that makes collision chunk meshes.
+    pub(crate) fn spawn_collision() -> Self {
+        Self::spawn(COLLISION_POOL)
+    }
+
+    /// A pool of a few threads sharing one queue, each named `name`.
+    fn spawn(name: &str) -> Self {
         let (jtx, jrx) = std::sync::mpsc::channel::<RemeshJob>();
         let (dtx, drx) = std::sync::mpsc::channel::<RemeshDone>();
         // A few threads share the queue. One alone was the mining laser's
@@ -1185,7 +1205,7 @@ impl TerrainWorker {
             let jrx = std::sync::Arc::new(std::sync::Mutex::new(jrx));
             for _ in 0..threads {
                 let (jrx, dtx) = (jrx.clone(), dtx.clone());
-                crate::worker::spawn("terrain-remesh", move || {
+                crate::worker::spawn(name, move || {
                     loop {
                         // Take one job with the queue held, run it with the queue free.
                         let job = match jrx.lock() {
@@ -1203,6 +1223,7 @@ impl TerrainWorker {
         }
         #[cfg(target_arch = "wasm32")]
         {
+            let _ = name; // no threads to name: jobs run on the frame
             Self { tx: jtx, rx: drx, in_flight: 0, early: Vec::new(), inline: (jrx, dtx) }
         }
     }
@@ -1764,7 +1785,7 @@ impl Editor {
         // dissolves in together rather than each on its own schedule.
         let now = self.now();
         if self.terrain_worker.is_none() && !self.terrains.is_empty() {
-            self.terrain_worker = Some(TerrainWorker::spawn());
+            self.terrain_worker = Some(TerrainWorker::spawn_drawn());
         }
         // Moving bodies hold the ground under them at full detail too: what a
         // body lands on is drawn as it collides, however far from the camera.
@@ -3628,7 +3649,7 @@ impl Editor {
                 // (asked for by a mark, say) was gathered from the field
                 // before this write, and is sent again from this one, or the
                 // ground from before the dig would land.
-                let worker = self.collision_worker.get_or_insert_with(TerrainWorker::spawn);
+                let worker = self.collision_worker.get_or_insert_with(TerrainWorker::spawn_collision);
                 for c in stale {
                     if !collider.is_meshed(c) && !self.collision_pending.contains_key(&(e, c)) {
                         continue;
@@ -3745,7 +3766,7 @@ impl Editor {
                 continue;
             }
             let t = &self.terrains[&e];
-            let worker = self.collision_worker.get_or_insert_with(TerrainWorker::spawn);
+            let worker = self.collision_worker.get_or_insert_with(TerrainWorker::spawn_collision);
             self.terrain_epoch += 1;
             self.collision_pending.insert((e, c), (self.terrain_epoch, self.collision_frame + COLLISION_MESH_FRAMES));
             worker.send(RemeshJob {
