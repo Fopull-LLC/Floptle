@@ -814,6 +814,8 @@ pub struct ScriptHost {
     /// The ground not made yet, published by the engine each frame for
     /// `terrain.ready` and `terrain.raycast`.
     terrain_unmade: Rc<RefCell<Vec<terrain_api::UnmadeRegion>>>,
+    /// What `terrain.viewReady` answers, published by the engine each frame.
+    terrain_view: terrain_api::TerrainViewShares,
     /// The palette slots' Materials for `terrain.slotMaterial`, and the sets
     /// scripts made (`terrain.setSlotMaterial`).
     terrain_slots: Rc<RefCell<terrain_slot_api::SlotMaterials>>,

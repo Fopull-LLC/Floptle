@@ -66,6 +66,36 @@ fn terrain_busy_is_true_the_moment_a_fill_is_queued() {
     assert!(logs.iter().any(|l| l == "later=false"), "quiet again once nothing is running: {logs:?}");
 }
 
+/// `terrain.viewReady(id)` reads what the engine last published for that
+/// terrain id, and nil for an id it published nothing for.
+#[test]
+fn terrain_view_ready_reads_the_published_share() {
+    let dir = std::env::temp_dir().join(format!("floptle-view-ready-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "waiter",
+        "local function f(v) return v and string.format('%.2f', v) or 'nil' end\nfunction update(node, dt)\n  log('seven=' .. f(terrain.viewReady(7)) .. ' eight=' .. f(terrain.viewReady(8)))\nend\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(
+        e,
+        Scripts(vec![floptle_core::ScriptInst { kind: "waiter".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
+    );
+    let mut host = ScriptHost::new();
+    host.set_terrain_view_ready([(7, 0.25)].into_iter().collect());
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(logs.iter().any(|l| l == "seven=0.25 eight=nil"), "{logs:?}");
+    host.set_terrain_view_ready([(7, 1.0)].into_iter().collect());
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(logs.iter().any(|l| l == "seven=1.00 eight=nil"), "{logs:?}");
+}
+
 #[test]
 fn script_can_raycast() {
     let dir = std::env::temp_dir().join("floptle_script_test_raycast");

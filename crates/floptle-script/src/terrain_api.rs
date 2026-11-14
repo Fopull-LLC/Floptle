@@ -442,6 +442,9 @@ pub(crate) struct TerrainStreamShared {
     pub save_dir_in_use: Rc<std::cell::Cell<bool>>,
     /// The ground not made yet, as the engine last published it.
     pub unmade: Rc<RefCell<Vec<UnmadeRegion>>>,
+    /// Per terrain id, the share of its ground in view drawn at the detail
+    /// it stays at, as the engine last published it (`terrain.viewReady`).
+    pub view: TerrainViewShares,
     /// `terrain.prepare` asks since the engine last took them.
     pub prepare: PrepareCalls,
     /// What `terrain.deleteSaveDir` resolves its (validated, relative) path
@@ -462,6 +465,10 @@ pub struct TerrainCopy {
 }
 
 pub type TerrainCopies = Rc<RefCell<Vec<TerrainCopy>>>;
+
+/// What `terrain.viewReady` answers from: terrain id → the share of that
+/// body's ground in the camera's view drawn at its final detail.
+pub type TerrainViewShares = Rc<RefCell<std::collections::HashMap<u32, f32>>>;
 
 fn is_terrain_file(p: &std::path::Path) -> bool {
     p.extension().and_then(|x| x.to_str()).is_some_and(|x| matches!(x, "cfield" | "tfield" | "meta"))
@@ -585,7 +592,7 @@ pub(crate) fn install_terrain_api(
     stream: TerrainStreamShared,
     receipts: TerrainReceipts,
 ) {
-    let TerrainStreamShared { save_dir, lod_anchor, edit_budget, warm, flush, busy, save_dir_in_use, unmade, prepare, paths, copies } = stream;
+    let TerrainStreamShared { save_dir, lod_anchor, edit_budget, warm, flush, busy, save_dir_in_use, unmade, view, prepare, paths, copies } = stream;
     let TerrainReceipts { yields, next_op_id, planet, queued, generator, impostors, water_levels, dropped, edits } = receipts;
     lua.set_app_data(TerrainDrops(dropped.clone()));
     let Ok(t) = lua.create_table() else { return };
@@ -965,6 +972,19 @@ pub(crate) fn install_terrain_api(
             Ok(!stand_in_near(&cols.borrow(), glam::DVec3::new(x, y, z), r))
         }) {
             let _ = t.set("ready", f);
+        }
+    }
+
+    // terrain.viewReady(id) — how much of the ground of the terrain with id
+    // `id` that the camera can see is drawn at the detail it will stay at,
+    // from 0 to 1. A body the camera was just put near streams its ground in
+    // over seconds, nearest first; a probe or a cutscene that wants its
+    // picture finished waits for 1. A body drawn as its far ball reads 1. Nil
+    // when no terrain with that id is loaded.
+    {
+        let view = view.clone();
+        if let Ok(f) = lua.create_function(move |_, id: u32| Ok(view.borrow().get(&id).copied())) {
+            let _ = t.set("viewReady", f);
         }
     }
 

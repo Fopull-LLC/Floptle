@@ -2337,6 +2337,13 @@ function terrain.ready(x, y, z, r) end
 ---@param z number
 ---@param r number
 function terrain.prepare(x, y, z, r) end
+---How much of the ground of the terrain with id `id` that the camera can see is
+---drawn at the detail it will stay at, from 0 to 1: a planet the camera was just
+---put near streams in over seconds. 1 for a body drawn as its far ball; nil when
+---no terrain with that id is in the world.
+---@param id integer
+---@return number?
+function terrain.viewReady(id) end
 ---The first terrain surface along a ray, from the ground's own field. A miss
 ---answers nil and "air" (reached maxDist, default 1000, through open space) or
 ---nil, "unknown" and the distance at which it reached ground not made yet
