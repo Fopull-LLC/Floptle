@@ -430,6 +430,12 @@ fn flsl_sun_color(p: vec3<f32>) -> vec3<f32> { return g.light_color.rgb; }
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return vec3<f32>(1.0); }
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return color; }
+// A thumbnail stands in the open with no lamp near it: all of the sky for
+// skyVisibility and skyOcclusion, and nothing for localLight (as
+// `point_diffuse` above).
+fn sky_visibility(p: vec3<f32>, n: vec3<f32>, flat_ambient: vec3<f32>) -> f32 { return 1.0; }
+fn sky_occlusion(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 { return 1.0; }
+fn flsl_local_light(pos_rel: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return vec3<f32>(0.0); }
 fn surface_fade_cut(in: VsOut, pix: vec2<u32>) -> bool { return false; }
 // A "ground" below the tile's lower third, so fieldDistance-driven looks
 // (shoreline foam, contact glows) show a gradient instead of a constant.
@@ -780,6 +786,23 @@ mod tests {
         assert!(pv.wgsl.contains("pvn("), "literals read lanes:\n{}", pv.wgsl);
         assert!(!pv.dyn_slots.is_empty());
         assert!(validate_module(&pv.wgsl).is_ok());
+    }
+
+    /// A surface that reads `skyVisibility` and `localLight` previews: the
+    /// thumbnail stands in the open, with no lamp.
+    #[test]
+    fn a_surface_that_reads_its_sky_share_previews() {
+        let pv = preview_of(
+            "shader pool {\n  stage fragment\n  let sky = skyRadiance(reflect(-viewDir, normal)) * skyVisibility(worldPos)\n  \
+             output color = vec4(sky * skyVisibility(worldPos, normal) * skyOcclusion(worldPos, normal) + localLight(worldPos, normal), 1)\n}\n",
+        );
+        assert!(
+            pv.wgsl.contains("sky_visibility(") && pv.wgsl.contains("local_light(") && pv.wgsl.contains("sky_occlusion("),
+            "the preview leaves an op out"
+        );
+        if let Err(d) = validate_module(&pv.wgsl) {
+            panic!("the preview module is rejected: {}\n---\n{}", d.message, pv.wgsl);
+        }
     }
 
     #[test]

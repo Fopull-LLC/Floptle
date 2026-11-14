@@ -846,6 +846,31 @@ impl<'a> Writer<'a> {
                         "sun_shadow({p}, {n}, vec2<u32>(u32(in.clip.x), u32(in.clip.y)))"
                     ))
                 }
+                // The lit path's own two functions (field.wgsl `sky_visibility`,
+                // raster.wgsl `flsl_local_light`), so neither can drift from it.
+                "skyVisibility" => {
+                    let p = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;
+                    let n = match call.args.get(1) {
+                        Some(n @ ResolvedArg::Expr(_)) => format!("normalize({})", self.emit_resolved(n, Some(Ty::Vec3))?),
+                        _ => "facing_normal(normalize(in.normal), front)".to_string(),
+                    };
+                    Ok(format!("sky_visibility({p}, {n}, g.ambient.rgb)"))
+                }
+                // field.wgsl `sky_occlusion`: the sun-shadow march aimed at the sky.
+                "skyOcclusion" => {
+                    let p = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;
+                    let n = self.emit_resolved(&call.args[1], Some(Ty::Vec3))?;
+                    let reach = self.emit_resolved(&call.args[2], Some(Ty::Float))?;
+                    Ok(format!("sky_occlusion({p}, normalize({n}), {reach})"))
+                }
+                // Lamps on a lit surface are darkened by the scene's ambient
+                // occlusion too (`fs` multiplies everything it lit by it), so
+                // the op carries the same factor (raster.wgsl `flsl_local_light`).
+                "localLight" => {
+                    let p = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;
+                    let n = self.emit_resolved(&call.args[1], Some(Ty::Vec3))?;
+                    Ok(format!("flsl_local_light({p}, normalize({n}), vec2<u32>(u32(in.clip.x), u32(in.clip.y)))"))
+                }
                 "applyFog" => {
                     let c = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;
                     let p = self.emit_resolved(&call.args[1], Some(Ty::Vec3))?;
@@ -1548,6 +1573,9 @@ fn flsl_sun_color(p: vec3<f32>) -> vec3<f32> { return g.light_color.rgb; }
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return vec3<f32>(1.0); }
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return color; }
+fn sky_visibility(p: vec3<f32>, n: vec3<f32>, flat_ambient: vec3<f32>) -> f32 { return 1.0; }
+fn sky_occlusion(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 { return 1.0; }
+fn flsl_local_light(pos_rel: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return vec3<f32>(0.0); }
 fn surface_fade_cut(in: VsOut, pix: vec2<u32>) -> bool { return false; }
 fn map_d(p: vec3<f32>) -> f32 { return 1e9; }
 fn flsl_surface_gap(p: vec3<f32>) -> f32 { return 1e9; }

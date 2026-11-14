@@ -1820,12 +1820,16 @@ fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
         sca = sca * 0.6;
     }
     let ao = clamp(1.0 - 1.5 * occ / radius, 0.0, 1.0);
-    // TRUST falls with field coarseness: sampling a 1.5-unit AO radius out of a
-    // 4-unit-voxel planet proxy reads trilinear mush, not occlusion — it painted
-    // blobby light/dark patches over night-side terrain (2026-07-20). When the
-    // voxel can't resolve the radius, fade toward flat (SSAO covers fine detail).
-    let trust = clamp(radius / vol_voxel_at(p), 0.0, 1.0);
-    return mix(1.0, ao, clamp(G.ao_params.y, 0.0, 1.0) * trust);
+    return mix(1.0, ao, clamp(G.ao_params.y, 0.0, 1.0) * sdf_ao_trust(p));
+}
+
+// How far `sdf_ao` trusts the field at `p`, 0..1. It falls with the field's
+// coarseness: sampling a 1.5-unit AO radius out of a 4-unit-voxel planet proxy
+// reads trilinear mush, not occlusion; it painted blobby light and dark
+// patches over night-side terrain (2026-07-20). Where the voxel cannot resolve
+// the radius the AO fades toward flat (SSAO covers fine detail).
+fn sdf_ao_trust(p: vec3<f32>) -> f32 {
+    return clamp(max(G.ao_params.z, 1e-3) / vol_voxel_at(p), 0.0, 1.0);
 }
 
 // SHADOW-ONLY occluder volumes (vol_center.w = 2): baked static level meshes that
@@ -2301,6 +2305,108 @@ fn gi_bounce(p: vec3<f32>, n: vec3<f32>) -> vec4<f32> {
 fn gi_ambient(p: vec3<f32>, n: vec3<f32>, flat_ambient: vec3<f32>) -> vec3<f32> {
     let gi = gi_bounce(p, n);
     return mix(flat_ambient, gi.rgb, gi.a);
+}
+
+// The scene's ambient occlusion at `p` facing `n`, as every lit surface
+// applies it: the field's own occlusion while the scene has it switched on,
+// and nothing at all (and no march) while it is off.
+fn scene_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
+    if (G.ao_params.x > 0.5) {
+        return sdf_ao(p, n);
+    }
+    return 1.0;
+}
+
+// The share of a small cone of sky rays from camera-relative `p` that get
+// away, 0..1, for a surface facing `n`: four directions, cosine-weighted
+// around `n`, each marched up to `reach` against exactly what a sun-shadow
+// ray marches (`field_vis`: terrain and every other field volume, blobs,
+// Field Shapes, baked mesh occluders and collider proxies). Anything past
+// `reach` does not count, so a cliff a kilometre off leaves a pool open.
+//
+// It needs no switch to be on, which is the point: a streamed terrain with
+// screen-space AO and no probe volume still shadows its caves from the sun,
+// and this asks the same question of the sky. It is four shadow rays, so it
+// costs several times a sun shadow; `sky_visibility` only reaches for it
+// where the engine has no occlusion of its own to give.
+//
+// The directions are fixed, not jittered: a pool reads the same every frame
+// and no temporal filter is needed. The penumbra estimator is kept hard
+// (k = 8), so a ray skimming flat open ground at the cone's widest angle
+// still counts as open.
+fn sky_occlusion(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
+    let base = max(0.03, max(field_eps(p), shadow_vol_eps(p)) * 1.6);
+    let side = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(n.x) > 0.9);
+    let t = normalize(cross(side, n));
+    let b = cross(n, t);
+    let far = max(reach, 0.01);
+    var vis = 0.0;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        // Equal-area rings of the projected disc: the cosine weighting is in
+        // where the rays point, so each counts the same.
+        let u = (f32(i) + 0.5) / 4.0;
+        let sin_t = sqrt(u);
+        let cos_t = sqrt(1.0 - u);
+        let phi = f32(i) * 2.39996323; // the golden angle
+        let dir = t * (sin_t * cos(phi)) + b * (sin_t * sin(phi)) + n * cos_t;
+        // `light_vis`'s lift: off the start surface's own noise, more for a
+        // grazing ray, never past a cave roof. Twenty-four steps: the widest
+        // ray over flat open ground grows its step by about a third each time
+        // and needs about twenty to leave a 32-unit reach, and a ray that runs
+        // out of steps counts as blocked.
+        let lift = min(base * clamp(0.5 / max(cos_t, 0.125), 1.0, 4.0), 3.0);
+        vis = vis + field_vis(p + n * lift, dir, far, 8.0, base * 3.0, lift, 24);
+    }
+    return vis / 4.0;
+}
+
+// How far `sky_visibility` looks for cover when it falls back to
+// `sky_occlusion`: enough for a shaft, a cave mouth or an overhang.
+const SKY_FALLBACK_REACH: f32 = 32.0;
+
+// How much of the open sky's ambient reaches camera-relative point `p` on a
+// surface facing `n`, 0..1: 1 in the open, falling toward 0 under cover.
+//
+// Where the engine darkens its own lit surfaces' ambient, this is exactly that
+// share, built from the same calls so a surface that lights itself and the lit
+// ground beside it cannot drift apart: `scene_ao` above, and the ambient
+// `gi_ambient` hands a surface, measured against the flat ambient it would
+// have had in the open. A light probe volume that bakes a room dark gives a
+// small share there; one that bakes it brighter than the open sky gives 1,
+// since no more than all of the sky can arrive.
+//
+// Where the engine has no such term, the lit ground is not darkened at all,
+// but a pool in a cave should still be: so the share falls back to
+// `sky_occlusion`. How much the engine's own term covers a point is the
+// larger of the SDF AO's trust there (on while the scene's AO is Sdf, fading
+// out where the field is too coarse for its radius, as on a planet's proxy)
+// and the probe volumes' coverage. Fully covered, nothing is marched and the
+// built-in share is the answer; uncovered, the cone answers; in between, the
+// cone fills only the part the engine leaves out.
+//
+// `flat_ambient` is the scene's ambient colour, passed in as `gi_ambient`
+// takes it. Where it is black the probes have nothing to measure a share
+// against and are left out.
+fn sky_visibility(p: vec3<f32>, n: vec3<f32>, flat_ambient: vec3<f32>) -> f32 {
+    var share = 1.0;
+    var own = 0.0;
+    if (G.ao_params.x > 0.5) {
+        share = sdf_ao(p, n);
+        own = sdf_ao_trust(p);
+    }
+    let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let open = dot(flat_ambient, luma);
+    if (G.gi_meta.x >= 0.5 && open > 1e-6) {
+        // `gi_ambient`, with the coverage kept.
+        let gi = gi_bounce(p, n);
+        let here = dot(mix(flat_ambient, gi.rgb, gi.a), luma);
+        share = share * clamp(here / open, 0.0, 1.0);
+        own = max(own, gi.a);
+    }
+    if (own >= 1.0) {
+        return share;
+    }
+    return share * mix(sky_occlusion(p, n, SKY_FALLBACK_REACH), 1.0, own);
 }
 
 // ---- Stars mode (Lighting `stars`): luminous celestial bodies ARE the key
