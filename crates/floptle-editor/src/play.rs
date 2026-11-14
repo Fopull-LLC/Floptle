@@ -1199,6 +1199,7 @@ impl Editor {
             self.terrain_op_queue.clear();
             self.terrain_op_job = None;
             self.terrain_impostor_rules.clear();
+            self.terrain_water_rules.clear();
             if let Some((fields, palette)) = self.play_terrains.take() {
                 for (id, t) in fields {
                     if let Some(e) = self.terrain_entity_of_id(id) {

@@ -28,7 +28,7 @@
 
 use floptle_core::math::Vec3;
 
-use crate::chunks::{ChunkField, CHUNK};
+use crate::chunks::{ChunkField, WaterLevel, CHUNK};
 
 /// One chunk's extracted geometry. Positions are chunk-local (small numbers); `origin`
 /// places them in field space, which is what the per-chunk instance matrix carries —
@@ -94,6 +94,9 @@ pub struct MeshScratch {
     edge_reach: u8,
     /// [`ChunkField::mesh_refine`] when gathered.
     refine: u8,
+    /// [`ChunkField::water_levels`] when gathered, for a coarse stride only:
+    /// full detail draws the ground as it is.
+    water: Vec<WaterLevel>,
     /// The chunk + stride this scratch was gathered for — `mesh_scratch` reads them
     /// back so a queued job is fully self-contained (the async remesh worker meshes
     /// from the scratch alone and never touches the live field; trap T4).
@@ -122,7 +125,7 @@ impl MeshScratch {
         // At full detail no corner takes a minimum, so which chunks hold data
         // is never asked.
         let chunk = base.map(|v| v.div_euclid(CHUNK));
-        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), edge_reach: field.slot_edge_reach(), refine: field.mesh_refine(), chunk, stride: 1, base, cells, meshed: 0 }
+        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), edge_reach: field.slot_edge_reach(), refine: field.mesh_refine(), water: Vec::new(), chunk, stride: 1, base, cells, meshed: 0 }
     }
 
     fn new(field: &ChunkField, chunk: [i32; 3], stride: i32) -> Self {
@@ -164,7 +167,8 @@ impl MeshScratch {
         // gently everywhere, and refining all of it would multiply the cost
         // of every chunk near the player for a difference no one sees.
         let refine = if field.is_edited(chunk) { field.mesh_refine() } else { 0 };
-        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), edge_reach: field.slot_edge_reach(), refine, chunk, stride, base, cells, meshed }
+        let water = if stride > 1 { field.water_levels().to_vec() } else { Vec::new() };
+        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), edge_reach: field.slot_edge_reach(), refine, water, chunk, stride, base, cells, meshed }
     }
 
     /// Flat scratch index for a global voxel, without bounds checks.
@@ -729,6 +733,103 @@ impl MeshScratch {
         p
     }
 
+    /// The water a coarse cell lies wholly under, if any: the first of the
+    /// field's levels that is over the cell and has none of the cell's
+    /// full-resolution ground above it. `c0` is the cell's first voxel.
+    ///
+    /// The ground is read where the full-detail mesh would put it: every
+    /// place the field changes sign between two voxels, in the box of voxels
+    /// the cell's corners were taken from (the cell and half a stride round
+    /// it). One crossing above the water and the cell is a shore, left as it
+    /// is.
+    fn submerged(&self, c0: [i32; 3]) -> Option<usize> {
+        let (stride, half) = (self.stride, self.stride / 2);
+        let v = self.voxel;
+        let mid = Vec3::new(c0[0] as f32, c0[1] as f32, c0[2] as f32) * v + Vec3::splat(0.5 * stride as f32 * v);
+        let lo = c0.map(|k| k - half);
+        let n = (stride + 2 * half + 1) as usize;
+        let (row, plane) = (self.dim, self.dim * self.dim);
+        // From the middle of the box to its corners.
+        let round = 0.5 * (n - 1) as f32 * v * 3f32.sqrt();
+        self.water.iter().position(|w| {
+            if !w.covers(mid) {
+                return false;
+            }
+            // The whole box under the water, or the whole of it over: no
+            // need to look for the ground in it.
+            let above = w.above(mid);
+            if above + round <= 0.0 {
+                return true;
+            }
+            if above - round > 0.0 {
+                return false;
+            }
+            for z in 0..n {
+                for y in 0..n {
+                    let at = [lo[0], lo[1] + y as i32, lo[2] + z as i32];
+                    let k0 = self.idx(at);
+                    for x in 0..n {
+                        let k = k0 + x;
+                        let d0 = self.dist[k];
+                        let p0 = Vec3::new((at[0] + x as i32) as f32, at[1] as f32, at[2] as f32) * v;
+                        for (axis, (step, more)) in [(1, x + 1 < n), (row, y + 1 < n), (plane, z + 1 < n)].into_iter().enumerate() {
+                            if !more {
+                                continue;
+                            }
+                            let d1 = self.dist[k + step];
+                            if (d0 < 0.0) == (d1 < 0.0) {
+                                continue;
+                            }
+                            let mut p = p0;
+                            p[axis] += v * (d0 / (d0 - d1)).clamp(0.0, 1.0);
+                            if w.above(p) > 0.0 {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+            true
+        })
+    }
+
+    /// Where the vertex of a cell wholly under `w` goes, given where the
+    /// cell's edge crossings put it (`raw`) and where it stands now (`pos`):
+    /// `None` when it is deep enough already.
+    ///
+    /// Straight down from `raw` onto the ground, looking as far as a vertex
+    /// settles; with no ground there, or ground nearer the surface than the
+    /// level's margin, at that margin under the water. A flattening level
+    /// puts every such vertex at its margin instead, whatever lies under it.
+    /// The second value is whether it landed on ground.
+    fn sink(&self, w: &WaterLevel, raw: Vec3, pos: Vec3, reach: f32) -> Option<(Vec3, bool)> {
+        let up = w.up(raw);
+        // How far down from `raw` the margin under the surface is.
+        let top = w.above(raw) + w.margin;
+        if w.flatten {
+            return Some((raw - up * top, false));
+        }
+        if w.above(pos) <= -w.margin {
+            return None;
+        }
+        let t0 = top.max(0.0);
+        let start = raw - up * t0;
+        let step = self.voxel * 0.5;
+        let (mut t_prev, mut prev) = (t0, self.d(start));
+        if prev < 0.0 {
+            return Some((start, false));
+        }
+        while t_prev < reach {
+            let t = (t_prev + (prev * 0.5).max(step)).min(reach);
+            let dk = self.d(raw - up * t);
+            if dk < 0.0 {
+                return Some((raw - up * (t_prev + (t - t_prev) * (prev / (prev - dk)).clamp(0.0, 1.0)), true));
+            }
+            (t_prev, prev) = (t, dk);
+        }
+        Some((start, false))
+    }
+
     /// How far below a surface point, along `-n`, the skirt can drop and stay a little
     /// inside the solid: down through any air first (a coarse vertex can sit a little
     /// proud of the ground), then on through the solid up to `reach`. A thin roof gets a
@@ -755,6 +856,17 @@ impl MeshScratch {
         }
         depth
     }
+}
+
+/// Where a coarse vertex came from, kept while its field has water: its
+/// cell's first voxel, where the cell's edge crossings put it, the cell's
+/// facing, and which water the cell is wholly under once that was asked.
+#[derive(Clone, Copy)]
+struct Home {
+    cell: [i32; 3],
+    raw: Vec3,
+    dir: Vec3,
+    wet: Option<Option<usize>>,
 }
 
 /// Mesh one chunk at `stride` (1 = full detail; 2^ℓ for LOD ℓ — the field resamples at
@@ -888,6 +1000,9 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
     // Per vertex: where it stood before settling, and the cell's facing, when
     // settling moved it.
     let mut unsettle: Vec<Option<(Vec3, Vec3)>> = Vec::new();
+    // Per vertex, when the field has water: its cell, where its crossings put
+    // it, the cell's facing, and the water the cell is under once asked.
+    let mut home: Vec<Home> = Vec::new();
 
     let cell_idx = |x: i32, y: i32, z: i32| {
         (((z + 1) as usize * grid) + (y + 1) as usize) * grid + (x + 1) as usize
@@ -933,6 +1048,9 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
                 ];
                 let first = m.positions.len() as u32;
                 let outer = [cx, cy, cz].iter().any(|v| *v == -1 || *v == hi - 1);
+                // The water this cell's ground is all under, found when its
+                // first vertex asks.
+                let mut wet: Option<Option<usize>> = None;
                 for sheet in 0..sheets.count {
                     let mut acc = Vec3::ZERO;
                     let mut count = 0.0f32;
@@ -967,15 +1085,45 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
                     if stride > 1 && cell_dir != Vec3::ZERO {
                         pos_field = s.settle(pos_field, cell_dir, settle_reach);
                     }
-                    let nrm = vertex_normal(s, pos_field, cell_dir);
+                    // Ground wholly under water stays under it. A coarse
+                    // vertex that found nothing to settle onto stands where
+                    // the solid-keeping corners put it, up to most of a cell
+                    // over the ground, and over a shallow sea that is above
+                    // the surface.
+                    let mut sunk = None;
+                    if !s.water.is_empty()
+                        && s.water.iter().any(|w| w.flatten || w.above(pos_field) > -w.margin)
+                        && let Some(w) = *wet.get_or_insert_with(|| s.submerged(c0))
+                    {
+                        let w = &s.water[w];
+                        sunk = s.sink(w, raw, pos_field, settle_reach).map(|(q, landed)| (q, landed, w));
+                    }
+                    // Its colour is the ground's it stands for, read before
+                    // it is moved anywhere there is no ground.
+                    let paint = match sunk {
+                        Some((q, true, _)) => q,
+                        _ => pos_field,
+                    };
                     let col = s.color_at([
-                        (pos_field.x / voxel).round() as i32,
-                        (pos_field.y / voxel).round() as i32,
-                        (pos_field.z / voxel).round() as i32,
+                        (paint.x / voxel).round() as i32,
+                        (paint.y / voxel).round() as i32,
+                        (paint.z / voxel).round() as i32,
                     ]);
+                    let nrm = match sunk {
+                        Some((q, _, w)) => {
+                            pos_field = q;
+                            if w.flatten { w.up(q).to_array() } else { vertex_normal(s, q, cell_dir) }
+                        }
+                        None => vertex_normal(s, pos_field, cell_dir),
+                    };
                     m.positions.push((pos_field - origin).to_array());
                     rim.push(outer);
-                    unsettle.push((pos_field != raw).then_some((raw, cell_dir)));
+                    // A sunk vertex is not one that settled: it stays where
+                    // it was put, and is never taken back above the water.
+                    unsettle.push((pos_field != raw && sunk.is_none()).then_some((raw, cell_dir)));
+                    if !s.water.is_empty() {
+                        home.push(Home { cell: c0, raw, dir: cell_dir, wet });
+                    }
                     m.normals.push(nrm);
                     m.colors.push(col);
                     if s.edge_reach > 0 {
@@ -1161,6 +1309,31 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
         }
         m.indices.clear();
         build(&mut m);
+    }
+
+    // Unfolding moves a vertex toward its neighbours or back to where its
+    // crossings put it, and either can lift one of a submerged cell out of
+    // the water again: such a vertex is sunk as it would have been.
+    if !home.is_empty() {
+        let mut moved = false;
+        for (v, &Home { cell: c0, raw, dir: cell_dir, wet }) in home.iter().enumerate() {
+            let p = Vec3::from(m.positions[v]) + origin;
+            // A vertex held at the margin reads a hair either side of it.
+            let hair = 1e-3 * voxel;
+            if !s.water.iter().any(|w| !w.flatten && w.above(p) > hair - w.margin) {
+                continue;
+            }
+            let Some(w) = wet.unwrap_or_else(|| s.submerged(c0)) else { continue };
+            if let Some((q, _)) = s.sink(&s.water[w], raw, p, settle_reach) {
+                m.positions[v] = (q - origin).to_array();
+                m.normals[v] = vertex_normal(s, q, cell_dir);
+                moved = true;
+            }
+        }
+        if moved {
+            m.indices.clear();
+            build(&mut m);
+        }
     }
 
     // A skirted coarse chunk caps, on its own faces, a passage its minimum closed.
@@ -2315,6 +2488,215 @@ mod tests {
             "one chunk took {busy_ms:.1} ms — something has gone wrong at a scale the \
              ratio cannot see"
         );
+    }
+
+    /// A sea floor with no land: rolling ground a few metres under `y = 0`,
+    /// set with rock stacks and thin reefs that stop short of the surface.
+    /// Plain arithmetic only, so every machine builds the same voxels.
+    fn seabed(p: Vec3) -> f32 {
+        let tri = |x: f32| ((x - x.floor()) - 0.5).abs() * 2.0;
+        let floor = -5.0 + 4.2 * tri(p.x / 23.0) * tri(p.z / 17.0);
+        // Stacks two metres across on a 19 m grid, and reefs a metre and a
+        // half thick every 31 m, all cut off half a metre under the water.
+        let cell = |x: f32, n: f32| (x - (x / n).round() * n).abs();
+        let stack = cell(p.x, 19.0).max(cell(p.z, 19.0)) - 1.0;
+        let reef = cell(p.x + p.z * 0.5, 31.0) - 0.75;
+        let rocks = stack.min(reef).max(p.y + 0.5);
+        (p.y - floor).min(rocks)
+    }
+
+    fn seabed_field() -> ChunkField {
+        let mut f = ChunkField::new(1.5);
+        f.fill_with(Vec3::new(-100.0, -12.0, -100.0), Vec3::new(100.0, 4.0, 100.0), seabed, |_| [0.5, 0.5, 0.5]);
+        f
+    }
+
+    /// The highest vertex of every chunk's skirted mesh at `stride`, by
+    /// `above`, and how many vertices stand over 0.
+    fn highest(f: &ChunkField, stride: i32, above: impl Fn(Vec3) -> f32) -> (f32, usize) {
+        let (mut top, mut over) = (f32::MIN, 0usize);
+        for c in f.chunk_coords() {
+            let m = mesh_chunk(f, c, stride, true);
+            let o = Vec3::from(m.origin);
+            // The surface's own vertices: a skirt hangs down from them.
+            let surface = m.indices[..(m.tri_count() - m.skirt_tris) * 3].iter().copied().collect::<std::collections::BTreeSet<u32>>();
+            for i in surface {
+                let h = above(Vec3::from(m.positions[i as usize]) + o);
+                top = top.max(h);
+                over += usize::from(h > 0.0);
+            }
+        }
+        (top, over)
+    }
+
+    /// A number that changes when any chunk's mesh at `stride` does: every
+    /// position, normal, colour and index, chunks in order.
+    fn mesh_stamp(f: &ChunkField, stride: i32) -> u64 {
+        let mut coords = f.chunk_coords();
+        coords.sort_unstable();
+        let mut h = 0xcbf29ce484222325u64;
+        let mut eat = |v: u32| {
+            for b in v.to_le_bytes() {
+                h = (h ^ u64::from(b)).wrapping_mul(0x100000001b3);
+            }
+        };
+        for c in coords {
+            let m = mesh_chunk(f, c, stride, true);
+            for p in m.positions.iter().chain(&m.normals) {
+                p.iter().for_each(|v| eat(v.to_bits()));
+            }
+            m.colors.iter().for_each(|c| eat(u32::from_le_bytes(*c)));
+            m.indices.iter().for_each(|i| eat(*i));
+        }
+        h
+    }
+
+    /// **Ground that is all under water is drawn under it, however coarse.**
+    /// The sea floor here never comes within three quarters of a metre of the
+    /// surface, and the full-detail mesh keeps it there. Coarser, a vertex
+    /// over a rock stack or a reef finds nothing to settle onto and stands
+    /// where the solid-keeping corners put it: up to a metre and a half out
+    /// of the water, a dark triangle in the sea from orbit. With the water's
+    /// level declared, every vertex stays at least the level's margin under.
+    #[test]
+    fn far_ground_under_a_sea_stays_under_it() {
+        let mut f = seabed_field();
+        let (top, _) = highest(&f, 1, |p| p.y);
+        assert!(top < -0.7, "the fixture: at full detail the ground reaches {top:.2}, and it should all be under water");
+        for stride in [2, 4] {
+            let (top, over) = highest(&f, stride, |p| p.y);
+            assert!(over > 50 && top > 0.5, "the fixture: at stride {stride} only {over} vertices stand out of the water, the highest at {top:.2}");
+        }
+        let level = crate::WaterLevel::flat(0.0);
+        f.set_water_levels(vec![level]);
+        for stride in [2, 4, 8] {
+            let (top, over) = highest(&f, stride, |p| p.y);
+            assert!(
+                over == 0 && top <= -level.margin + 1e-3,
+                "stride {stride}: {over} vertices of submerged ground stand out of the water, the highest at {top:.2}"
+            );
+        }
+        // Full detail is the ground as it is, and never reads the level.
+        let bare = seabed_field();
+        assert_eq!(mesh_stamp(&f, 1), mesh_stamp(&bare, 1), "a water level changed the full-detail mesh");
+    }
+
+    /// **The same on a round world, drawn from the stand-ins far ground is
+    /// kept as.** A generated planet under a sea that covers all of it: at
+    /// stride 8, what a planet is drawn at from orbit, a dozen vertices stood
+    /// up to three metres out of the water.
+    #[test]
+    fn a_far_planet_under_a_sea_stays_under_it() {
+        let sea = 158.0;
+        let mut f = solar_planet().clone();
+        let (top, _) = highest(&f, 1, |p| p.length() - sea);
+        assert!(top < 0.0, "the fixture: the planet's ground reaches {top:.2} over the sea, and it should all be under");
+        f.set_spec("a planet".into());
+        let all = f.chunk_coords();
+        assert!(f.evict(&all).len() > 200, "the fixture: the planet's chunks were not put away");
+        let (top, over) = highest(&f, 8, |p| p.length() - sea);
+        assert!(over >= 5 && top > 1.0, "the fixture: {over} vertices stand out of the sea, the highest at {top:.2}");
+        let level = crate::WaterLevel::sea(sea);
+        f.set_water_levels(vec![level]);
+        for stride in [4, 8] {
+            let (top, over) = highest(&f, stride, |p| p.length() - sea);
+            assert!(
+                over == 0 && top <= -level.margin + 1e-3,
+                "stride {stride}: {over} vertices of submerged ground stand out of the sea, the highest at {top:.2}"
+            );
+        }
+    }
+
+    /// **A field with no water meshes exactly as it always did.** The stamps
+    /// are of the meshes before a field could hold a water level, so a change
+    /// that reaches ground with no water declared fails here. So does water
+    /// that is not over the ground at all: a sea far below it, or a lake on
+    /// the other side of the world.
+    #[test]
+    fn ground_with_no_water_meshes_as_it_always_did() {
+        let mut f = seabed_field();
+        let stamps = [2, 4, 8].map(|stride| mesh_stamp(&f, stride));
+        assert_eq!(stamps, SEABED_STAMPS, "the coarse meshes of a field with no water changed");
+        // A sea below all of the ground.
+        f.set_water_levels(vec![crate::WaterLevel::flat(-40.0)]);
+        assert_eq!([2, 4, 8].map(|stride| mesh_stamp(&f, stride)), stamps, "a sea under the ground changed its meshes");
+        // A lake somewhere else.
+        f.set_water_levels(vec![crate::WaterLevel { within: Some(([900.0, 0.0, 0.0], 50.0)), ..crate::WaterLevel::flat(0.0) }]);
+        assert_eq!([2, 4, 8].map(|stride| mesh_stamp(&f, stride)), stamps, "a lake far from the ground changed its meshes");
+    }
+
+    /// [`mesh_stamp`] of [`seabed_field`] at strides 2, 4 and 8, with no
+    /// water declared.
+    const SEABED_STAMPS: [u64; 3] = [3860012198972071186, 18301435655906572928, 7930483828192108575];
+
+    /// **A shore stays where the ground puts it.** An island stands out of
+    /// the same sea floor. Declaring the water moves only vertices that
+    /// stood over submerged ground, and leaves them under the water: the
+    /// island is drawn vertex for vertex as before, and every vertex still
+    /// above the water has real land within a coarse cell of it.
+    #[test]
+    fn a_shore_is_left_where_the_ground_puts_it() {
+        let island = |p: Vec3| seabed(p).min((p - Vec3::new(10.0, -14.0, -6.0)).length() - 22.0);
+        let mut bare = ChunkField::new(1.5);
+        bare.fill_with(Vec3::new(-100.0, -12.0, -100.0), Vec3::new(100.0, 12.0, 100.0), island, |_| [0.5, 0.5, 0.5]);
+        let mut wet = bare.clone();
+        let level = crate::WaterLevel::flat(0.0);
+        wet.set_water_levels(vec![level]);
+        for stride in [4, 8] {
+            let (mut dry_land, mut moved) = (0usize, 0usize);
+            for c in bare.chunk_coords() {
+                let (a, b) = (mesh_chunk(&bare, c, stride, false), mesh_chunk(&wet, c, stride, false));
+                assert_eq!(a.positions.len(), b.positions.len(), "declaring water changed how many vertices chunk {c:?} has");
+                let o = Vec3::from(a.origin);
+                for (pa, pb) in a.positions.iter().zip(&b.positions) {
+                    let (pa, pb) = (Vec3::from(*pa) + o, Vec3::from(*pb) + o);
+                    // What moves ends under the water: the vertices sunk,
+                    // and any that unfold differently beside one.
+                    if pa != pb {
+                        moved += 1;
+                        assert!(pb.y <= -level.margin + 1e-3, "a vertex at {pa} moved to {pb}, out of the water");
+                    }
+                    if pb.y > 0.0 {
+                        dry_land += 1;
+                        // Land within the cell the vertex stands for, and the
+                        // half a stride its corners read round it.
+                        let reach = 1.5 * stride as f32 * 1.5 * 3f32.sqrt() + 1.5;
+                        let near = (pb - Vec3::new(10.0, 0.0, -6.0)).length() - (22.0f32.powi(2) - 14.0f32.powi(2)).sqrt();
+                        assert!(near <= reach, "stride {stride}: a vertex at {pb} stands out of the water {near:.1} m from the island's shore");
+                    }
+                }
+            }
+            assert!(dry_land > 20, "stride {stride}: the island is drawn with {dry_land} vertices above the water");
+            assert!(moved > 0 || stride == 8, "stride {stride}: the fixture has no vertex to sink");
+        }
+    }
+
+    /// **A flattening level draws submerged ground flat.** Every vertex of
+    /// ground wholly under the water sits at the level's margin under it,
+    /// whatever depth the floor is at, and faces straight up.
+    #[test]
+    fn a_flattening_level_draws_the_seabed_flat() {
+        let mut f = seabed_field();
+        let level = crate::WaterLevel { flatten: true, margin: 0.5, ..crate::WaterLevel::flat(0.0) };
+        f.set_water_levels(vec![level]);
+        for stride in [2, 8] {
+            let mut n = 0usize;
+            for c in f.chunk_coords() {
+                let m = mesh_chunk(&f, c, stride, false);
+                let o = Vec3::from(m.origin);
+                for (p, nrm) in m.positions.iter().zip(&m.normals) {
+                    let p = Vec3::from(*p) + o;
+                    // The field ends in a wall at its edge, which is not sea floor.
+                    if p.x.abs() > 80.0 || p.z.abs() > 80.0 {
+                        continue;
+                    }
+                    n += 1;
+                    assert!((p.y + 0.5).abs() < 1e-3, "stride {stride}: a vertex of the seabed at {p}, not half a metre under");
+                    assert_eq!(*nrm, [0.0, 1.0, 0.0]);
+                }
+            }
+            assert!(n > 100, "stride {stride}: only {n} vertices");
+        }
     }
 
     /// LOD strides must produce progressively cheaper meshes of the same surface.

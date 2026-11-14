@@ -333,6 +333,11 @@ pub(crate) struct TerrainRender {
     /// The impostor sphere's albedo — the body's average surface color, sampled
     /// from the field once on the first switch to impostor mode.
     pub impostor_color: Option<[f32; 3]>,
+    /// The radius the impostor sphere stays within, in the field's units, so
+    /// a body whose ground is all under a sea is not drawn standing out of
+    /// it ([`crate::terrain_water::impostor_water_cap`]): infinite for a body
+    /// with no such sea, `None` until asked or when its water changes.
+    pub impostor_cap: Option<f32>,
     /// The meshes of the chunks drawn at the coarsest level, kept so they can
     /// be drawn [`FAR_GROUP`]³ to a draw ([`Self::groups`]).
     pub far: HashMap<[i32; 3], floptle_field::ChunkMesh>,
@@ -1787,6 +1792,9 @@ impl Editor {
         if self.terrain_worker.is_none() && !self.terrains.is_empty() {
             self.terrain_worker = Some(TerrainWorker::spawn_drawn());
         }
+        // The water each terrain's far ground is kept under: a change asks
+        // for the coarse meshes it reaches again.
+        self.sync_terrain_water();
         // Moving bodies hold the ground under them at full detail too: what a
         // body lands on is drawn as it collides, however far from the camera.
         // How far the meshes look for ground of another material: as far as
@@ -1928,6 +1936,10 @@ impl Editor {
                 if render.impostor_color.is_none() {
                     render.impostor_color =
                         Some(impostor_surface_color(&terrain.field, cb.body_radius as f32, &slot_means));
+                }
+                if render.impostor_cap.is_none() {
+                    render.impostor_cap =
+                        Some(crate::terrain_water::impostor_water_cap(&terrain.field, cb.body_radius as f32));
                 }
                 if render.impostor {
                     render.pending.clear();
@@ -2399,7 +2411,12 @@ pub(crate) fn push_terrain_instances(
             let wt = floptle_core::world_transform(world, e);
             let rel = wt.translation - cam_world;
             let dist = rel.length();
-            let r_eff = cb.body_radius.max(dist * 0.0022);
+            // Under the sea its ground is all under, when it has one.
+            let body = match render.impostor_cap {
+                Some(cap) if cap.is_finite() => cb.body_radius.min(f64::from(cap * wt.scale.x.max(1e-6))),
+                _ => cb.body_radius,
+            };
+            let r_eff = body.max(dist * 0.0022);
             // uv_sphere(0.85): the registered primitive sphere's radius.
             let scale = (r_eff / 0.85) as f32;
             let model = Mat4::from_scale_rotation_translation(

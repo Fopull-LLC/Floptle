@@ -315,6 +315,7 @@ mod templates;
 mod terrain_edit;
 #[cfg(feature = "editor-ui")]
 mod terrain_ui;
+mod terrain_water;
 mod tile_edit;
 #[cfg(feature = "editor-ui")]
 mod tile_ui;
@@ -2675,6 +2676,9 @@ struct Editor {
     /// When a game's planets draw as their impostors (`terrain.impostorAt`),
     /// by terrain id; a body not here switches at the default distance.
     terrain_impostor_rules: std::collections::HashMap<u32, floptle_script::ImpostorRule>,
+    /// The water a game set for a terrain's far ground (`terrain.setWaterLevel`),
+    /// by terrain id; one not here follows the water declared on it.
+    terrain_water_rules: std::collections::HashMap<u32, floptle_script::TerrainWaterRule>,
     /// Ground was let go of (a world landed, far chunks were put away), and
     /// the memory it held is to go back to the system; and when it last did.
     terrain_trim_due: bool,

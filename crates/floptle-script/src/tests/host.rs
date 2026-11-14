@@ -1592,6 +1592,62 @@ fn a_planet_asked_for_without_a_generator_is_made_by_the_projects() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **`terrain.setWaterLevel` hands the engine each terrain's water, in
+/// order, and refuses what it cannot use.** A number is a level, nil the
+/// water declared on the terrain, false none; the options are read by name.
+#[test]
+fn water_level_rules_reach_the_engine_in_order() {
+    use crate::{TerrainWater, TerrainWaterRule};
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_water_level_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "sea",
+        "function start()\n\
+           terrain.setWaterLevel(3, 805)\n\
+           terrain.setWaterLevel(4, 12.5, { margin = 1, flatten = true, flat = true })\n\
+           terrain.setWaterLevel(3, false)\n\
+           terrain.setWaterLevel(3)\n\
+           local a = select(2, pcall(terrain.setWaterLevel, 5, 'sea'))\n\
+           local b = select(2, pcall(terrain.setWaterLevel, 5, 10, { margin = -1 }))\n\
+           local c = select(2, pcall(terrain.setWaterLevel, 5, 10, { flattened = true }))\n\
+           log(tostring(a)) log(tostring(b)) log(tostring(c))\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+        kind: "sea".into(),
+        enabled: true,
+        params: Vec::new(),
+        refs: Vec::new(),
+        strs: Vec::new(),
+        pinned_bools: None,
+    }]));
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let plain = TerrainWaterRule::default();
+    assert_eq!(
+        host.take_terrain_water_levels(),
+        [
+            (3, TerrainWaterRule { water: TerrainWater::At(805.0), ..plain }),
+            (4, TerrainWaterRule { water: TerrainWater::At(12.5), margin: Some(1.0), flatten: true, flat: Some(true) }),
+            (3, TerrainWaterRule { water: TerrainWater::Off, ..plain }),
+            (3, plain),
+        ]
+    );
+    assert!(host.take_terrain_water_levels().is_empty());
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(said[0].contains("the level is a number"), "{said:?}");
+    assert!(said[1].contains("margin is 0 or more"), "{said:?}");
+    assert!(said[2].contains("flattened"), "an unknown key is not named: {said:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **`terrain.impostorAt` hands the engine a body's rule, in order, and
 /// refuses one it cannot use.** Radii or pixels, not both; no rule is the
 /// default again.

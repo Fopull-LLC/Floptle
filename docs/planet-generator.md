@@ -60,6 +60,40 @@ end)
 terrain.planetRivers(opts, function(channels) rivers = channels end)
 ```
 
+## Far ground under water
+
+Ground a long way from the camera is drawn simplified: one vertex for every 2, 4 or 8 voxels. Over a sea floor a few metres down, a simplified vertex can come to rest above the water, and from orbit the seabed shows as dark triangles standing out of the sea. Tell the terrain where its water is and that stops: far ground whose own surface is all under the water is drawn under it.
+
+Most games tell it by declaring the water, which they do anyway. A terrain takes its water from:
+
+- a **Water Volume** sea centred on the terrain, or one that is a child of it;
+- a Water Volume **pool** that is a child of the terrain: flat water over the pool's own footprint;
+- every lake a script declares about the terrain's centre (`water.addVolume{ shape = "lake" }`): water over that lake's own basin.
+
+A script can set the level itself, which replaces all of those, or turn it off:
+
+```lua
+terrain.setWaterLevel(1, 805)                    -- a planet: 805 m from its centre
+terrain.setWaterLevel(2, 12, { flat = true })    -- flat ground: 12 m up its own +Y
+terrain.setWaterLevel(1, 805, { margin = 1, flatten = true })
+terrain.setWaterLevel(1)                         -- back to the declared water
+terrain.setWaterLevel(1, false)                  -- none: drawn as if it had no water
+```
+
+A level is in the terrain's own frame, so a planet that moves, turns or is drawn at another scale keeps its sea. On a terrain with a Celestial Body a number is a radius, on any other a height; `flat` says which when that guess is wrong.
+
+What the level changes, and what it leaves alone:
+
+- **Only simplified ground.** Ground near the camera is drawn at full detail and never reads the level. Nothing about collision changes either.
+- **Only ground that is wholly under water.** A simplified vertex stands for a cell of ground. Where every part of that cell's real surface is under the water, a vertex left above it is dropped straight down onto the ground, or held `margin` metres under the surface where there is no ground beneath it within reach. A cell with any ground above the water is left exactly as it was, so a coast from afar is where the ground puts it, to within one simplified cell.
+- **`margin`** (0.25 m) is also the least depth any such vertex is left at. Raise it for a sea with tall waves, or one drawn as a coarse mesh whose flat faces dip under the true sphere.
+- **`flatten = true`** draws every wholly submerged cell flat at `margin` under the surface, whatever depth its floor is at. The default keeps the floor's own depth, which is what water that shades by depth wants to see; flatten suits water clear enough that the simplified floor's facets show through it.
+- **A far ball too.** A planet far enough to draw as one shaded ball draws it under its sea, when every part of the ground the ball is sampled from is under water.
+
+A level that changes (a tide, a lake declared mid-game) is not applied in the frame it changes: the simplified chunks it reaches are meshed again in the background, a few a frame, each drawing as it was until its new mesh is ready.
+
+A terrain with no water declared on it and no level set is meshed exactly as it always was. Simulated water and heightfields (`shape = "sim"`, `"heightfield"`) set no level on their own, because their surface is not one height: give the terrain a level by hand where one fits.
+
 ## Surface materials by climate
 
 `biomes` is a list of rules. For every patch of surface, the first rule whose ranges all match paints it with that rule's `slot` and `color`. A range left out does not constrain. Ground that no rule matches falls back to `surfaceA` and `surfaceB`, as before. Deeper layers (`subsoil`, `strata`, `deep`, pockets and seams) are unchanged.
@@ -271,7 +305,7 @@ terrain.generatePlanet(1, {
 })
 ```
 
-The sea itself is not part of the terrain: place a WaterVolume at the sea level.
+The sea itself is not part of the terrain: place a WaterVolume at the sea level. Centred on the planet, it also keeps the far seabed drawn under the water (see [Far ground under water](#far-ground-under-water)).
 
 **Karst arches.** Steep overhanging limestone towers on a flat plain.
 

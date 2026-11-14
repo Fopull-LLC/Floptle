@@ -414,7 +414,7 @@ pub use net_api::{
 };
 pub use assembly_api::{AssemblyCmd, AssemblyImpact, AssemblyInfo};
 pub use space_api::{belt_orbits, SpaceBodyInfo, SpaceInfo};
-pub use terrain_api::{ImpostorRule, LodAnchor, MAX_PENDING_OPS, PrepareAsk, TERRAIN_EDIT_BUDGET_MS, TerrainCopy, TerrainEdit, TerrainOp, TerrainOpMode, TerrainYield, UnmadeRegion, copy_terrain_files};
+pub use terrain_api::{ImpostorRule, TerrainWater, TerrainWaterRule, LodAnchor, MAX_PENDING_OPS, PrepareAsk, TERRAIN_EDIT_BUDGET_MS, TerrainCopy, TerrainEdit, TerrainOp, TerrainOpMode, TerrainYield, UnmadeRegion, copy_terrain_files};
 pub use rollback_api::{ScriptState, MAX_STATE_DEPTH};
 pub use view_api::ViewInfo;
 
@@ -780,6 +780,8 @@ pub struct ScriptHost {
     terrain_generator: Rc<std::cell::Cell<u32>>,
     /// `terrain.impostorAt` calls the engine has not taken yet.
     terrain_impostors: terrain_api::ImpostorCalls,
+    /// `terrain.setWaterLevel` calls the engine has not taken yet.
+    terrain_water_levels: terrain_api::WaterLevelCalls,
     /// `terrain.generatePlanet(id, opts)` requests — heavyweight whole-field
     /// generations the editor runs on a background thread.
     terrain_generates: Rc<RefCell<Vec<(u32, floptle_field::procgen::PlanetFill)>>>,
