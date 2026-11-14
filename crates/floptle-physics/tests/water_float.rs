@@ -21,6 +21,7 @@ fn sea_with(body: RigidBody) -> (Sim, Entity) {
         frozen: false,
         entity: 7,
         carry: Default::default(),
+        swell: None,
     });
     (sim, e)
 }

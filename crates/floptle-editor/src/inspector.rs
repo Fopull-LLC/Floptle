@@ -2528,7 +2528,7 @@ fn water_swell_ui(ui: &mut egui::Ui, waves: &mut Vec<floptle_core::water::Wave>)
     let mut changed = false;
     ui.label("swell");
     ui.small(
-        "Waves on the surface. Bodies float on them, water.at and splashes          answer at them, and a shader on the surface moves with the same          waves: output offset = waterSwell(objectPos). Directions run along          the node's own x and z; on a Sea, round the sphere from its +Y.",
+        "Waves on the surface. Bodies float on them, water.at and splashes answer at them, and a shader on the surface moves with the same waves: output offset = waterSwell(objectPos). Directions run along the node's own x and z; on a Sea, round the sphere from its +Y.",
     );
     let mut remove = None;
     for (i, w) in waves.iter_mut().enumerate() {
@@ -2556,7 +2556,7 @@ fn water_swell_ui(ui: &mut egui::Ui, waves: &mut Vec<floptle_core::water::Wave>)
             }
             changed |= slider(ui, egui::Slider::new(&mut w.steepness, 0.0..=1.0), "steepness")
                 .on_hover_text(
-                    "0 is a rolling sine. 1 is a true deep-water wave, whose crests                      sharpen and troughs flatten. Waves too steep to sum are eased                      back together so the surface never folds over.",
+                    "0 is a rolling sine. 1 is a true deep-water wave, whose crests sharpen and troughs flatten. Waves too steep to sum are eased back together so the surface never folds over.",
                 )
                 .changed();
             let mut own = w.speed.is_some();

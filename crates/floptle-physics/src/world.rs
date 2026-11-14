@@ -7989,6 +7989,7 @@ mod water_float_tests {
             frozen: false,
             entity: 7,
             carry: Default::default(),
+            swell: None,
         });
         w
     }

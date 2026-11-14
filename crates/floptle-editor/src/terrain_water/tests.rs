@@ -17,6 +17,7 @@ fn water(kind: WaterKind, radius: f32, half: [f32; 3]) -> Matter {
         tint: [0.1, 0.3, 0.4],
         visibility: 28.0,
         underwater: true,
+        waves: Vec::new(),
     }
 }
 
