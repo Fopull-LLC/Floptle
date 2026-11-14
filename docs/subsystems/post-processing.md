@@ -266,6 +266,7 @@ Seven ops, `screen` category, available **only** in `stage post`:
 | `cameraPosition()` | where the camera is in the world. 32-bit, so coarse far from the origin: measure heights from a nearby point (a planet's centre), not from zero |
 | `screenTexel()` | one pixel, in uv. Follows the **retro** resolution, so an effect written in texels stays one pixel wide instead of being magnified by the upscale |
 | `sceneWaterDepth()` | how far under the water's surface the **camera** is, in world units; 0 in air. See "An underwater pass of your own" below |
+| `skyRadiance(dir, roughness?)` | the sky the frame captured, seen along a **world** direction, in real light: the same sky a surface reflects. `skyRadiance(sceneRay())` is the sky behind a pixel; roughness 0 is sharp, 1 a matte blur. Black when no sky was captured |
 
 `cameraPosition() + sceneRay() * sceneDepth()` is the world point a pixel
 shows, so a screen pass can paint a sky by direction, fog by height, or a grid on

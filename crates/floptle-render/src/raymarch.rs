@@ -1442,6 +1442,12 @@ impl Raymarch {
         self.env.mips()
     }
 
+    /// The sky this frame captured, as `skyRadiance` reads it: what a screen
+    /// shader is handed so it can see the same sky a surface reflects.
+    pub fn env_view(&self) -> &wgpu::TextureView {
+        self.env.view()
+    }
+
     /// Swap in a baked GI volume (or clear it back to none).
     ///
     /// This is an UPLOAD, not a bake: `leak`, `intensity` and the debug view are

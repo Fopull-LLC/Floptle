@@ -372,6 +372,10 @@ pub struct SsaoFrame<'a> {
     /// How far under the water's surface the camera is, in world units (0 in
     /// air), for `sceneWaterDepth`.
     pub water_depth: f32,
+    /// The sky the frame captured (the raymarch pass's environment map), for
+    /// `skyRadiance` in a screen shader. `None` reads black, as a surface
+    /// does with no sky captured.
+    pub sky: Option<&'a wgpu::TextureView>,
 }
 
 /// The camera a `stage post` shader reads — `PostCam` in `post_prelude.wgsl`.
@@ -514,6 +518,50 @@ pub(crate) mod layouts {
                 },
             ],
         })
+    }
+
+    /// An authored screen shader's group(1): [`depth`]'s two, and the sky the
+    /// frame captured with its sampler at bindings 2 and 3, for `skyRadiance`.
+    pub fn flsl(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
+        let mut entries = vec![
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ];
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        });
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        });
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries: &entries })
     }
 
     /// Motion blur's group(1): [`depth`]'s two, and the last frame's view
@@ -667,7 +715,7 @@ impl PostShaders {
     pub fn new(gpu: &Gpu) -> Self {
         let device = &gpu.device;
         let chain_layout = layouts::chain(device);
-        let depth_layout = layouts::depth(device, "post-flsl-depth");
+        let depth_layout = layouts::flsl(device, "post-flsl-depth");
         // A layout is a handful of bytes, so all nine are made here: a build
         // on a worker thread then needs nothing from the registry but a clone.
         let params_layouts: Vec<_> =
@@ -1006,6 +1054,11 @@ pub struct PostStack {
     hist_valid: std::cell::Cell<bool>,
     dof_layout: wgpu::BindGroupLayout,
     dof_cam_buf: wgpu::Buffer,
+    /// An authored screen shader's group(1) ([`layouts::flsl`]), and what its
+    /// sky reads when the frame captured none: one black texel, so
+    /// `skyRadiance` answers black as a surface's reflection does.
+    flsl_layout: wgpu::BindGroupLayout,
+    no_sky: (wgpu::TextureView, wgpu::Sampler),
     /// A 1×1 depth texture left at FAR — what an authored post pass reads when
     /// the frame came with no depth. Allocated once, because the alternative is
     /// binding nothing, and a bind group with a missing entry is not a quiet
@@ -1077,6 +1130,8 @@ impl PostStack {
         // Depth of field's second group — the same shape an authored post pass
         // reads its depth through (`layouts::depth`), so the two cannot drift.
         let dof_layout = layouts::depth(device, "post-dof");
+        let flsl_layout = layouts::flsl(device, "post-flsl-depth");
+        let no_sky = crate::env::EnvMap::empty(device);
         let ao_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("post-ao"),
             entries: &[
@@ -1349,6 +1404,8 @@ impl PostStack {
             hist_valid: std::cell::Cell::new(false),
             dof_layout,
             dof_cam_buf,
+            flsl_layout,
+            no_sky,
             _far_depth: far_depth,
             far_depth_view,
         }
@@ -1830,9 +1887,10 @@ impl PostStack {
                 eye: ssao.map(|f| [f.eye[0], f.eye[1], f.eye[2], 0.0]).unwrap_or_default(),
             };
             gpu.queue.write_buffer(&self.dof_cam_buf, 0, bytemuck::bytes_of(&cam));
+            let sky = ssao.and_then(|f| f.sky).unwrap_or(&self.no_sky.0);
             let depth_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("post-flsl-depth"),
-                layout: &self.dof_layout,
+                layout: &self.flsl_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -1842,6 +1900,8 @@ impl PostStack {
                         binding: 1,
                         resource: self.dof_cam_buf.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(sky) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.no_sky.1) },
                 ],
             });
             // The chain params an authored pass can read: the texel (so an

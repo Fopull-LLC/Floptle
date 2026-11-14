@@ -1100,6 +1100,7 @@ impl Editor {
                         inv_view: cam.view_matrix().inverse().to_cols_array_2d(),
                         eye: cam.world_position.as_vec3().to_array(),
                         water_depth,
+                        sky: Some(raymarch.env_view()),
                     };
                     // In retro mode the chain writes the retro colour target and
                     // the nearest-neighbour blit carries the finished picture up;

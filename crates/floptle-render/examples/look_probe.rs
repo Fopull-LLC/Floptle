@@ -196,6 +196,7 @@ fn main() {
         inv_view: glam::Mat4::IDENTITY.to_cols_array_2d(),
         eye: [0.0; 3],
         water_depth: 0.0,
+        sky: None,
     };
 
     let shot = |raster: &mut Raster, name: &str, s: &PostSettings| -> Vec<u8> {

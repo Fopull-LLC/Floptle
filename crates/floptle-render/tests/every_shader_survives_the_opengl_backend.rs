@@ -64,7 +64,7 @@ fn textured_post_module() -> String {
         "shader caustics {\n  stage post\n  texture pattern\n  texture flow\n  uniform bodies: vec4[8]\n  \
          let world = cameraPosition() + sceneRay() * sceneDepth()\n  \
          let c = sample(pattern, uv + sample(flow, uv).xy) + sampleTriplanar(pattern, world, vec3(0, 1, 0))\n  \
-         output color = sceneColor().rgb + c.rgb * bodies[3].w * sceneWaterDepth()\n}\n",
+         output color = sceneColor().rgb + c.rgb * bodies[3].w * sceneWaterDepth() + skyRadiance(sceneRay(), 0.2)\n}\n",
     )
     .expect("a textured screen shader compiles");
     format!(

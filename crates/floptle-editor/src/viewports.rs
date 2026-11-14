@@ -775,6 +775,7 @@ impl Editor {
                 inv_view: cam.view_matrix().inverse().to_cols_array_2d(),
                 eye: cam.world_position.as_vec3().to_array(),
                 water_depth,
+                sky: self.raymarch.as_ref().map(|r| r.env_view()),
             };
             let out = if scaled_on {
                 retro_views.as_ref().map(|(c, _)| c.clone()).unwrap_or_else(|| cv.clone())

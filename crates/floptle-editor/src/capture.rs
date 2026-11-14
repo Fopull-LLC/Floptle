@@ -235,6 +235,7 @@ pub(crate) fn render_frame_texture(
         inv_view: cam.view_matrix().inverse().to_cols_array_2d(),
         eye: cam.world_position.as_vec3().to_array(),
         water_depth,
+        sky: ed.raymarch.as_ref().map(|r| r.env_view()),
     };
     // Where the chain lands: the retro target when there is one, the picture
     // itself otherwise. (`out` is the file; this is the texture.)

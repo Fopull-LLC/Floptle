@@ -490,6 +490,14 @@ const PV_WALL_Z: f32 = 9.0;
 
 fn flsl_post_texel() -> vec2<f32> { return p.a.xy; }
 
+// The tile's camera: at the origin of the world, looking down -z through a
+// 60° lens, in air.
+fn flsl_post_ray(uv: vec2<f32>) -> vec3<f32> {
+    return normalize(vec3<f32>((uv.x * 2.0 - 1.0) * 0.577, (1.0 - uv.y * 2.0) * 0.577, -1.0));
+}
+fn flsl_post_camera() -> vec3<f32> { return vec3<f32>(0.0); }
+fn flsl_post_water_depth() -> f32 { return 0.0; }
+
 // How far into the ball this uv lands (negative = outside), in tile units.
 fn pv_ball(uv: vec2<f32>) -> f32 {
     let q = uv * 2.0 - 1.0;
@@ -688,6 +696,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A screen shader can read the sky.** `skyRadiance` in a `stage post`
+    /// shader compiles against the real screen prelude, which binds the
+    /// frame's sky, and against the preview's, which stands a gradient in for
+    /// it (as it stands in a camera for `sceneRay`, `cameraPosition` and
+    /// `sceneWaterDepth`, which the preview once lacked); a UI shader still
+    /// has no sky to read.
+    #[test]
+    fn a_screen_shader_reads_the_sky_in_the_frame_and_in_its_preview() {
+        let src = "shader sheen {\n  stage post\n  let sky = skyRadiance(sceneRay(), 0.3) + skyRadiance(vec3(0, 1, 0))\n  \
+                   output color = sceneColor().rgb + sky * 0.1 + cameraPosition() * sceneWaterDepth()\n}\n";
+        let compiled = crate::compile_post(src).expect("skyRadiance is allowed in a screen shader");
+        let prelude = format!("{}\n{}", crate::transpile::POST_PRELUDE, crate::transpile::POST_FIELD_SHIM);
+        crate::transpile::validate(&prelude, &compiled.chunk).unwrap_or_else(|e| panic!("naga rejects: {}", e.message));
+        assert!(compiled.chunk.contains("env_radiance("), "{}", compiled.chunk);
+        let pv = preview_of(src);
+        if let Err(d) = validate_module(&pv.wgsl) {
+            panic!("the preview module is rejected: {}", d.message);
+        }
+        let ui = "shader u {\n  stage ui\n  output color = vec4(skyRadiance(vec3(0, 1, 0)), 1)\n}\n";
+        assert!(crate::compile_ui(ui).is_err(), "a UI shader read the sky");
     }
 
     #[test]
