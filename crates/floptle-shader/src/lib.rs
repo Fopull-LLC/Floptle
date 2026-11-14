@@ -877,4 +877,61 @@ mod screen_pass_tests {
             naga(&c);
         }
     }
+
+    /// `skyVisibility(p [, n])` and `localLight(p, n)` are surface ops that
+    /// call the lit path's own two functions. A shader written before them
+    /// that uses either name for a value of its own still compiles, and
+    /// reads its own value.
+    #[test]
+    fn a_surface_reads_the_sky_that_reaches_it_and_the_lamps_near_it() {
+        let lit = |c: &crate::CompiledFragment| {
+            crate::transpile::validate(crate::transpile::TEST_PRELUDE, &c.chunk)
+                .unwrap_or_else(|e| panic!("naga rejects: {} (chunk line {:?})\n{}", e.message, e.chunk_line, c.chunk))
+        };
+        let c = crate::compile_fragment(
+            "shader pool {\n  stage fragment\n  let n = normalize(normal + vec3(0.1, 0, 0))\n  \
+             let sky = vec3(0.5, 0.6, 0.8) * skyVisibility(worldPos)\n  \
+             let lamp = vec3(0.1, 0.3, 0.4) * localLight(worldPos, n)\n  \
+             let open = skyOcclusion(worldPos, n) * skyOcclusion(worldPos, normal, 6)\n  \
+             output color = vec4(sky * skyVisibility(worldPos, n) * open + lamp, 1)\n}\n",
+        )
+        .expect("compiles");
+        assert!(
+            c.chunk.contains("sky_visibility(in.view_pos, facing_normal(normalize(in.normal), front), g.ambient.rgb)"),
+            "with no normal given it is the surface's own:\n{}",
+            c.chunk
+        );
+        assert!(c.chunk.contains("sky_visibility(in.view_pos, normalize(") && c.chunk.contains("local_light(in.view_pos, normalize("), "{}", c.chunk);
+        // The reach is 32 when it is left out.
+        assert!(c.chunk.contains("32.0)") && c.chunk.contains("6.0)") && c.chunk.matches("sky_occlusion(in.view_pos, normalize(").count() == 2, "{}", c.chunk);
+        lit(&c);
+        // A screen pass binds neither the field, the probes nor the lamps.
+        for (stage, out) in [("post", "color = vec3(V)"), ("ui", "color = vec4(vec3(V), 1)"), ("sky", "color = vec3(V)")] {
+            for call in ["skyVisibility(vec3(0))", "localLight(vec3(0), vec3(0, 1, 0)).x", "skyOcclusion(vec3(0), vec3(0, 1, 0))"] {
+                let src = format!("shader s {{\n  stage {stage}\n  output {}\n}}\n", out.replace('V', call));
+                let ir = crate::text::parse(&src).expect("parses");
+                let errs = crate::ir::check(&ir).expect_err("a surface op");
+                assert!(errs.iter().any(|e| e.message.contains("is not available in")), "{stage}: {errs:?}");
+            }
+        }
+        let err = crate::compile_fragment("shader s {\n  stage fragment\n  output color = vec3(1)\n  output offset = vec3(0, skyVisibility(objectPos), 0)\n}\n")
+            .expect_err("a vertex has no sky share");
+        assert!(err.contains("skyVisibility"), "{err}");
+        for body in [
+            "let skyVisibility = saturate(normal.y)\n  output color = vec3(skyVisibility)",
+            "uniform skyVisibility: float = 0.5\n  output color = vec3(skyVisibility)",
+            "let localLight = vec3(1, 0.8, 0.6) * saturate(normal.x)\n  output color = localLight",
+            "uniform localLight: color = #ffcc88\n  output color = localLight.rgb",
+            "let skyOcclusion = 1 - saturate(normal.y)\n  output color = vec3(skyOcclusion)",
+        ] {
+            let c = crate::compile_fragment(&format!("shader old {{\n  stage fragment\n  {body}\n}}\n"))
+                .unwrap_or_else(|e| panic!("a shader that already used the name no longer compiles: {e}"));
+            assert!(
+                !c.chunk.contains("sky_visibility(") && !c.chunk.contains("local_light(") && !c.chunk.contains("sky_occlusion("),
+                "the shader's own value was replaced by the op:\n{}",
+                c.chunk
+            );
+            lit(&c);
+        }
+    }
 }

@@ -795,10 +795,7 @@ fn fs(in: VOut) -> FsOut {
             let albedo = terrain_albedo(p, n, m.col);
             // SDF AO (PostProcess node, `Sdf` mode): darkens all received light
             // below, but never emissive — a glowing surface stays glowing.
-            var occ = 1.0;
-            if (G.ao_params.x > 0.5) {
-                occ = sdf_ao(p, n);
-            }
+            let occ = scene_ao(p, n);
             let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
             var col: vec3<f32>;
             if (G.shape_meta.x >= 0.5 && custom_d(p) <= m.d + 1e-4) {

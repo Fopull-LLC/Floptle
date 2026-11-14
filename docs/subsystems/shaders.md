@@ -372,6 +372,69 @@ For light the engine does not do for you, such as a glint or a subsurface glow,
 by stars the dominant one) and `lightColor` is its colour times its intensity.
 Both are fragment-stage inputs, in the same space as `normal`.
 
+**Under cover.** `skyRadiance` is the open sky whatever stands over a surface,
+so water that lights itself with it glows pale at the bottom of a shaft while
+the lit rock beside it is dark. Three ops give such a shader the parts of the
+engine's own lighting it is missing, in the same units as `skyRadiance` and
+`litSurface`:
+
+- `skyVisibility(worldPos [, n])`, 0..1, is how much of the sky's ambient
+  reaches that point facing `n` (the surface's own normal when omitted): 1 in
+  the open, toward 0 in a cave, a shaft or a room a light probe volume baked
+  dark. Never more than 1 (a probe volume baked brighter than the open sky
+  gives 1).
+- `skyOcclusion(worldPos, n [, reach])`, 0..1, is the share of a small cone
+  of sky rays around `n` that get away: four fixed directions, cosine-weighted,
+  each marched up to `reach` units (32 when omitted) against exactly what a
+  sun shadow marches (terrain, blobs, Field Shapes, baked mesh occluders and
+  collider proxies). Cover past `reach` does not count. It needs no setting
+  and no bake, so a cave in a streamed terrain lit with screen-space AO reads
+  dark, but it is four shadow rays a pixel.
+- `localLight(worldPos, n)` is the placed lights alone (point, spot and area
+  lamps, with their shadows and the same ambient occlusion the lit path puts
+  on them) on a matte surface: no sun, no sky. `albedo * localLight(worldPos,
+  n)` is a lamp on your surface exactly as on a matte lit material beside it.
+
+**Where `skyVisibility`'s answer comes from.** Where the engine darkens its own
+lit surfaces' ambient, it is exactly the share they get: the scene's SDF
+ambient occlusion (PostProcess AO `Sdf`) times what the probe volumes give
+against the flat ambient, from the same functions the lit path calls, so the
+water and the lit rock beside it cannot disagree. Where the engine has no such
+term, the lit rock is not darkened at all (screen-space AO darkens it on the
+screen, but that is not something a shader can ask about a point), and
+`skyVisibility` falls back to `skyOcclusion` with its default reach. How much
+the engine's own term covers a point is the larger of the SDF AO's trust there
+(the AO fades out where the field's voxels are too coarse for its radius, as
+on a planet seen through its proxy) and the probe volumes' coverage: fully
+covered, the built-in share and no march; not covered at all, the cone; in
+between, the cone fills only the part the engine leaves out. So
+`skyVisibility` is the one to call; reach for `skyOcclusion` when you want the
+cone everywhere, or a reach of your own.
+
+```
+let open = skyVisibility(worldPos, n)
+let sky = skyRadiance(reflect(-viewDir, n)) * open
+let amb = deep * skyRadiance(n, 1) * open
+output color = vec4(amb + sky * fresnel + deep * localLight(worldPos, n), 1)
+```
+
+All three are surface (`stage fragment`) ops. A screen shader (`stage post`)
+does not get them: the post chain binds neither the scene's field, its probes
+nor its lamps, and a post pass relighting the frame would light what is
+already lit. The names were added after shaders existed, so a shader that
+already used `skyVisibility`, `skyOcclusion` or `localLight` as a name of its
+own still compiles and reads its own value. A shader that calls none of them
+is unchanged.
+
+What they cost, measured in `cave_water_probe` with `FLOPTLE_GPU_TIMING=1`
+(2560x1440 on an RTX 4060, the water filling the frame under an overhang,
+beside a lamp): `skyVisibility` where the scene has SDF AO and a probe volume
+about 0.9 ms a frame, `localLight` about 0.4 ms more; `skyVisibility` falling
+back in a scene with neither, or `skyOcclusion` itself, about 2.3 ms. A pool
+covers far less of a real frame than that, and the cone's cost grows with
+what its rays pass near (a terrain volume costs more per step than the
+probe's blobs and one box).
+
 ### 4.5 Moving the surface: `output offset`
 
 A surface shader can move the geometry it is on. `output offset` is a `vec3`

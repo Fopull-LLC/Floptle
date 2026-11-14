@@ -1123,6 +1123,22 @@ fn gi_only_gate() -> f32 {
     return select(1.0, 0.0, G.gi_meta.y > 0.5);
 }
 
+// What the placed lights (point, spot and area) give a matte surface at
+// camera-relative `pos_rel` facing `n`, with their local shadows: the term a
+// lit surface multiplies its albedo by, next to the ambient and the key light
+// and holding neither. One function for the lit path and for a shader that
+// lights itself (`localLight`), so a lamp reads the same on both.
+fn local_light(pos_rel: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
+    return point_diffuse_lit(pos_rel, n, pix) * gi_only_gate();
+}
+
+// FLSL's `localLight`: [`local_light`] as it reaches a lit surface, which
+// `fs` then darkens by the scene's ambient occlusion along with everything
+// else it lit. A lamp in a crevice is dimmer on the rock, and so on the water.
+fn flsl_local_light(pos_rel: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
+    return local_light(pos_rel, n, pix) * scene_ao(pos_rel, n);
+}
+
 struct VsIn {
     // Indexes this vertex's slot in the mesh's `vpaint` block. Under an indexed draw
     // with base_vertex = 0 (what this pass issues) this is the index-buffer value —
@@ -2930,10 +2946,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // work when their Lighting/PostProcess switches are off; only the DIRECTIONAL
     // terms are shadowed (ambient + point lights stay as fill), matching the
     // raymarch pass exactly. (`pix` was computed above the unlit branch.)
-    var occ = 1.0;
-    if (G.ao_params.x > 0.5) {
-        occ = sdf_ao(in.view_pos, n);
-    }
+    let occ = scene_ao(in.view_pos, n);
 
     // The AO map: baked contact shading. It multiplies AMBIENT (and, once there
     // is bounce, indirect) and NEVER the key light — occlusion darkens the light
@@ -3010,7 +3023,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         let kl = key_light(in.view_pos, n, v, shininess, pix);
         lit = albedo * (ambient + kl.diffuse);
         // Placeable point lights (camera-relative; in.view_pos is in the same space).
-        lit += albedo * point_diffuse_lit(in.view_pos, n, pix) * gi_only_gate();
+        lit += albedo * local_light(in.view_pos, n, pix);
         lit += select(in.specular.rgb * in.specular.a, t_spec.rgb, terrain_surfaced) * kl.spec;
     }
 
@@ -3070,10 +3083,7 @@ fn surface_pbr(in: VsOut, front: bool, albedo: vec3<f32>, normal: vec3<f32>) -> 
     let metal = clamp(ext.metal * metal_s, 0.0, 1.0);
     let v = normalize(-in.view_pos);
     let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
-    var occ = 1.0;
-    if (G.ao_params.x > 0.5) {
-        occ = sdf_ao(in.view_pos, n);
-    }
+    let occ = scene_ao(in.view_pos, n);
     let ambient =
         gi_ambient(in.view_pos, n, g.ambient.rgb) * in.params.w * mix(1.0, ao_s, clamp(ext.ostr, 0.0, 1.0));
     let f0 = mix(vec3<f32>(0.04), albedo, metal);
