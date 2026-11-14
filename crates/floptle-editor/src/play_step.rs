@@ -837,23 +837,21 @@ impl Editor {
         self.land_spawns_on_moving_worlds();
         self.follow_static_colliders();
         self.follow_tile_colliders();
-        let declared_water = self.sim.as_ref().map(|s| self.declared_water_volumes(s.world.origin)).unwrap_or_default();
+        // Water is rebuilt every frame for the same reason gravity is:
+        // a WaterVolume spawned, moved, resized,
+        // disabled or destroyed while the game is running must be in
+        // the solver's field the same frame it is in the renderer's —
+        // `water_draw` already gathers from the live world every
+        // frame, so the two were disagreeing about *when* a pool
+        // exists, not about what it is. Same cost shape as gravity's
+        // scan (cheap on a level of a few thousand nodes); "static
+        // per step" (the doc comment on `PhysicsWorld::water`) is a
+        // claim about determinism within one tick, not about being
+        // built once per session. The water scripts declared, which no
+        // node carries, goes in with it.
+        self.build_frame_water();
         if let Some(sim) = self.sim.as_mut() {
             sim.world.gravity = Self::build_gravity_field(&self.world, sim.world.origin);
-            // Water is rebuilt every frame for the same reason gravity is:
-            // a WaterVolume spawned, moved, resized,
-            // disabled or destroyed while the game is running must be in
-            // the solver's field the same frame it is in the renderer's —
-            // `water_draw` already gathers from the live world every
-            // frame, so the two were disagreeing about *when* a pool
-            // exists, not about what it is. Same cost shape as gravity's
-            // scan (cheap on a level of a few thousand nodes); "static
-            // per step" (the doc comment on `PhysicsWorld::water`) is a
-            // claim about determinism within one tick, not about being
-            // built once per session.
-            sim.world.water = Self::build_water_field(&self.world, sim.world.origin);
-            // …and the water scripts declared, which no node carries.
-            sim.world.water.volumes.extend(declared_water);
             // Live Inspector edits: re-read RigidBody tunables (shape/size, friction,
             // restitution, gravity, pos/rot locks) into the running bodies each frame —
             // no teleport.
@@ -902,26 +900,6 @@ impl Editor {
             }
         }
         self.script_host.set_carry(self.tick_carry.clone());
-    }
-
-    /// Water on a world moving on its rails, rebuilt where this tick's rails
-    /// put it, as gravity is. Built once a frame before the ticks, a lake
-    /// stayed where its planet had been while the planet moved on a tick at
-    /// a time: at 280 m/s that is metres a tick, and a crate over a lake rose
-    /// out of it or sank to the bed. A world with nothing on rails keeps the
-    /// frame's build.
-    fn water_rides_its_rails(&mut self) {
-        if self.space_rails_prev.is_empty() {
-            return;
-        }
-        self.refresh_wind_frames();
-        let Some(origin) = self.sim.as_ref().map(|s| s.world.origin) else { return };
-        let declared = self.declared_water_volumes(origin);
-        let mut water = Self::build_water_field(&self.world, origin);
-        water.volumes.extend(declared);
-        if let Some(sim) = self.sim.as_mut() {
-            sim.world.water = water;
-        }
     }
 
     /// Land the nodes scripts asked to spawn now, rather than at the end of
@@ -1063,7 +1041,7 @@ impl Editor {
                 // snapshot all reflect this tick before scripts and physics.
                 self.update_space_rails(self.game_tick.step as f64);
                 self.publish_tick_carry();
-                self.water_rides_its_rails();
+                self.pose_water_for_tick(true);
                 // Per-tick input: consume the tick accumulators (edges bank between
                 // ticks so a between-tick press is never lost). Neutral when the
                 // Game view isn't focused — but still consumed, so stale edges
@@ -1269,6 +1247,9 @@ impl Editor {
                         }
                     }
                 }
+                // What the tick's scripts moved takes its water with it
+                // into this step.
+                self.pose_water_for_tick(false);
                 if let Some(sim) = self.sim.as_mut() {
                     if self.physics_paused {
                         sim.clear_held_forces();

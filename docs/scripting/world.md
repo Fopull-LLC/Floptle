@@ -434,6 +434,15 @@ end
 than 1.5 m, in the world, refreshed as the water flows: where a game puts its
 waterfall sheets and mist, and takes them away when a fall runs dry.
 
+Water rides whatever it lies on **tick by tick**: a Water Volume node, or a
+volume declared with a `parent`, is put where its node is for every fixed
+tick, after the planets move on their rails and again after `fixedUpdate`,
+so a lake on a planet orbiting at hundreds of metres a second, a tank a
+script lifts in `fixedUpdate` or a pool on a ship's deck floats things exactly
+as it would standing still, and `water.at` in `fixedUpdate` answers for that
+tick's water. Water on a body the physics moves (a ship, a lift) also moves
+with it, so what floats in a deck pool is carried along with the ship.
+
 `water.depthAt` and the solver answer from the **same geometry**, so a swim
 state can't disagree with the physics floating it — which is exactly what
 happened when a game carried its own `seaDepth()` against a sea radius it had

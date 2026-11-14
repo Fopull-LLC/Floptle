@@ -1957,6 +1957,21 @@ impl Sim {
         })
     }
 
+    /// How the dynamic body or assembly on node `eid` is moving this tick:
+    /// `(centre of mass in the sim frame, velocity, spin)`. `None` for a node
+    /// the solver does not move: no body, a kinematic one (its node is the
+    /// authority), or one switched off. What water lying on a moving body
+    /// takes as its own motion.
+    pub fn carrier_motion(&self, eid: u32) -> Option<(Vec3, Vec3, Vec3)> {
+        if let Some(l) = self.cmap.iter().find(|l| l.entity.index() == eid) {
+            let c = &self.world.compounds[l.compound];
+            return c.active.then_some((c.pos, c.vel, c.ang_vel));
+        }
+        let l = self.map.iter().find(|l| l.entity.index() == eid)?;
+        let b = &self.world.bodies[l.body];
+        (b.active && !b.kinematic).then_some((b.pos, b.vel, if b.rotates { b.ang_vel } else { Vec3::ZERO }))
+    }
+
     /// Write the body on node `eid` to its node now, at its pose this tick:
     /// [`Self::write_compound_node`] for a single body.
     pub fn write_body_node(&self, eid: u32, ecs: &mut World) {

@@ -4202,6 +4202,24 @@ impl ScriptHost {
         *self.water_volumes.borrow_mut() = v;
     }
 
+    /// Move one of the scene's bodies of water to where its node is this
+    /// tick: a sea's centre and radius, a pool's centre, turn and
+    /// half-extents. Between the once-a-frame [`Self::set_water_volumes`],
+    /// so `water.at` in `fixedUpdate` answers for the water the solver
+    /// floats things in.
+    pub fn pose_water_volume(&self, entity: u32, center: glam::DVec3, rot: glam::Quat, radius: f64, half: glam::DVec3) {
+        if let Some(v) = self.water_volumes.borrow_mut().iter_mut().find(|v| v.entity == entity) {
+            v.center = center.to_array();
+            if v.sea {
+                v.radius = radius;
+            } else {
+                let q = rot.as_dquat();
+                v.rot = [q.x, q.y, q.z, q.w];
+                v.half = half.to_array();
+            }
+        }
+    }
+
     /// The water scripts declared with `water.addVolume`, frames as of the
     /// last [`Self::set_water_frame`].
     pub fn declared_water(&self) -> std::cell::Ref<'_, Vec<floptle_core::water::DeclaredWater>> {

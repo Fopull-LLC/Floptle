@@ -14,7 +14,7 @@ impl crate::Editor {
         self.vfx.wind = (self.script_host.wind_field().clone(), self.script_host.weather_time());
     }
 
-    fn refresh_winds(&mut self) {
+    pub(crate) fn refresh_winds(&mut self) {
         let anchored = self.script_host.anchored_winds();
         if anchored.is_empty() {
             return;
@@ -47,6 +47,12 @@ pub(crate) struct WaterSims {
     /// Volumes waiting for ground to be under them, and how many frames
     /// they have waited.
     waiting: std::collections::HashMap<u32, u32>,
+    /// Declared water that lies on a node, and the node: found by name once
+    /// a frame, read again every tick.
+    pub(crate) anchors: Vec<(u32, floptle_core::Entity)>,
+    /// Where each body of water the solver holds gets its pose from, read
+    /// every tick: see `water_pose.rs`.
+    pub(crate) posers: Vec<crate::water_pose::WaterPoser>,
 }
 
 struct WaterSim {
@@ -246,8 +252,9 @@ impl crate::Editor {
     /// Where each anchored `water.addVolume` lake's node has got to, in the
     /// same pass the winds take, so a lake turns with its planet for the
     /// solver and for `water.at` alike.
-    fn refresh_water_frames(&mut self) {
+    pub(crate) fn refresh_water_frames(&mut self) {
         let anchored = self.script_host.anchored_water();
+        self.water_sims.anchors.clear();
         if anchored.is_empty() {
             return;
         }
@@ -259,6 +266,7 @@ impl crate::Editor {
         }
         for (id, name) in &anchored {
             let frame = nodes.get(name.as_str()).map_or(floptle_core::scatter::Frame::IDENTITY, |&e| {
+                self.water_sims.anchors.push((*id, e));
                 let wt = floptle_core::world_transform(&self.world, e);
                 floptle_core::scatter::Frame { origin: wt.translation, rot: wt.rotation.normalize() }
             });
@@ -290,6 +298,7 @@ impl crate::Editor {
                 angular_drag: w.angular_drag,
                 frozen: false,
                 entity: u32::MAX - w.id,
+                carry: floptle_physics::WaterCarry::default(),
             })
             .collect()
     }
