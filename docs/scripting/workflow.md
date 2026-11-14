@@ -108,7 +108,9 @@ The same list lives on the tab's **§ Docs** page.
   that overruns **3 passes in a row** is stopped, and is not called again
   until you edit its file, so one slow pass never loses a script for the rest
   of a game, and a loop that never ends costs three budgets, not forever. The clock is the script thread's CPU time, so a machine busy
-  on every core slows a pass without using up its budget. A game that does
+  on every core slows a pass without using up its budget, and so does a
+  machine that stalls (a starved disk, a closed laptop lid, a debugger
+  paused mid-frame). A game that does
   long work in one pass sets `script_budget_ms` in `project.ron`, and
   `floptle run` and `floptle play` take `--script-budget-ms` for one run.
   Everything else keeps running. The scripts share **512 MB** between them —

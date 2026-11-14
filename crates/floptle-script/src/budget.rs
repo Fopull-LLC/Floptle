@@ -29,9 +29,16 @@
 //! base it was building. CPU time only grows while the script's thread runs,
 //! so a loop that never ends still uses it up at full speed, and a busy
 //! machine does not. Where a platform cannot say (the browser), the wall is
-//! the clock, as before. A pass that runs [`WALL_CEILING`] times its budget
-//! in wall time is stopped too, so a script waiting forever on the engine
-//! inside a binding still comes back.
+//! the clock, as before.
+//!
+//! **Wall time never abandons a pass where CPU time can be read.** A machine
+//! that stalls (a disk so busy the engine's pages wait minutes to load, a
+//! laptop lid closed mid-frame, a debugger paused on a breakpoint) runs up
+//! wall time while the script does nothing, and a wall-clock ceiling abandoned
+//! whatever script happened to be running, then stopped it for the session
+//! after three. A wall limit could not catch the case it was meant for
+//! anyway: the interrupt only runs while Lua runs, so a binding that never
+//! returns never reaches it.
 //!
 
 use std::cell::Cell;
@@ -50,8 +57,6 @@ pub const SERVER_BUDGET: Duration = Duration::from_millis(500);
 pub const STRIKES: u32 = 3;
 /// Interrupts between clock reads.
 const CHECK_EVERY: u32 = 1024;
-/// How many budgets of wall time a pass may take, whatever its CPU time.
-const WALL_CEILING: u32 = 30;
 /// The marker every budget error carries, so the host can tell one from an
 /// ordinary runtime error without parsing the sentence around it.
 const MARKER: &str = "ran for more than";
@@ -150,7 +155,7 @@ impl Budget {
                 let wall = wall0.elapsed();
                 let cpu = cpu0.zip(thread_cpu()).map(|(a, b)| b.saturating_sub(a));
                 let over = match cpu {
-                    Some(cpu) => cpu > limit || wall > limit * WALL_CEILING,
+                    Some(cpu) => cpu > limit,
                     None => wall > limit,
                 };
                 if over {
@@ -271,5 +276,28 @@ mod tests {
         assert!(Budget::is_timeout(&e), "{e}");
         assert!(e.contains("0 ms") && e.contains("without an exit"), "{e}");
         assert!(!Budget::is_timeout("attempt to index nil"));
+    }
+
+    /// A pass armed long ago in wall time, with almost no CPU spent since, is
+    /// a machine that stalled (a starved disk, a suspended process), not a
+    /// runaway script. Abandoning it stopped honest scripts for the session.
+    #[test]
+    fn a_stalled_machine_does_not_use_up_a_pass() {
+        if thread_cpu().is_none() {
+            return; // the wall is the only clock here, by design
+        }
+        let lua = mlua::Lua::new();
+        let b = Budget::new();
+        b.set_limit(Duration::from_millis(50));
+        let _armed = b.arm();
+        // Ten minutes of wall time ago (12 000 budgets), as if the process sat stalled.
+        let (_, cpu0) = b.deadline.get().expect("armed");
+        let long_ago = Instant::now().checked_sub(Duration::from_secs(600)).expect("uptime");
+        b.deadline.set(Some((long_ago, cpu0)));
+        for _ in 0..(CHECK_EVERY * 4) {
+            if let Err(e) = b.check(&lua) {
+                panic!("a stall abandoned the pass: {e}");
+            }
+        }
     }
 }
