@@ -304,6 +304,12 @@ colour-management change across the whole engine, not a shader one, and it would
 shift the look of every project that exists; it is on the list, deliberately not
 done quietly.
 
+Textures are the other way round: a slot reads its picture through the sRGB
+curve, so a stored 128 samples as about 0.216. A slot that holds numbers (a
+normal map, a flow map, a mask, a lookup table) says so with `data` (or
+`linear`): `texture flow = "textures/flow.png" data` samples 128 as 0.502, in a
+material shader and in a `stage post` screen shader alike.
+
 ### 4.3 Hooks into the raymarch pass
 
 A `Raymarch` output node packages an `Sdf` graph as the `map()` function the

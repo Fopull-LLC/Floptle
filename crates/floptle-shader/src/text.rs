@@ -506,6 +506,12 @@ impl Parser<'_> {
                 }
             }
         }
+        // `data` (or `linear`): the slot holds numbers, read as stored rather
+        // than through the sRGB curve a picture's colours take.
+        if matches!(self.peek(), Some(Tok::Ident(s)) if s == "data" || s == "linear") {
+            self.pos += 1;
+            self.ir.texture_data.insert(name.clone());
+        }
         self.ir.textures.push(name);
         Ok(())
     }
@@ -701,9 +707,10 @@ pub fn print(ir: &ShaderIr) -> String {
         s.push_str(&format!("  uniform {}: {}[{}]\n", a.name, a.ty.flsl(), a.len));
     }
     for t in &ir.textures {
+        let data = if ir.texture_data.contains(t) { " data" } else { "" };
         match ir.texture_defaults.get(t) {
-            Some(path) => s.push_str(&format!("  texture {t} = {}\n", quoted(path))),
-            None => s.push_str(&format!("  texture {t}\n")),
+            Some(path) => s.push_str(&format!("  texture {t} = {}{data}\n", quoted(path))),
+            None => s.push_str(&format!("  texture {t}{data}\n")),
         }
     }
     if !ir.lets.is_empty() {

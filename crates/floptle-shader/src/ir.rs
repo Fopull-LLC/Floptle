@@ -6,7 +6,7 @@
 //! projections of this one structure. Type checking is edge-level and happens
 //! here; the WGSL emitter (transpile.rs) consumes the checked result.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::stdlib::{self, OpSpec};
 
@@ -343,6 +343,11 @@ pub struct ShaderIr {
     /// texture shader show its art in the graph's previews (and on a fresh
     /// material) instead of a checkerboard nobody can read.
     pub texture_defaults: BTreeMap<String, String>,
+    /// Slots declared `data` (or `linear`): `texture flow = "flow.png" data`.
+    /// Their bytes are numbers, not colours (a normal map, a flow map, a mask,
+    /// a lookup table), so they are read as stored, 128 as 0.502, and never
+    /// through the sRGB curve that turns 128 into 0.216.
+    pub texture_data: BTreeSet<String>,
     /// The expression arena. `lets` and `outputs` index into it.
     pub exprs: Vec<Expr>,
     /// Ordered named bindings — each is a graph node the artist named.
@@ -377,6 +382,7 @@ impl ShaderIr {
             || self.arrays != other.arrays
             || self.textures != other.textures
             || self.texture_defaults != other.texture_defaults
+            || self.texture_data != other.texture_data
             || self.lets.len() != other.lets.len()
             || self.outputs.len() != other.outputs.len()
         {

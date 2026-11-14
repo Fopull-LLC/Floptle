@@ -404,6 +404,40 @@ shader duo {
         assert!(ir.texture_defaults.is_empty());
     }
 
+    /// **A slot can say it holds numbers.** `data` (or `linear`) after a
+    /// slot, with or without a default image, marks it: it survives a print
+    /// and a parse, a rename in the graph and a copy into another shader, and
+    /// reaches the host that binds it, aligned with the slot order, in a
+    /// material shader and a screen shader alike. `data` stays an ordinary
+    /// name everywhere else.
+    #[test]
+    fn a_texture_slot_can_be_declared_data() {
+        const SRC: &str = "shader t {\n  stage fragment\n  texture flow = \"art/flow.png\" data\n  \
+                           texture tint\n  texture mask linear\n  let data = sample(flow, uv)\n  \
+                           output color = data.rgb * sample(tint, uv).rgb * sample(mask, uv).r\n}\n";
+        let ir = parse(SRC).expect("parses");
+        assert_eq!(ir.texture_data.iter().map(String::as_str).collect::<Vec<_>>(), ["flow", "mask"]);
+        assert_eq!(ir.texture_defaults.get("flow").map(String::as_str), Some("art/flow.png"));
+
+        let printed = print(&ir);
+        assert!(printed.contains("texture flow = \"art/flow.png\" data\n"), "printed:\n{printed}");
+        assert!(printed.contains("texture mask data\n") && printed.contains("texture tint\n"), "printed:\n{printed}");
+        let reparsed = parse(&printed).expect("reprint parses");
+        assert!(ir.same_shader(&reparsed), "the flag survives the round trip:\n{printed}");
+        let mut plain = reparsed.clone();
+        plain.texture_data.clear();
+        assert!(!ir.same_shader(&plain), "a shader that lost its data flag is the same shader");
+
+        assert_eq!(compile_fragment(SRC).expect("compiles").texture_data, [true, false, true]);
+        let post = compile_post("shader p {\n  stage post\n  texture lut data\n  output color = sample(lut, uv).rgb\n}\n")
+            .expect("compiles");
+        assert_eq!(post.texture_data, [true]);
+
+        let mut ir = ir;
+        graph::rename_texture(&mut ir, "flow", "current").expect("renames");
+        assert!(ir.texture_data.contains("current") && !ir.texture_data.contains("flow"));
+    }
+
     #[test]
     fn checks_and_transpiles_to_valid_wgsl() {
         let compiled = compile_fragment(PLASMA).expect("compiles");

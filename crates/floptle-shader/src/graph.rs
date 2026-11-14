@@ -1337,6 +1337,7 @@ pub fn delete_node(ir: &mut ShaderIr, key: &NodeKey) -> Result<(), EditError> {
             ir.textures.remove(t);
             ir.layout.remove(&format!("tex.{name}"));
             ir.texture_defaults.remove(name);
+            ir.texture_data.remove(name);
             for e in ir.exprs.iter_mut() {
                 if let ExprKind::Texture(x) = &mut e.kind
                     && *x > t
@@ -1417,6 +1418,9 @@ pub fn rename_texture(ir: &mut ShaderIr, old: &str, new: &str) -> Result<(), Edi
     }
     if let Some(path) = ir.texture_defaults.remove(old) {
         ir.texture_defaults.insert(new.to_string(), path);
+    }
+    if ir.texture_data.remove(old) {
+        ir.texture_data.insert(new.to_string());
     }
     Ok(())
 }
@@ -1572,6 +1576,9 @@ pub fn paste_nodes(
         ir.textures.push(name.clone());
         if let Some(p) = from.texture_defaults.get(name) {
             ir.texture_defaults.insert(name.clone(), p.clone());
+        }
+        if from.texture_data.contains(name) {
+            ir.texture_data.insert(name.clone());
         }
         Some(ir.textures.len() - 1)
     }

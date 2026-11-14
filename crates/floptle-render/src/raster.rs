@@ -2736,7 +2736,9 @@ impl Raster {
 
     /// Create (or, with `replace`, rebuild in place) a material's live binding
     /// of a compiled shader: its params UBO (packed by the transpiler's layout)
-    /// + one texture per declared slot (`None` = the 1×1 white default).
+    /// and one texture per declared slot (`None` = the 1×1 white default).
+    /// Every slot is read as a picture, through sRGB; see
+    /// [`Self::set_flsl_binding_data`] for slots that hold numbers.
     pub fn set_flsl_binding(
         &mut self,
         gpu: &Gpu,
@@ -2744,6 +2746,23 @@ impl Raster {
         shader: FlslShaderId,
         params: &[u8],
         textures: &[Option<TexId>],
+    ) -> FlslBindingId {
+        self.set_flsl_binding_data(gpu, replace, shader, params, textures, &[])
+    }
+
+    /// [`Self::set_flsl_binding`], with `data[i]` saying slot `i` was declared
+    /// `data`: its texture binds through the view that reads the bytes as
+    /// stored (128 is 0.502), the way the built-in normal and mask maps are,
+    /// instead of the sRGB view a colour picture takes (128 is 0.216). A slot
+    /// past the end of `data` is a picture.
+    pub fn set_flsl_binding_data(
+        &mut self,
+        gpu: &Gpu,
+        replace: Option<FlslBindingId>,
+        shader: FlslShaderId,
+        params: &[u8],
+        textures: &[Option<TexId>],
+        data: &[bool],
     ) -> FlslBindingId {
         let default_sampler = self.sampler_for(gpu, TexSampling::default());
         let sh = &self.flsl_shaders[shader.0 as usize];
@@ -2777,7 +2796,7 @@ impl Raster {
                 .copied()
                 .flatten()
                 .and_then(|t| self.textures.get(t.0 as usize))
-                .map(|t| &t.view)
+                .map(|t| if data.get(i).copied().unwrap_or(false) { &t.linear_view } else { &t.view })
                 .unwrap_or(&default_view);
             entries.push(wgpu::BindGroupEntry {
                 binding: (1 + 2 * i) as u32,
@@ -3334,8 +3353,14 @@ impl Raster {
     /// with the filter and wrap it was registered with. What a screen shader's
     /// texture slot is filled from.
     pub fn texture_binding(&mut self, gpu: &Gpu, id: TexId) -> Option<(wgpu::TextureView, wgpu::Sampler)> {
+        self.texture_binding_data(gpu, id, false)
+    }
+
+    /// [`Self::texture_binding`], for a slot declared `data` when `data` is
+    /// true: the view reads the texture's bytes as stored, not as sRGB.
+    pub fn texture_binding_data(&mut self, gpu: &Gpu, id: TexId, data: bool) -> Option<(wgpu::TextureView, wgpu::Sampler)> {
         let t = self.textures.get(id.0 as usize)?;
-        let (view, sampling) = (t.view.clone(), t.sampling);
+        let (view, sampling) = (if data { t.linear_view.clone() } else { t.view.clone() }, t.sampling);
         Some((view, self.sampler_for(gpu, sampling)))
     }
 

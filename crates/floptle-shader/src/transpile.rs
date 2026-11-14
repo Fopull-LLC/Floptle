@@ -49,6 +49,9 @@ pub struct CompiledFragment {
     /// binds when the material leaves the slot empty (see
     /// [`ShaderIr::texture_defaults`](crate::ir::ShaderIr::texture_defaults)).
     pub texture_defaults: Vec<Option<String>>,
+    /// Which slots are declared `data`, aligned with [`Self::textures`]:
+    /// bound through a view that reads the bytes as stored, not as sRGB.
+    pub texture_data: Vec<bool>,
     /// chunk line (0-based) → `.flsl` source span, for naga error mapping.
     pub line_map: Vec<(u32, Span)>,
     /// The shader declares `output offset`: the chunk carries the `vs_flsl`
@@ -199,6 +202,7 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
             .iter()
             .map(|t| ir.texture_defaults.get(t).cloned())
             .collect(),
+        texture_data: ir.textures.iter().map(|t| ir.texture_data.contains(t)).collect(),
         line_map: w.line_map,
         displaced,
     })
@@ -1078,6 +1082,8 @@ pub struct CompiledPost {
     /// Each slot's default image path, aligned with [`Self::textures`]: what
     /// binds when the scene's pass leaves the slot alone.
     pub texture_defaults: Vec<Option<String>>,
+    /// Which slots are declared `data`, aligned with [`Self::textures`].
+    pub texture_data: Vec<bool>,
     /// Uniform arrays, in param-block order: after the uniforms and the
     /// texture slots' tiling lanes, one vec4 per element.
     pub arrays: Vec<ir::UniformArray>,
@@ -1224,6 +1230,7 @@ pub fn transpile_post(ir: &ShaderIr, ck: &Checked) -> Result<CompiledPost, Trans
         uniforms: ir.uniforms.clone(),
         textures: ir.textures.clone(),
         texture_defaults: ir.textures.iter().map(|t| ir.texture_defaults.get(t).cloned()).collect(),
+        texture_data: ir.textures.iter().map(|t| ir.texture_data.contains(t)).collect(),
         arrays: ir.arrays.clone(),
         line_map: w.line_map,
     })
