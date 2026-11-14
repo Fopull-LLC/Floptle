@@ -463,7 +463,9 @@ looks exactly as it did and costs what it did. It goes by reach rather than
 by texel on purpose: a small map is a choice of soft, cheap shadows (a
 settings screen's "low"), and a second map would make "low" sharper and
 dearer. `shadow_near_always` (`env.shadowNearAlways`) draws it whenever it
-fits.
+fits. Old projects keep one map until they set `shadowNearDistance`: the
+upgrade pass (`shadow_upgrade.rs`) writes `shadow_near_distance: 0` into each
+scene from before the cascade whose reach is past 160 m.
 
 Once the texture is two maps wide it stays wide until the map's size
 changes, so a frame that draws one view with the cascade and another without

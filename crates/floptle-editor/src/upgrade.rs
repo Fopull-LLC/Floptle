@@ -48,6 +48,7 @@ pub(crate) const STEPS: &[Step] = &[
     Step { id: "body-sizes-in-node-space", since: "0.117.0", run: crate::body_upgrade::keep_world_sizes },
     Step { id: "model-look-and-blend", since: "0.117.0", run: crate::upgrade_models::keep_model_look },
     Step { id: "ignore-palette-cache", since: "0.117.1", run: ignore_generated_library },
+    Step { id: "shadow-near-cascade-off", since: "0.118.3", run: crate::shadow_upgrade::keep_one_shadow_map },
 ];
 
 /// Is `version` older than `since`? A missing stamp is older than everything.

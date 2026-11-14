@@ -98,7 +98,13 @@ fn project(d: &Path, fixture: Fixture, elev: f32, light: &str) {
         cube("Ground", [0.0, -0.05, 0.0], [400.0, 0.1, 400.0]),
     ];
     all.extend(nodes);
-    std::fs::write(d.join("project.ron"), "(title: Some(\"s\"), entry_scene: Some(\"scenes/first.ron\"), retro: false)").unwrap();
+    // Stamped as made with the cascade: an unstamped project counts as older
+    // than every upgrade step, and opening it would pin its scene to one map.
+    std::fs::write(
+        d.join("project.ron"),
+        format!("(title: Some(\"s\"), entry_scene: Some(\"scenes/first.ron\"), retro: false, engine_version: Some(\"{CASCADE_SINCE}\"))"),
+    )
+    .unwrap();
     std::fs::write(
         d.join("scenes/first.ron"),
         format!(
@@ -117,6 +123,11 @@ fn project(d: &Path, fixture: Fixture, elev: f32, light: &str) {
 fn shot(name: &str, fixture: Fixture, elev: f32, light: &str) -> Option<(usize, Vec<f32>)> {
     let d = temp(name);
     project(&d, fixture, elev, light);
+    shoot(&d)
+}
+
+/// [`shot`] of a project already on disk; the folder is removed after.
+fn shoot(d: &Path) -> Option<(usize, Vec<f32>)> {
     let out = d.join("shot.png");
     let r = Command::new(env!("CARGO_BIN_EXE_floptle"))
         .args(["shot", &d.to_string_lossy(), "--size", "960x540", "--no-ui", "--out", &out.to_string_lossy()])
@@ -134,7 +145,7 @@ fn shot(name: &str, fixture: Fixture, elev: f32, light: &str) -> Option<(usize, 
     let img = image::open(&out).expect("a PNG").to_luma8();
     let w = img.width() as usize;
     let px = img.pixels().map(|p| p[0] as f32).collect();
-    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(d);
     Some((w, px))
 }
 
@@ -211,4 +222,66 @@ fn a_scene_at_the_default_reach_renders_as_it_did() {
         let max = default.iter().zip(&single).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
         assert_eq!(max, 0.0, "the default 150 m scene at {size} texels changed with the near cascade's default: a pixel moved by {max}");
     }
+}
+
+/// The engine the near cascade arrived in: a project stamped before it is
+/// migrated, one stamped with it is new.
+const CASCADE_SINCE: &str = "0.118.3";
+
+/// The figure's project stamped `stamp`, after `floptle migrate` has brought
+/// it up to [`CASCADE_SINCE`], with its scene's text before and after.
+fn migrated(name: &str, stamp: &str, light: &str) -> (PathBuf, String, String) {
+    let d = temp(name);
+    project(&d, Fixture::Figure, 20.0, light);
+    std::fs::write(
+        d.join("project.ron"),
+        format!("(title: Some(\"s\"), entry_scene: Some(\"scenes/first.ron\"), retro: false, engine_version: Some(\"{stamp}\"))"),
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(d.join("scenes/first.ron")).unwrap();
+    let r = Command::new(env!("CARGO_BIN_EXE_floptle"))
+        .args(["migrate", &d.to_string_lossy(), "--engine-version", CASCADE_SINCE])
+        .output()
+        .expect("run migrate");
+    assert!(r.status.success(), "migrate failed:\n{}", String::from_utf8_lossy(&r.stderr));
+    let after = std::fs::read_to_string(d.join("scenes/first.ron")).unwrap();
+    (d, before, after)
+}
+
+/// **An old long-reach scene keeps its one map through the upgrade.** A
+/// project stamped before the cascade, its scene at 364 m, is migrated to
+/// `shadow_near_distance: 0` and renders bit for bit as the single map does
+/// (which is the old renderer's picture, to the bit).
+#[test]
+fn an_old_long_reach_scene_migrates_to_its_single_map() {
+    let (d, before, after) = migrated("mig-old364", "0.118.2", "shadow_distance: 364");
+    assert_ne!(before, after, "the migration left a 364 m scene from before the cascade on the cascade");
+    assert!(after.contains("shadow_near_distance: 0.0"), "{after}");
+    let Some((_, upgraded)) = shoot(&d) else { return };
+    let (_, single) = shot("mig-single", Fixture::Figure, 20.0, "shadow_distance: 364, shadow_near_distance: 0").unwrap();
+    let max = upgraded.iter().zip(&single).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+    assert_eq!(max, 0.0, "the migrated scene does not draw as its single map did: a pixel moved by {max}");
+}
+
+/// **An old scene at 150 m is left byte for byte.** The cascade never draws
+/// there, so the upgrade has nothing to write.
+#[test]
+fn an_old_scene_at_the_default_reach_is_left_byte_for_byte() {
+    let (d, before, after) = migrated("mig-old150", "0.118.2", "shadow_distance: 150");
+    assert_eq!(after, before, "the migration rewrote a 150 m scene it had no reason to touch");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// **A new project at 364 m gets the cascade.** Stamped with the engine the
+/// cascade arrived in, the upgrade leaves its scene alone, and it draws the
+/// near detail: not the single map's picture.
+#[test]
+fn a_new_long_reach_project_gets_the_cascade() {
+    let (d, before, after) = migrated("mig-new364", CASCADE_SINCE, "shadow_distance: 364");
+    assert_eq!(after, before, "the migration touched a project made with the cascade");
+    let Some((_, new)) = shoot(&d) else { return };
+    let (_, single) = shot("mig-new-single", Fixture::Figure, 20.0, "shadow_distance: 364, shadow_near_distance: 0").unwrap();
+    let (_, reference) = shot("mig-new-ref", Fixture::Figure, 20.0, "shadow_distance: 40").unwrap();
+    assert!(mean_diff(&new, &single) > 0.8, "a new 364 m project drew the single map");
+    assert!(mean_diff(&new, &reference) < 0.1, "a new 364 m project does not draw the near detail");
 }
