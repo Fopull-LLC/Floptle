@@ -9,6 +9,12 @@
 //! when water beside it moves, when its ground is dug, or when a script
 //! holds, releases or adds water in it.
 //!
+//! "At rest" is a tolerance, [`TiledWater::still_depth`]: a tile sleeps once
+//! its surface has stayed within a quarter of it for a second with every
+//! face slower than a millimetre a second, and a reader is told a tile changed (its serial moves)
+//! only when its surface has moved by more than it. Sleeping moves no water,
+//! so the volume is exactly what it was.
+//!
 //! Two models move the water, over the same cells, faces and boundaries:
 //!
 //! * [`Solver::Swe`], the default: the shallow-water equations with
@@ -37,14 +43,26 @@ const NONE: u32 = u32::MAX;
 const DRY: f32 = 1e-4;
 /// Depth read back as water rather than a damp cell, metres.
 pub const WET: f32 = 1e-3;
-/// A surface difference below this is level, metres.
-const LEVEL: f32 = 1e-4;
+/// Seconds a tile's water must stay at rest before it sleeps.
+const SLEEP_AFTER: f32 = 1.0;
 /// A face slower than this is still, m/s.
 const STILL: f32 = 1e-3;
-/// A depth change below this in a step is no change, metres.
-const STEADY: f32 = 2e-6;
-/// Steps a tile must be still for before it sleeps.
-const SLEEP_STEPS: u16 = 30;
+/// The share of the tolerance a tile's surface may move in the time it takes
+/// to fall asleep, and still be at rest.
+const REST: f32 = 0.25;
+/// A change in the flow a reader is told about, m/s.
+const FLOW_STEP: f32 = 0.05;
+/// Seconds over which a face's usual speed is tracked: a slosh is damped
+/// about it, so a river running steadily is not.
+const MEAN_TIME: f32 = 4.0;
+/// The surface slope below which water is taken to be standing rather than
+/// running: 1 in 2,000.
+const LEVEL_SLOPE: f32 = 5e-4;
+/// How many cells from water deep enough to keep it a thin cell still counts
+/// as part of a pool, and does not soak away.
+const FAR: u8 = 64;
+/// Seconds between looks at whether newly held cells have come to rest.
+const SETTLE_WINDOW: f32 = 1.0;
 /// The broad-crested weir coefficient: the most a face passes where water
 /// pours off an edge is `C·w·√(2g)·h^{3/2}`.
 const WEIR: f32 = 0.385;
@@ -84,12 +102,14 @@ struct Pad {
     v: Vec<f32>,
     qx: Vec<f32>,
     qz: Vec<f32>,
+    /// Held at a level.
+    held: Vec<bool>,
 }
 
 impl Pad {
     fn dry() -> Self {
         let n = PADW * PADW;
-        Self { ground: vec![f32::INFINITY; n], depth: vec![0.0; n], u: vec![0.0; n], v: vec![0.0; n], qx: vec![0.0; n], qz: vec![0.0; n] }
+        Self { ground: vec![f32::INFINITY; n], depth: vec![0.0; n], u: vec![0.0; n], v: vec![0.0; n], qx: vec![0.0; n], qz: vec![0.0; n], held: vec![false; n] }
     }
 
     fn copy(&mut self, i: usize, t: &Tile, c: usize) {
@@ -99,6 +119,7 @@ impl Pad {
         self.v[i] = t.v[c];
         self.qx[i] = t.qx[c] / t.wx[c].max(1e-6);
         self.qz[i] = t.qz[c] / t.wz[c].max(1e-6);
+        self.held[i] = t.hold[c].is_finite();
     }
 }
 
@@ -116,6 +137,18 @@ struct Tile {
     v: Vec<f32>,
     un: Vec<f32>,
     vn: Vec<f32>,
+    /// Each face's usual speed, a running mean: what damping leaves alone.
+    um: Vec<f32>,
+    vm: Vec<f32>,
+    /// The depths the tile is judged at rest against: taken when its water
+    /// last moved by more than the tolerance.
+    rest: Vec<f32>,
+    /// How many cells each thin cell is from water deep enough to refill it.
+    reach: Vec<u8>,
+    /// The part of each cell's last change too small for its depth to
+    /// take, owed to the next: a lake falling a hair a step would otherwise
+    /// round every cell's share away while its faces went on passing it.
+    owed: Vec<f32>,
     /// What each of those faces passes this step, m³/s.
     qx: Vec<f32>,
     qz: Vec<f32>,
@@ -134,7 +167,8 @@ struct Tile {
     wz: Vec<f32>,
     nbr: [u32; 4],
     awake: bool,
-    calm: u16,
+    /// Seconds it has been at rest.
+    calm: f32,
     /// Steps it has been dry and asleep.
     idle: u32,
     /// Anything a reader sees changed since it was last published.
@@ -142,6 +176,16 @@ struct Tile {
     springs: u32,
     serial: u64,
     published: Option<Arc<TileLevels>>,
+    /// The surface as it was when the serial last moved.
+    shown: Option<Arc<TileLevels>>,
+}
+
+/// A group of held cells still giving what it takes to bring newly held
+/// cells to rest.
+#[derive(Clone, Copy, Default)]
+struct Settle {
+    /// What it gave in the window being watched, m³.
+    given: f64,
 }
 
 /// Simulated water on a [`Patch`], in tiles. See the module docs.
@@ -153,8 +197,9 @@ pub struct TiledWater {
     /// The bed's Manning roughness: 0 is the frictionless lake, about 0.035
     /// a natural river bed.
     pub roughness: f32,
-    /// The share of its speed water loses a second when `roughness` is 0,
-    /// so a slosh dies away rather than ringing.
+    /// The share of its speed a slosh loses a second, so it dies away
+    /// rather than ringing. It is measured from the speed a face usually
+    /// runs at, so it settles a lake and leaves a steady river alone.
     pub damping: f32,
     /// The least depth that moves, and that reads back as water, metres:
     /// a film thinner than this on a slope stays put, unseen.
@@ -164,6 +209,12 @@ pub struct TiledWater {
     /// holding a film for good. 0 soaks nothing.
     pub soak: f32,
     pub soak_below: f32,
+    /// The surface change that counts, metres. A tile whose water has stayed
+    /// within a quarter of this for a second, every face slower than a
+    /// millimetre a second, sleeps; a tile's serial moves only when its surface has moved by more
+    /// than this since it last did; and a sleeping tile is woken across its
+    /// edge by a surface standing more than twice this off its own.
+    pub still_depth: f32,
     tiles: Vec<Tile>,
     index: HashMap<u32, u32>,
     /// Tiles water has reached the edge of, or that a script asked for,
@@ -173,6 +224,14 @@ pub struct TiledWater {
     /// Volume each held group has given (less what it took), m³, since
     /// [`Self::take_exchanged`]; and in all.
     exchanged: HashMap<u16, f64>,
+    /// The same for groups whose newly held cells have not come to rest yet:
+    /// what it takes to fill the ground they stand over.
+    filled: HashMap<u16, f64>,
+    settling: HashMap<u16, Settle>,
+    /// A group began settling since the last step.
+    settle_began: bool,
+    settle_clock: f32,
+    settle_volume: f64,
     added: f64,
     awake: Vec<u32>,
     solved: usize,
@@ -196,11 +255,17 @@ impl TiledWater {
             min_depth: WET,
             soak: 0.0,
             soak_below: 0.0,
+            still_depth: 5e-4,
             tiles: Vec::new(),
             index: HashMap::new(),
             wanted: Vec::new(),
             springs: Vec::new(),
             exchanged: HashMap::new(),
+            filled: HashMap::new(),
+            settling: HashMap::new(),
+            settle_began: false,
+            settle_clock: 0.0,
+            settle_volume: 0.0,
             added: 0.0,
             awake: Vec::new(),
             solved: 0,
@@ -273,6 +338,11 @@ impl TiledWater {
             v: vec![0.0; CELLS],
             un: vec![0.0; CELLS],
             vn: vec![0.0; CELLS],
+            um: vec![0.0; CELLS],
+            vm: vec![0.0; CELLS],
+            rest: vec![0.0; CELLS],
+            reach: vec![FAR; CELLS],
+            owed: vec![0.0; CELLS],
             qx: vec![0.0; CELLS],
             qz: vec![0.0; CELLS],
             scale: vec![1.0; CELLS],
@@ -286,12 +356,13 @@ impl TiledWater {
             wz: vec![0.0; CELLS],
             nbr: [NONE; 4],
             awake: true,
-            calm: 0,
+            calm: 0.0,
             idle: 0,
             changed: true,
             springs: 0,
             serial: 0,
             published: None,
+            shown: None,
             ground: Vec::new(),
         };
         let p = self.patch;
@@ -317,8 +388,14 @@ impl TiledWater {
                         t.depth[c] = (s.get(c).copied().unwrap_or(f32::NAN) - g).max(0.0);
                     }
                 }
+                // Water a tile starts with is taken for part of a pool until
+                // a second of steps has shown it is a stranded film.
+                if t.depth[c] > 0.0 {
+                    t.reach[c] = 0;
+                }
             }
         }
+        t.rest.copy_from_slice(&t.depth);
         t.ground = ground;
         let idx = self.tiles.len() as u32;
         self.tiles.push(t);
@@ -381,7 +458,7 @@ impl TiledWater {
     /// Wake tile `t`.
     fn wake_tile(&mut self, t: usize) {
         let tile = &mut self.tiles[t];
-        tile.calm = 0;
+        tile.calm = 0.0;
         tile.idle = 0;
         tile.changed = true;
         if !tile.awake {
@@ -414,6 +491,7 @@ impl TiledWater {
             if !height.is_finite() {
                 self.added -= tile.depth[c] as f64 * tile.area[c] as f64;
                 tile.depth[c] = 0.0;
+                tile.owed[c] = 0.0;
             }
             tile.ground[c] = height;
             self.wake(i, j);
@@ -429,7 +507,12 @@ impl TiledWater {
     /// Hold cell `(i, j)`'s surface at `level` (a height above the patch's
     /// reference), counting what it gives and takes in `group`; `NaN` lets it
     /// go. A cell whose tile does not exist yet asks for it, and is held once
-    /// it does: false then, so the caller can ask again.
+    /// it does: false then, so the caller can ask again. Holding a cell as it
+    /// is already held changes nothing and wakes nothing, so a script may
+    /// hold the same cells every frame.
+    ///
+    /// What a group gives from when a free cell joins it until the group
+    /// comes to rest is counted apart, in [`Self::take_filled`]: see there.
     pub fn hold(&mut self, i: usize, j: usize, level: f32, group: u16) -> bool {
         let Some((t, c)) = self.at(i, j) else {
             if level.is_finite() {
@@ -440,10 +523,17 @@ impl TiledWater {
         };
         let tile = &mut self.tiles[t];
         let was = tile.hold[c].is_finite();
+        if (was && tile.hold[c] == level && tile.group[c] == group) || (!was && !level.is_finite()) {
+            return true;
+        }
         tile.hold[c] = level;
         tile.group[c] = group;
         match (was, level.is_finite()) {
-            (false, true) => tile.held += 1,
+            (false, true) => {
+                tile.held += 1;
+                self.settling.insert(group, Settle::default());
+                self.settle_began = true;
+            }
             (true, false) => tile.held -= 1,
             _ => {}
         }
@@ -458,10 +548,14 @@ impl TiledWater {
             if tile.held == 0 {
                 continue;
             }
-            for h in tile.hold.iter_mut().filter(|h| h.is_finite()) {
+            let mut moved = false;
+            for h in tile.hold.iter_mut().filter(|h| h.is_finite() && **h != level) {
                 *h = level;
+                moved = true;
             }
-            wake.push(t);
+            if moved {
+                wake.push(t);
+            }
         }
         for t in wake {
             self.wake_tile(t);
@@ -485,6 +579,11 @@ impl TiledWater {
     /// takes the spring there away.
     pub fn set_spring(&mut self, i: usize, j: usize, rate: f32) {
         let cell = (j * self.patch.columns + i) as u32;
+        // A spring set to what it already gives changes nothing.
+        let now = self.springs.iter().find(|(c, _)| *c == cell).map_or(0.0, |(_, q)| *q);
+        if now == rate.max(0.0) {
+            return;
+        }
         self.springs.retain(|(c, _)| *c != cell);
         if rate > 0.0 {
             self.springs.push((cell, rate));
@@ -531,11 +630,36 @@ impl TiledWater {
     }
 
     /// What each held group has given the water (less what it took), m³,
-    /// since this was last asked.
+    /// since this was last asked, apart from what [`Self::take_filled`]
+    /// counts.
     pub fn take_exchanged(&mut self) -> Vec<(u16, f64)> {
         let mut out: Vec<(u16, f64)> = self.exchanged.drain().collect();
         out.sort_by_key(|(g, _)| *g);
         out
+    }
+
+    /// What each held group gave to fill the ground its newly held cells
+    /// stand over, m³, since this was last asked.
+    ///
+    /// Cells held over dry ground pour until the ground below their level is
+    /// full, which is the water finding the state the holds describe, not
+    /// anything happening to it. So from the moment a free cell is held,
+    /// what its group gives is counted here rather than in
+    /// [`Self::take_exchanged`], until the group comes to rest: a second in
+    /// which it gave next to nothing, or in which what it gave did not stay
+    /// on the patch (a held source feeding a stream that runs off the edge is
+    /// a steady exchange, not a fill). Moving a held cell's level does not
+    /// start it again. What a group gives after that, a breach draining a
+    /// lake, is exchange.
+    pub fn take_filled(&mut self) -> Vec<(u16, f64)> {
+        let mut out: Vec<(u16, f64)> = self.filled.drain().collect();
+        out.sort_by_key(|(g, _)| *g);
+        out
+    }
+
+    /// Is any group still filling the ground under newly held cells?
+    pub fn filling(&self) -> bool {
+        !self.settling.is_empty()
     }
 
     /// The volume of water on the patch, m³.
@@ -584,16 +708,24 @@ impl TiledWater {
         self.grow();
         let awake: Vec<usize> = self.awake.iter().map(|&t| t as usize).collect();
         self.solved = awake.len() * CELLS;
+        if awake.is_empty() {
+            // Nothing moves: every group is at rest.
+            self.settling.clear();
+        }
         if awake.is_empty() || dt <= 0.0 {
             return;
+        }
+        if std::mem::take(&mut self.settle_began) {
+            self.settle_clock = 0.0;
+            self.settle_volume = self.volume();
         }
         // 1. Each face's new velocity, from the old ones: every tile reads
         // a copy of itself and the ring of cells round it, so the tiles can
         // be solved apart, on as many threads as there are.
         let solved = self.each(&awake, true, |t| self.solve_faces(t, &self.pad(t), dt));
-        for (&t, (un, vn)) in awake.iter().zip(solved) {
-            self.tiles[t].un = un;
-            self.tiles[t].vn = vn;
+        for (&t, (un, vn, um, vm)) in awake.iter().zip(solved) {
+            let tile = &mut self.tiles[t];
+            (tile.un, tile.vn, tile.um, tile.vm) = (un, vn, um, vm);
         }
         for &t in &awake {
             let tile = &mut self.tiles[t];
@@ -664,10 +796,17 @@ impl TiledWater {
             }
         }
         let (soak, soak_below) = (self.soak, self.soak_below);
+        let tol = self.still_depth.max(0.0);
+        let stopped = 0.5 * self.min_depth;
         let depths = self.each(&awake, false, |t| {
             let tile = &self.tiles[t];
-            let (mut moved, mut fastest, mut added) = (0.0f32, 0.0f32, 0.0f64);
+            let (mut drift, mut added) = (0.0f32, 0.0f64);
+            // Is any face still moving? Water running steadily through a
+            // tile changes no depth in it, and is not at rest.
+            let mut busy = false;
             let mut depth = tile.depth.clone();
+            let mut owed = tile.owed.clone();
+            let mut reach = (soak > 0.0).then(|| tile.reach.clone());
             let mut exchanged: Vec<(u16, f64)> = Vec::new();
             for (c, d) in depth.iter_mut().enumerate() {
                 if !tile.ground[c].is_finite() {
@@ -686,54 +825,134 @@ impl TiledWater {
                     added += *q as f64;
                 }
                 let before = *d;
-                let mut after = (before + vol / tile.area[c]).max(0.0);
-                if soak > 0.0 && after > 0.0 && after < soak_below {
-                    let gone = (soak * dt).min(after);
-                    after -= gone;
-                    added -= gone as f64 * tile.area[c] as f64;
-                }
+                let change = vol / tile.area[c] + owed[c];
+                let mut after = (before + change).max(0.0);
+                owed[c] = if after > 0.0 { change - (after - before) } else { 0.0 };
                 let hold = tile.hold[c];
                 if hold.is_finite() {
+                    owed[c] = 0.0;
                     let want = (hold - tile.ground[c]).max(0.0);
-                    exchanged.push((tile.group[c], (want as f64 - after as f64) * tile.area[c] as f64));
+                    if want != after {
+                        exchanged.push((tile.group[c], (want as f64 - after as f64) * tile.area[c] as f64));
+                    }
                     after = want;
+                    if let Some(r) = &mut reach {
+                        r[c] = if want > 0.0 { 0 } else { FAR };
+                    }
+                } else if let Some(r) = &mut reach {
+                    // Only a film soaks away: thin water with nothing deeper
+                    // to refill it. The thin edge of a pool is water too
+                    // shallow to be a film's depth but level with, and open
+                    // to, water that is not; soaking it would drain the pool
+                    // through its shore for good. So each thin cell counts
+                    // how many cells it is from deep or held water, through
+                    // neighbours standing at least as high across a face
+                    // that still moves, and soaks only when there is none
+                    // within reach.
+                    let now = if after <= 0.0 {
+                        FAR
+                    } else if after >= soak_below {
+                        0
+                    } else {
+                        let (g, e) = (tile.ground[c], tile.ground[c] + after);
+                        let mut near = FAR;
+                        for side in 0..4 {
+                            let Some((o, oc)) = self.beside(t, c, side) else { continue };
+                            let n = &self.tiles[o];
+                            let (gn, en) = (n.ground[oc], n.ground[oc] + n.depth[oc]);
+                            if n.depth[oc] > 0.0 && en >= e - tol && e.max(en) - g.max(gn) > stopped {
+                                near = near.min(n.reach[oc]);
+                            }
+                        }
+                        near.saturating_add(1).min(FAR)
+                    };
+                    if now >= FAR && after > 0.0 {
+                        let gone = (soak * dt).min(after);
+                        after -= gone;
+                        added -= gone as f64 * tile.area[c] as f64;
+                        busy = true;
+                    }
+                    // A count still changing has not found its answer yet.
+                    busy |= now != r[c] && after > 0.0;
+                    r[c] = now;
                 }
                 *d = after;
-                moved = moved.max((after - before).abs());
-                fastest = fastest.max(tile.u[c].abs()).max(tile.v[c].abs());
+                drift = drift.max((after - tile.rest[c]).abs());
+                busy |= tile.u[c].abs().max(tile.v[c].abs()) > STILL;
             }
-            (depth, exchanged, moved, fastest, added)
+            (depth, owed, reach, exchanged, drift, busy, added)
         });
-        for (&t, (depth, exchanged, moved, fastest, added)) in awake.iter().zip(depths) {
+        let mut slept = false;
+        for (&t, (depth, owed, reach, exchanged, drift, busy, added)) in awake.iter().zip(depths) {
             self.added += added;
             for (g, v) in exchanged {
-                *self.exchanged.entry(g).or_insert(0.0) += v;
+                match self.settling.get_mut(&g) {
+                    Some(s) => {
+                        s.given += v;
+                        *self.filled.entry(g).or_insert(0.0) += v;
+                    }
+                    None => *self.exchanged.entry(g).or_insert(0.0) += v,
+                }
                 self.added += v;
             }
             let tile = &mut self.tiles[t];
             tile.depth = depth;
+            tile.owed = owed;
+            if let Some(r) = reach {
+                tile.reach = r;
+            }
             tile.changed = true;
-            let soaking = soak > 0.0 && tile.depth.iter().any(|d| *d > 0.0 && *d < soak_below);
-            let still = moved < STEADY && fastest < STILL && tile.springs == 0 && !soaking;
-            tile.calm = if still { tile.calm.saturating_add(1) } else { 0 };
-        }
-        // 5. Still tiles sleep, their faces stopped.
-        let mut i = 0;
-        while i < self.awake.len() {
-            let t = self.awake[i] as usize;
-            if self.tiles[t].calm >= SLEEP_STEPS {
-                let tile = &mut self.tiles[t];
-                tile.awake = false;
-                tile.u.fill(0.0);
-                tile.v.fill(0.0);
-                tile.qx.fill(0.0);
-                tile.qz.fill(0.0);
-                self.awake.swap_remove(i);
+            if drift > REST * tol {
+                // It moved: at rest is judged from here on.
+                tile.rest.copy_from_slice(&tile.depth);
+                tile.calm = 0.0;
+            } else if busy || tile.springs > 0 {
+                tile.calm = 0.0;
             } else {
-                i += 1;
+                tile.calm += dt;
+            }
+            // 5. A tile at rest sleeps, its faces stopped. Its water stays
+            // where it is, to the last drop.
+            if tile.calm >= SLEEP_AFTER {
+                tile.awake = false;
+                for v in [&mut tile.u, &mut tile.v, &mut tile.um, &mut tile.vm, &mut tile.qx, &mut tile.qz] {
+                    v.fill(0.0);
+                }
+                slept = true;
             }
         }
+        if slept {
+            let tiles = &self.tiles;
+            self.awake.retain(|&t| tiles[t as usize].awake);
+        }
+        self.settle(dt);
         self.evict_dry();
+    }
+
+    /// Look, once a window, at whether each group still filling the ground
+    /// under newly held cells has come to rest: see [`Self::take_filled`].
+    fn settle(&mut self, dt: f32) {
+        if self.settling.is_empty() {
+            return;
+        }
+        self.settle_clock += dt;
+        if self.settle_clock < SETTLE_WINDOW && !self.awake.is_empty() {
+            return;
+        }
+        let volume = self.volume();
+        let stayed = (volume - self.settle_volume).abs();
+        // A film of the tolerance over one cell, a second.
+        let little = (self.still_depth as f64 * self.patch.cell * self.patch.cell * self.settle_clock as f64).max(1e-9);
+        let asleep = self.awake.is_empty();
+        self.settling.retain(|_, s| {
+            if asleep {
+                return false;
+            }
+            let given = std::mem::take(&mut s.given).abs();
+            given >= little && stayed >= 0.05 * given
+        });
+        self.settle_clock = 0.0;
+        self.settle_volume = volume;
     }
 
     /// `f` for each tile of `tiles`, in order; a `heavy` stage on as many
@@ -801,13 +1020,19 @@ impl TiledWater {
     }
 
     /// Every face of tile `t`'s new velocity, `(+column faces, +row faces)`.
-    fn solve_faces(&self, t: usize, p: &Pad, dt: f32) -> (Vec<f32>, Vec<f32>) {
+    fn solve_faces(&self, t: usize, p: &Pad, dt: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
         let tile = &self.tiles[t];
         let mut un = vec![0.0; CELLS];
         let mut vn = vec![0.0; CELLS];
+        let mut um = vec![0.0; CELLS];
+        let mut vm = vec![0.0; CELLS];
         let swe = self.solver == Solver::Swe;
         let n = if swe { self.roughness.max(SMOOTH_BED) } else { self.roughness };
-        let damp = if self.roughness <= 0.0 { (1.0 - self.damping * dt).max(0.0) } else { 1.0 };
+        let damp = (1.0 - self.damping * dt).max(0.0);
+        // Without momentum or a bed's drag nothing but this stops the water,
+        // so all of its speed is damped, as a lake's should be.
+        let plain = !swe && self.roughness <= 0.0;
+        let follow = (dt / MEAN_TIME).min(1.0);
         let still = 0.5 * self.min_depth;
         let g = self.gravity;
         for y in 0..TILE {
@@ -833,6 +1058,26 @@ impl TiledWater {
                     // ever more slowly as it thins, and would hold its tile
                     // awake for good.
                     if hf <= still {
+                        continue;
+                    }
+                    // A held cell is where water comes from or goes to
+                    // outside the patch, refilled to its level every step
+                    // whatever leaves it. A face of one that kept its speed
+                    // would be pushed by a head that never falls, and a lake
+                    // held at a few points would drive itself round them for
+                    // good. So such a face has no memory: it runs at the
+                    // speed the head across it gives water falling through
+                    // it, and no faster than brings the free side a quarter
+                    // of the way to the held level in a step.
+                    if p.held[i] || p.held[o] {
+                        let head = (eb - ea).abs();
+                        let u = (2.0 * g * head).sqrt().min(0.25 * head * dist / (hf * dt)).min(FASTEST.min(0.5 * dist / dt));
+                        let u = if eb > ea { -u } else { u };
+                        if east {
+                            (un[c], um[c]) = (u, u);
+                        } else {
+                            (vn[c], vm[c]) = (u, u);
+                        }
                         continue;
                     }
                     let (vel, q, across) = if east { (&p.u, &p.qx, &p.v) } else { (&p.v, &p.qz, &p.u) };
@@ -864,18 +1109,32 @@ impl TiledWater {
                     if n > 0.0 {
                         u /= 1.0 + dt * g * n * n * u.abs() / hf.powf(4.0 / 3.0);
                     }
-                    u *= damp;
+                    // A slosh dies away rather than ringing: each face loses
+                    // a share of its speed a second, measured from the speed
+                    // it usually runs at. A lake rocking about rest is damped
+                    // to rest; a river running steadily is left to the bed's
+                    // drag alone, so its depth is the one its slope,
+                    // roughness and flow give it.
+                    let usual = if plain { 0.0 } else if east { tile.um[c] } else { tile.vm[c] };
+                    u = usual + (u - usual) * damp;
+                    // Water circling a level lake has no usual speed of
+                    // zero to be damped towards, and nothing else to stop
+                    // it: where the surface along the face is level, all of
+                    // its speed is damped.
+                    let tilt = (eb - ea).abs() / (dist * LEVEL_SLOPE);
+                    u *= 1.0 - (1.0 - damp) * (1.0 - tilt * tilt).max(0.0);
                     let limit = FASTEST.min(0.5 * dist / dt);
                     let u = u.clamp(-limit, limit);
+                    let usual = usual + (u - usual) * follow;
                     if east {
-                        un[c] = u;
+                        (un[c], um[c]) = (u, usual);
                     } else {
-                        vn[c] = u;
+                        (vn[c], vm[c]) = (u, usual);
                     }
                 }
             }
         }
-        (un, vn)
+        (un, vn, um, vm)
     }
 
     /// What cell `(t, c)`'s face towards `side` passes this step, m³/s,
@@ -927,7 +1186,7 @@ impl TiledWater {
                     let (ea, eb) = (a.ground[c] + a.depth[c], b.ground[oc] + b.depth[oc]);
                     // Only water deep enough to move over the face between.
                     let moves = ea.max(eb) - a.ground[c].max(b.ground[oc]) > 0.5 * self.min_depth;
-                    if moves && (ea - eb).abs() > LEVEL {
+                    if moves && (ea - eb).abs() > 2.0 * self.still_depth {
                         wake.push(o);
                         break;
                     }
@@ -978,8 +1237,12 @@ impl TiledWater {
     /// or springing in them.
     fn evict_dry(&mut self) {
         let mut drop = Vec::new();
-        for (t, tile) in self.tiles.iter_mut().enumerate() {
-            if tile.awake || tile.held > 0 || tile.springs > 0 {
+        for t in 0..self.tiles.len() {
+            // A dry tile beside water still moving is kept: the water would
+            // only ask for it again.
+            let beside_awake = self.tiles[t].nbr.iter().any(|&n| n != NONE && self.tiles[n as usize].awake);
+            let tile = &mut self.tiles[t];
+            if tile.awake || tile.held > 0 || tile.springs > 0 || beside_awake {
                 tile.idle = 0;
                 continue;
             }
@@ -1030,21 +1293,40 @@ impl TiledWater {
     }
 
     /// The water as a reader sees it: every tile holding any, a tile that
-    /// has not changed since the last call handed back as the same shared
-    /// levels with the same serial.
+    /// has not been stepped since the last call handed back as the same
+    /// shared levels.
+    ///
+    /// The levels, depths and flow are always the water's own. A tile's
+    /// serial is what tells a reader to rebuild something from them, and it
+    /// moves only when the surface has moved by more than
+    /// [`Self::still_depth`] somewhere in the tile, or the flow by more than
+    /// 5 cm/s, since the serial last moved: water creeping the last fraction
+    /// of a millimetre to its level rebuilds nothing.
     pub fn surface(&mut self) -> TiledSurface {
         let mut tiles = HashMap::with_capacity(self.tiles.len());
         for t in 0..self.tiles.len() {
             if self.tiles[t].changed || self.tiles[t].published.is_none() {
                 let levels = self.read_tile(t);
+                let tol = self.still_depth;
                 let tile = &mut self.tiles[t];
                 tile.changed = false;
-                let same = tile.published.as_ref().is_some_and(|p| p.level == levels.level && p.flow == levels.flow);
-                if !same {
+                let moved = tile.shown.as_ref().is_none_or(|s| {
+                    (0..CELLS).any(|c| {
+                        (s.depth[c] - levels.depth[c]).abs() > tol
+                            || (s.level[c] - levels.level[c]).abs() > tol
+                            || (s.flow[c][0] - levels.flow[c][0]).abs() > FLOW_STEP
+                            || (s.flow[c][1] - levels.flow[c][1]).abs() > FLOW_STEP
+                    })
+                });
+                if moved {
                     self.serial += 1;
                     tile.serial = self.serial;
-                    tile.published = Some(Arc::new(TileLevels { serial: self.serial, ..levels }));
                 }
+                let levels = Arc::new(TileLevels { serial: tile.serial, ..levels });
+                if moved {
+                    tile.shown = Some(levels.clone());
+                }
+                tile.published = Some(levels);
             }
             let tile = &self.tiles[t];
             if let Some(p) = &tile.published
@@ -1169,34 +1451,38 @@ mod tests {
 
     /// **Water held in a bowl finds its level and stays there.** A bowl
     /// across four tiles, filled 3 m higher on one side than the other,
-    /// sloshes, settles flat, loses nothing, and within two minutes sleeps:
-    /// a settled lake costs nothing a step.
+    /// sloshes, settles flat, loses nothing, and within two and a half
+    /// minutes sleeps: a settled lake costs nothing a step. So it does over
+    /// a rough bed, where the bed's drag alone would leave it rocking for
+    /// hours.
     #[test]
     fn a_lake_across_tiles_levels_keeps_its_volume_and_sleeps() {
-        for solver in [Solver::Swe, Solver::Pipes] {
+        for (solver, roughness) in [(Solver::Swe, 0.0), (Solver::Swe, 0.03), (Solver::Pipes, 0.0)] {
             let n = 48;
             let bowl = |i: usize, j: usize| {
                 let (x, z) = (i as f32 - 23.5, j as f32 - 23.5);
                 (x * x + z * z) / 60.0
             };
             let mut w = patch(n, n, 1.0, solver, bowl, |i, _| if i < 24 { 6.0 } else { 3.0 });
+            w.roughness = roughness;
             let v0 = w.volume();
-            run(&mut w, 120.0);
+            run(&mut w, 150.0);
             let dv = (w.volume() - v0).abs() / v0;
             assert!(dv < 1e-4, "{solver:?}: the lake's volume moved by {:.5} %", dv * 100.0);
             let s = w.surface();
             let levels: Vec<f32> = s.tiles.values().flat_map(|t| t.level.iter().copied().filter(|l| l.is_finite())).collect();
             let (lo, hi) = levels.iter().fold((f32::MAX, f32::MIN), |(a, b), l| (a.min(*l), b.max(*l)));
             assert!(hi - lo < 0.01, "{solver:?}: the surface runs from {lo} to {hi}");
-            assert_eq!(w.awake_tiles(), 0, "{solver:?}: a settled lake is still being solved");
+            assert_eq!(w.awake_tiles(), 0, "{solver:?}, roughness {roughness}: a settled lake is still being solved");
         }
     }
 
     /// **A trench dug from a held coast fills from it.** The sea held along
     /// one edge at 0 m, a dry trench 1 m deep running 36 m inland, across a
     /// tile's edge: within 10 s the water has run 20 m in, within 30 s the
-    /// trench is four-fifths full at its far end, and the held cells say how much they
-    /// gave.
+    /// trench is four-fifths full at its far end, and the held cells say how
+    /// much they gave: as a fill, the trench having been there when they were
+    /// first held, and not as an exchange.
     #[test]
     fn a_trench_from_a_held_coast_fills_and_the_coast_counts_what_it_gave() {
         let mut w = patch(64, 8, 1.0, Solver::Swe, |i, j| if ((3..5).contains(&j) && i <= 37) || i < 2 { -1.0 } else { 0.5 }, |_, _| f32::NAN);
@@ -1219,9 +1505,10 @@ mod tests {
         assert!(half.is_some_and(|t| t < 10.0), "the water reached 20 m in at {half:?} s");
         let profile: Vec<String> = (0..40).step_by(3).map(|i| format!("{:.2}", w.cell(i, 3).map_or(-1.0, |c| c.1))).collect();
         assert!(end.is_some(), "the trench's far end never filled: reached 20 m in at {half:?} s; depths {profile:?}");
-        let given: f64 = w.take_exchanged().iter().filter(|(g, _)| *g == 7).map(|(_, v)| v).sum();
+        let given: f64 = w.take_filled().iter().filter(|(g, _)| *g == 7).map(|(_, v)| v).sum();
         assert!((given - w.volume()).abs() < 0.01 * w.volume(), "the coast gave {given} m³ for {} m³ on the patch", w.volume());
-        assert!(w.take_exchanged().is_empty(), "asked twice, it counted twice");
+        assert!(w.take_filled().is_empty(), "asked twice, it counted twice");
+        assert!(w.take_exchanged().is_empty(), "filling the trench was counted as an exchange");
     }
 
     /// **A dam breaking sends a surge with momentum.** A 1 m deep reservoir
@@ -1317,6 +1604,272 @@ mod tests {
         run(&mut w, 1.0);
         assert!((w.volume() - 5.0).abs() < 0.05, "3 m³ added and a spring at 2 m³/s for a second hold {} m³", w.volume());
         assert!((w.added() - w.volume()).abs() < 1e-3);
+    }
+
+    /// A lake basin 3 m deep in ground that rises round it, with a pit
+    /// 6 m deep past its east side, on nine tiles of 1.25 m cells:
+    /// rough bed, films soaking away, and a lattice of points every sixth
+    /// cell across the lake's middle held at `LAKE`, counted in group 3. It
+    /// starts dry, as a game that knows a lake's level but not its footprint
+    /// starts it.
+    const LAKE: f32 = -0.2;
+    fn held_lake() -> TiledWater {
+        let ground = |i: usize, j: usize| {
+            if i >= 90 {
+                return -6.0;
+            }
+            let (x, z) = (i as f32 - 47.5, j as f32 - 47.5);
+            (-3.0 + (x * x + z * z) / 400.0).min(2.5)
+        };
+        let mut w = patch(96, 96, 1.25, Solver::Swe, ground, |_, _| f32::NAN);
+        w.roughness = 0.03;
+        w.soak = 0.005;
+        w.soak_below = 0.01;
+        hold_lake(&mut w);
+        w
+    }
+
+    fn hold_lake(w: &mut TiledWater) {
+        for j in (30..66).step_by(6) {
+            for i in (30..66).step_by(6) {
+                assert!(w.hold(i, j, LAKE, 3));
+            }
+        }
+    }
+
+    /// Step a frame at a time, as the editor does, reading the surface every
+    /// frame, until every tile sleeps or `seconds` have passed. Returns the
+    /// seconds it took.
+    fn frames(w: &mut TiledWater, seconds: f32) -> f32 {
+        let mut t = 0.0;
+        while t < seconds {
+            let dt = w.stable_dt().min(1.0 / 60.0);
+            w.step(dt);
+            w.surface();
+            t += dt;
+            if w.awake_tiles() == 0 {
+                break;
+            }
+        }
+        t
+    }
+
+    fn serials(w: &mut TiledWater) -> Vec<(u32, u64)> {
+        let mut s: Vec<(u32, u64)> = w.surface().tiles.iter().map(|(k, t)| (*k, t.serial)).collect();
+        s.sort_unstable();
+        s
+    }
+
+    /// Cut a channel a metre under the lake's level from its east shore
+    /// through the rim to the pit.
+    fn breach(w: &mut TiledWater) {
+        for j in 46..50 {
+            for i in 70..90 {
+                w.set_ground(i, j, LAKE - 1.0);
+            }
+        }
+    }
+
+    /// **A lake that has filled and stands still costs nothing, and tells
+    /// its readers nothing.** Started dry from held points, over a rough bed
+    /// with films soaking away, it fills its basin, comes to rest and sleeps
+    /// within three minutes. From then on no cell is solved and no tile's
+    /// serial moves, though a script holds the same points at the same level
+    /// every frame; and the water that filled it was counted as the fill, to
+    /// the litre, and none of it as an exchange.
+    #[test]
+    fn a_filled_lake_with_held_points_sleeps_and_its_serials_stop() {
+        let mut w = held_lake();
+        let took = frames(&mut w, 180.0);
+        assert_eq!(w.awake_tiles(), 0, "a filled, still lake is still being solved after {took} s");
+        let volume = w.volume();
+        assert!(volume > 5000.0, "the basin holds {volume} m³");
+        assert!(w.cell(47, 47).is_some_and(|(g, d)| (g + d - LAKE).abs() < 2e-3), "the lake stands at {:?}", w.cell(47, 47));
+        assert!(w.cell(47, 20).is_some_and(|(g, d)| (g + d - LAKE).abs() < 5e-3), "its far shore stands at {:?}", w.cell(47, 20));
+        let filled: f64 = w.take_filled().iter().filter(|(g, _)| *g == 3).map(|(_, v)| v).sum();
+        let exchanged: f64 = w.take_exchanged().iter().map(|(_, v)| v.abs()).sum();
+        assert!(exchanged < 1e-3 * volume, "filling the dry basin counted {exchanged} m³ as an exchange, of {volume} m³");
+        // What soaked away at the shore on the way is the only difference.
+        assert!(filled >= volume && filled < 1.01 * volume, "the fill reads {filled} m³ for {volume} m³ on the patch");
+        assert!(!w.filling());
+        let before = serials(&mut w);
+        for _ in 0..300 {
+            hold_lake(&mut w);
+            w.step(1.0 / 60.0);
+            assert_eq!((w.awake_tiles(), w.solved_count()), (0, 0), "a lake at rest was woken by holding it as it is held");
+        }
+        assert_eq!(serials(&mut w), before, "a tile's serial moved with its water at rest");
+        assert_eq!(w.volume(), volume);
+    }
+
+    /// **A breach wakes a sleeping lake, and the exchange reads the drain.**
+    /// A channel cut from the shore to a pit lets the lake out; the held
+    /// points keep it at its level and count what they gave to do it, which
+    /// is what is now in the channel and the pit, the fill long since
+    /// counted apart.
+    #[test]
+    fn a_breach_wakes_a_sleeping_lake_and_the_exchange_reads_the_drain() {
+        let mut w = held_lake();
+        frames(&mut w, 180.0);
+        assert_eq!(w.awake_tiles(), 0);
+        let (full, counted) = (w.volume(), w.added());
+        w.take_filled();
+        w.take_exchanged();
+        let before = serials(&mut w);
+        breach(&mut w);
+        assert!(w.awake_tiles() > 0, "cutting the shore woke nothing");
+        let mut t = 0.0;
+        while t < 20.0 {
+            let dt = w.stable_dt().min(1.0 / 60.0);
+            w.step(dt);
+            t += dt;
+        }
+        let drained = w.volume() - full;
+        let gave: f64 = w.take_exchanged().iter().filter(|(g, _)| *g == 3).map(|(_, v)| v).sum();
+        assert!(drained > 50.0, "20 s after the breach only {drained} m³ had left the lake");
+        assert!(w.cell(92, 47).is_some_and(|(_, d)| d > 0.05), "the pit is dry: {:?}", w.cell(92, 47));
+        assert!(w.take_filled().is_empty(), "a breach was counted as a fill");
+        // All but what soaked into the channel's bed.
+        assert!(gave >= drained && gave < drained * 1.02 + 1.0, "the lake gave {gave} m³ and {drained} m³ more is on the patch");
+        assert!((w.volume() - full - (w.added() - counted)).abs() < 1e-6 * full, "water was made or lost");
+        assert_ne!(serials(&mut w), before, "the surface moved and no serial did");
+    }
+
+    /// **A tile's serial moves for a surface change that counts, and not for
+    /// drift under it.** A tenth of a millimetre more water is in the levels
+    /// a reader gets, with the serial it had; two millimetres moves it.
+    #[test]
+    fn a_serial_moves_only_for_a_real_surface_change() {
+        let mut w = patch(32, 32, 1.0, Solver::Swe, |_, _| 0.0, |_, _| 1.0);
+        let before = serials(&mut w);
+        for i in 0..32 {
+            for j in 0..32 {
+                w.add_water(i, j, 1e-4);
+            }
+        }
+        w.step(1.0 / 60.0);
+        let s = w.surface();
+        assert!(s.cell(5, 5).is_some_and(|(l, d, _)| (l - 1.0001).abs() < 1e-6 && (d - 1.0001).abs() < 1e-6), "the levels read {:?}", s.cell(5, 5));
+        assert_eq!(serials(&mut w), before, "a tenth of a millimetre moved a serial");
+        // Drift adds up: the serial is judged against the surface it last
+        // moved for, not against the frame before.
+        for _ in 0..8 {
+            for i in 0..32 {
+                for j in 0..32 {
+                    w.add_water(i, j, 1e-4);
+                }
+            }
+            w.step(1.0 / 60.0);
+            w.surface();
+        }
+        assert_ne!(serials(&mut w), before, "nine tenths of a millimetre, a tenth at a time, moved no serial");
+    }
+
+    /// **Sleeping and waking move no water.** A lake asleep across two tiles
+    /// takes 40 m³ poured into one of them: that tile wakes, wakes the other
+    /// when its surface stands off it, and the two settle level again and
+    /// sleep, holding to the litre what was there plus what was poured. A
+    /// held level moved wakes it too, and counts what it took.
+    #[test]
+    fn volume_is_conserved_through_sleep_and_wake() {
+        let mut w = patch(64, 32, 1.0, Solver::Swe, |i, j| if i == 0 || j == 0 || i == 63 || j == 31 { 5.0 } else { 0.0 }, |_, _| 1.5);
+        w.roughness = 0.03;
+        frames(&mut w, 10.0);
+        assert_eq!(w.awake_tiles(), 0, "level water did not sleep");
+        let v0 = w.volume();
+        assert!((w.add_water(8, 16, 40.0) - 40.0).abs() < 1e-9);
+        assert_eq!(w.awake_tiles(), 1, "pouring water in woke {} tiles", w.awake_tiles());
+        let took = frames(&mut w, 200.0);
+        assert_eq!(w.awake_tiles(), 0, "the lake never came back to rest");
+        assert!(took > 1.0);
+        assert!((w.volume() - v0 - 40.0).abs() < 1e-5 * v0, "{} m³ before, 40 poured in, {} after", v0, w.volume());
+        let (a, b) = (w.cell(8, 16).unwrap().1, w.cell(56, 16).unwrap().1);
+        let level = 1.5 + 40.0 / (62.0 * 30.0);
+        assert!((a - level).abs() < 2e-3 && (b - level).abs() < 2e-3, "the two tiles stand at {a} and {b}, level would be {level}");
+        // A point held where the water stands changes nothing; moved to a
+        // new level it wakes its tile and takes what stands above it.
+        assert!(w.hold(8, 16, a, 2));
+        frames(&mut w, 10.0);
+        assert_eq!(w.awake_tiles(), 0, "a point held at the level it stood at kept the lake awake");
+        assert!(w.take_filled().iter().all(|(_, v)| v.abs() < 1e-3) && w.take_exchanged().is_empty());
+        let v1 = w.volume();
+        assert!(w.hold(8, 16, a - 0.1, 2));
+        assert!(w.awake_tiles() > 0, "moving a held level woke nothing");
+        frames(&mut w, 300.0);
+        let took: f64 = w.take_exchanged().iter().filter(|(g, _)| *g == 2).map(|(_, v)| v).sum();
+        assert!(took < -100.0, "lowering the hold took {took} m³");
+        assert!((w.volume() - v1 - took).abs() < 1e-5 * v1, "{v1} m³ before, {took} taken, {} after", w.volume());
+        assert!(w.take_filled().is_empty(), "moving a held level was counted as a fill");
+    }
+
+    /// **A channel runs at the depth Manning's formula gives it.** Water
+    /// fed in at the head of a straight channel of even slope runs out
+    /// uniform, and its depth is the normal depth `(q·n / √S)^(3/5)` for the
+    /// flow per metre of width `q`, roughness `n` and slope `S` (the channel
+    /// is wide and its walls are smooth, so the depth is the hydraulic
+    /// radius). Within 3 % of it for a rough bed and a smooth one, steep and
+    /// gentle, one cell wide and four; and with no roughness given the bed
+    /// is the smoothest there is (0.012), nothing else holding the water
+    /// back.
+    #[test]
+    fn a_channel_runs_at_mannings_normal_depth() {
+        for (n, slope, q, width) in [(0.03f32, 0.01f32, 0.5f32, 4usize), (0.03, 0.05, 0.25, 1), (0.012, 0.01, 0.5, 2), (0.0, 0.01, 0.5, 2)] {
+            let (len, rows, cell) = (128usize, width + 2, 1.25f32);
+            let mut w = patch(
+                len,
+                rows,
+                cell as f64,
+                Solver::Swe,
+                |i, j| if j == 0 || j == rows - 1 { 50.0 } else { -slope * i as f32 * cell },
+                // Wet from the start, so no tile is dropped as dry before
+                // the water reaches it.
+                |i, j| if j == 0 || j == rows - 1 { f32::NAN } else { -slope * i as f32 * cell + 0.05 },
+            );
+            w.roughness = n;
+            for j in 1..=width {
+                // Fed at the head, taken at the foot.
+                w.set_spring(1, j, q * cell);
+                assert!(w.hold(len - 1, j, -100.0, 9));
+            }
+            run(&mut w, 120.0);
+            let normal = (q * n.max(SMOOTH_BED) / slope.sqrt()).powf(0.6);
+            for i in [70, 85, 100] {
+                let d = w.cell(i, 1).unwrap().1;
+                assert!((d - normal).abs() < 0.03 * normal, "n {n}, slope {slope}, {q} m²/s, {width} wide: {d} m deep at cell {i}, Manning says {normal}");
+            }
+            // And it carries what it was fed.
+            let t = &w.tiles[w.at(85, 1).unwrap().0];
+            let carried: f32 = (1..=width).map(|j| t.qx[j * TILE + 85 % TILE]).sum();
+            assert!((carried - q * cell * width as f32).abs() < 0.02 * q * cell * width as f32, "fed {} m³/s, carrying {carried}", q * cell * width as f32);
+        }
+    }
+
+    /// **A lake's shore does not soak away.** With films soaking, the thin
+    /// water at the edge of a pool is part of the pool: a pond on a gentle
+    /// beach keeps every drop and sleeps, where the film left stranded up
+    /// the beach when the pond was let down is gone in seconds.
+    #[test]
+    fn a_pools_thin_edge_is_not_a_film() {
+        // A beach rising 4 mm a cell, the pond's edge many cells of water
+        // thinner than the film depth.
+        let mut w = patch(32, 32, 1.0, Solver::Swe, |i, j| if j == 0 || j == 31 || i == 0 { 5.0 } else { i as f32 * 0.004 - 0.06 }, |_, _| 0.0);
+        w.soak = 0.005;
+        w.soak_below = 0.01;
+        let v0 = w.volume();
+        frames(&mut w, 30.0);
+        assert_eq!(w.awake_tiles(), 0, "a still pond with a shore never slept");
+        assert!((w.volume() - v0).abs() < 1e-6 * v0, "the pond's shore soaked {} m³ away of {v0}", v0 - w.volume());
+        // Let down 3 cm, it leaves the beach above it damp, and that dries.
+        for i in 1..32 {
+            for j in 1..31 {
+                let d = w.cell(i, j).unwrap().1;
+                w.add_water(i, j, -(d.min(0.03) as f64));
+            }
+        }
+        frames(&mut w, 30.0);
+        assert_eq!(w.awake_tiles(), 0);
+        assert!(w.cell(12, 16).is_some_and(|(_, d)| d == 0.0), "the beach is still damp: {:?}", w.cell(12, 16));
+        assert!(w.cell(2, 16).is_some_and(|(_, d)| d > 0.01), "the pond went with it: {:?}", w.cell(2, 16));
     }
 
     /// What a tick of moving water costs at 500, 6,000 and 30,000 wet

@@ -396,6 +396,9 @@ pub struct TiledSpec {
     /// Films thinner than `soak_below` soak away at `soak` metres a second.
     pub soak: f32,
     pub soak_below: f32,
+    /// The surface change that counts, metres: water within it sleeps, and
+    /// a tile's serial moves only for more.
+    pub still_depth: f32,
 }
 
 /// A cell held at a level, and the group what it gives is counted in.

@@ -1030,6 +1030,9 @@ pub struct ScriptHost {
     water_sim_cmds: Rc<RefCell<Vec<floptle_core::water::SimCmd>>>,
     /// What tiled sims' held groups gave, waiting for `water.exchanged`.
     water_exchanged: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>>,
+    /// What they gave to fill the ground under newly held points, waiting
+    /// for `water.filled`.
+    water_filled: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>>,
     /// Water entries and exits waiting for `water.splashes`.
     water_splashes: Rc<RefCell<std::collections::VecDeque<floptle_physics::splash::Splash>>>,
     /// The physics clock and when each node was last in water.

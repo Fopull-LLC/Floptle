@@ -413,7 +413,8 @@ end
 | `water.levelOf(id)` | its level now. |
 | `water.hold(id, cells, level [, group])` / `water.release(id, cells)` | hold a sim's points at a level, or let them go. |
 | `water.exchanged(id)` | what each group of held points gave the water since the last ask, m³. |
-| `water.tiles(id)` | a tiled sim's wet tiles, each with a serial that changes when its water does. |
+| `water.filled(id)` | what each group gave to fill the ground under newly held points, m³, kept out of `exchanged`. |
+| `water.tiles(id)` | a tiled sim's wet tiles, each with a serial that moves when its surface really has. |
 | `water.state(id)` | a tiled sim's wet points, for a save (`addVolume{ state = ... }` starts from it). |
 | `water.addWater(id, at, m3)` / `water.setSpring(id, at, rate)` | add or take water at a point; a spring changed while it runs. |
 | `water.splashes()` | what entered or left water since the last call. |
@@ -491,6 +492,16 @@ lake costs nothing a step), wake when water beside them moves, when their
 ground is dug, or when a script holds or adds water in them, and are
 dropped once dry.
 
+"Still" is a tolerance, `stillDepth`, half a millimetre unless you say. A
+tile sleeps once its surface has stayed within a quarter of it for a second
+with nothing in it moving faster than a millimetre a second: a lake held at its level, a pool
+that has found its own, a channel that has filled. Sleeping moves no water,
+so the volume is exactly what it was. A sleeping tile wakes when the surface
+beside it stands more than twice the tolerance off its own, when a held
+level moves, when water is added, or when its ground is dug. A river that
+keeps running stays awake, as it should. Holding points as they are already
+held wakes nothing, so a script can call `water.hold` every frame.
+
 ```lua
 local trench = water.addVolume{ shape = "sim", parent = "Planet", center = beach, cell = 1.25, size = 200,
   level = false,                                   -- start dry
@@ -509,10 +520,28 @@ local gave = water.exchanged(trench)[2] or 0       -- m³ the sea gave since the
   `cells` is a list of points in the parent's frame (the point under each),
   or `{i, j}` columns and rows from the patch's corner, counted from 0.
   `water.setLevel(id, level)` moves every held point to `level`.
+  A held point is where water comes from or goes to outside the patch: it
+  gives or takes at the speed the head across it drives, and a stream that
+  runs into one ends there, so a lake held at a few points stands still
+  round them.
 - `water.exchanged(id)` is what each group of held points gave the water
   since the last ask, m³ (negative: what it took). A lake held at its level
   is a finite reservoir: a breach drains it by what left, and the water
   stops at the sill.
+- `water.filled(id)` is what each group gave to fill the ground under newly
+  held points, counted apart. Points held over dry ground pour until the
+  ground below their level is full: a sim started dry with a lake's points
+  held fills the lake's whole footprint from them. That is the water
+  reaching the state the holds describe, not anything happening to the lake,
+  so it is kept out of `exchanged`: from when a free point is first held,
+  what its group gives lands in `filled`, until the group comes to rest (a
+  second in which it gave next to nothing, or in which what it gave did not
+  stay on the patch, as with a held source feeding a stream that runs off
+  the edge). After that everything is `exchanged`. Moving a held point's
+  level does not start a fill again, so a lake lowered by what it gave keeps
+  reading as exchange. A breach opened while a group is still filling is
+  counted in `filled` with the rest; hold later points in a group of their
+  own to keep the two apart. The two together are everything the group gave.
 - `solver = "swe"` (the default) moves the water with momentum: a breach
   sends a surge down a channel, a wave runs up a beach. `solver = "pipes"`
   is the cheaper model without momentum, for calm water that only has to find
@@ -520,6 +549,15 @@ local gave = water.exchanged(trench)[2] or 0       -- m³ the sea gave since the
   Manning roughness of 0.012) whatever `roughness` says, which is what lets a
   shore come to rest. A film thinner than 1 mm reads as dry ground, and one
   thinner than half that stays where it is.
+- A channel runs at the depth Manning's formula gives it: for a flow of `q`
+  m² a second per metre of width down a slope `S` over a bed of roughness
+  `n`, a depth of `(q·n / √S)^(3/5)`, to within a few percent at any cell
+  size (0.5 m² a second down 1 in 100 runs 0.32 m deep over `roughness =
+  0.03`, and 0.19 m deep over the smooth bed it gets when no roughness is
+  given). Standing water is also damped, so that a lake comes to rest instead
+  of rocking for hours: a slosh loses a fifth of its speed a second, and so
+  does water drifting over a surface flatter than 1 in 2,000. Water running
+  steadily down a slope is left to its bed's drag alone.
 - `budget` is the most a frame spends stepping it, in milliseconds (1 by
   default). Past it the water runs slow for a moment; the frame does not.
   `perf.counts()` reports `waterAwake` (points in tiles that are moving),
@@ -531,11 +569,23 @@ local gave = water.exchanged(trench)[2] or 0       -- m³ the sea gave since the
   changes it, or at 0 takes it away.
 - `minDepth` (1 mm) is the least depth that moves and reads as water, and
   `soak` (metres a second) soaks away films thinner than `soakBelow` (1 cm),
-  so a drained channel dries instead of holding a film for good.
+  so a drained channel dries instead of holding a film for good. Only a
+  film soaks: the thin edge of a pool, level with deeper or held water
+  within 64 points of it, is part of the pool and stays, so a lake does not
+  drain through its shore.
+- `stillDepth` (0.0005, half a millimetre; 0 to 0.1) is the surface change
+  that counts: what a tile's water must stay within to sleep, and what its
+  surface must move by for its serial to move. Raise it for a coarse sim
+  whose mesh is expensive to rebuild.
 - `water.tiles(id)` lists the tiles holding water, each `{ key, serial, i,
-  j }`; a tile's `serial` changes only when its water does, so a game
-  rebuilds only the tiles that moved: `water.surface(id, { tile = key })` is
-  one tile's surface, wet points only, and `water.surface(id)` all of them.
+  j }`. A tile's `serial` moves only when its surface has moved by more than
+  `stillDepth` somewhere in the tile, or its flow by more than 5 cm/s, since
+  the serial last moved, so a game rebuilds only the tiles that really
+  changed and none for water creeping the last fraction of a millimetre to
+  its level. What `water.at`, `water.depthAt` and `water.state` read is
+  always the water's own, whatever the serial says.
+  `water.surface(id, { tile = key })` is one tile's surface, wet points
+  only, and `water.surface(id)` all of them.
 
 `water.falls([id])` lists every place simulated water pours off a drop of more
 than 1.5 m, in the world, refreshed as the water flows: where a game puts its

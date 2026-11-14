@@ -1925,7 +1925,7 @@ function water.flowAt(x, y, z) end
 ---so a cave under a lake is dry. From inside it looks like a Water Volume node
 ---(`tint`, `visibility` to change that, `underwater = false` for none). Returns
 ---an id.
----@param opts { shape?: "lake"|"heightfield"|"sim", level?: number|false, size?: number, depths?: number[], held?: { pos?: Vec3, cell?: integer[], level?: number, group?: integer }[], solver?: "swe"|"pipes", budget?: number, flat?: boolean, state?: { columns: integer, rows: integer, cells: number[] }, minDepth?: number, soak?: number, soakBelow?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
+---@param opts { shape?: "lake"|"heightfield"|"sim", level?: number|false, size?: number, depths?: number[], held?: { pos?: Vec3, cell?: integer[], level?: number, group?: integer }[], solver?: "swe"|"pipes", budget?: number, flat?: boolean, state?: { columns: integer, rows: integer, cells: number[] }, minDepth?: number, soak?: number, soakBelow?: number, stillDepth?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
 ---@return integer
 function water.addVolume(opts) end
 ---Every place simulated water pours off a drop of more than 1.5 m, in the
@@ -1972,12 +1972,19 @@ function water.hold(id, cells, level, group) end
 ---@return boolean
 function water.release(id, cells) end
 ---What each group of held points gave the water since the last ask, m³
----(negative: what it took).
+---(negative: what it took), apart from what `water.filled` counts.
 ---@param id integer
 ---@return table<integer, number>
 function water.exchanged(id) end
+---What each group of held points gave to fill the ground under newly held
+---points since the last ask, m³: counted from when a free point is first held
+---until its group comes to rest, and kept out of `water.exchanged`.
+---@param id integer
+---@return table<integer, number>
+function water.filled(id) end
 ---The tiles of a sim laid with a `center` that hold water, 32 × 32 points
----each; a tile's `serial` changes only when its water does.
+---each; a tile's `serial` moves only when its surface has moved by more than
+---`stillDepth`.
 ---@param id integer
 ---@return { key: integer, serial: integer, i: integer, j: integer }[]|nil
 function water.tiles(id) end

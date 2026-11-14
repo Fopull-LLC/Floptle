@@ -30,7 +30,7 @@ each group, and meant to be searched.
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 37
 - [pathfinding — nav.*](#pathfinding--nav) — 26
-- [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 25
+- [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 26
 - [weather — wind](#weather--wind) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 12
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 38
@@ -3250,7 +3250,7 @@ Water volumes: how deep a point is (water.depthAt), what is in the water (water.
 
 ### `water.addVolume`
 
-water.addVolume{ shape = "lake" | "heightfield", parent = "Planet", ... } → an id. Water no node carries, in the frame of the node it lies on, so it turns with its planet. A lake takes `center` (a point on its surface) and `reach` (how far its farthest shore is), exactly as terrain.planetLakes gives them; a heightfield takes `origin`, `cell`, `columns`, `rows` and `levels` (false = dry), with an optional `flow`. It floats things, carries them on its `current`, and water.at answers for it. `depth` is how far down its bed lies (planetLakes gives it), so a cave under a lake is dry; from inside it looks like a Water Volume node, with `tint = {r,g,b}` and `visibility` (metres) to change that and `underwater = false` for no look. shape = "sim" is water the engine moves: `origin`, `cell`, `columns`, `rows` as a heightfield and `level` to fill it to; the engine finds the ground under it, then the water flows, drains into holes dug beside it and settles, and water.at, flowAt and floating follow it. A sim is a river with `springs = { { pos = vec3, rate = m³/s }, ... }` (each at the point nearest its pos), `roughness` (the bed's Manning roughness: 0 = still water's frictionless model, the default; 0.035 = a natural river bed, which runs the water at a real river's depth and speed) and `holdEdges = true` (edge points below `level` held at it: the sea beyond the patch, which fills a trench dug from its shore). Water off a drop passes what a weir does, so a river over a cliff is stable; water.falls says where it pours. A sim with `center` (a point on the ground in the parent's frame) instead of `origin` lies on a round world: each point's up is its own radial, `level` is a radius (false starts it dry; `depths` gives metres per point), its ground comes from the terrain's field along each radial and is read again where it is dug, and it is `size` metres across (or `columns` × `rows`), up to 4,096 points a side, stored in 32 × 32 tiles only where water is and stepped only where it moves. `held = { { pos = vec3 or cell = {i, j}, level =, group = } }` holds points at a level (water.hold, water.release, water.exchanged), `solver = "swe"` (the default, water with momentum) or `"pipes"` (calmer and cheaper), `budget` the most milliseconds a frame spends stepping it, `flat = true` for a flat world. `state` (what water.state gave) starts it from a save; `minDepth` (1 mm) is the least depth that moves and reads as water, and `soak` (m/s) soaks away films thinner than `soakBelow` (1 cm), so a drained channel dries.
+water.addVolume{ shape = "lake" | "heightfield", parent = "Planet", ... } → an id. Water no node carries, in the frame of the node it lies on, so it turns with its planet. A lake takes `center` (a point on its surface) and `reach` (how far its farthest shore is), exactly as terrain.planetLakes gives them; a heightfield takes `origin`, `cell`, `columns`, `rows` and `levels` (false = dry), with an optional `flow`. It floats things, carries them on its `current`, and water.at answers for it. `depth` is how far down its bed lies (planetLakes gives it), so a cave under a lake is dry; from inside it looks like a Water Volume node, with `tint = {r,g,b}` and `visibility` (metres) to change that and `underwater = false` for no look. shape = "sim" is water the engine moves: `origin`, `cell`, `columns`, `rows` as a heightfield and `level` to fill it to; the engine finds the ground under it, then the water flows, drains into holes dug beside it and settles, and water.at, flowAt and floating follow it. A sim is a river with `springs = { { pos = vec3, rate = m³/s }, ... }` (each at the point nearest its pos), `roughness` (the bed's Manning roughness: 0 = still water's frictionless model, the default; 0.035 = a natural river bed, which runs the water at a real river's depth and speed) and `holdEdges = true` (edge points below `level` held at it: the sea beyond the patch, which fills a trench dug from its shore). Water off a drop passes what a weir does, so a river over a cliff is stable; water.falls says where it pours. A sim with `center` (a point on the ground in the parent's frame) instead of `origin` lies on a round world: each point's up is its own radial, `level` is a radius (false starts it dry; `depths` gives metres per point), its ground comes from the terrain's field along each radial and is read again where it is dug, and it is `size` metres across (or `columns` × `rows`), up to 4,096 points a side, stored in 32 × 32 tiles only where water is and stepped only where it moves. `held = { { pos = vec3 or cell = {i, j}, level =, group = } }` holds points at a level (water.hold, water.release, water.exchanged), `solver = "swe"` (the default, water with momentum) or `"pipes"` (calmer and cheaper), `budget` the most milliseconds a frame spends stepping it, `flat = true` for a flat world. `state` (what water.state gave) starts it from a save; `minDepth` (1 mm) is the least depth that moves and reads as water, and `soak` (m/s) soaks away films thinner than `soakBelow` (1 cm), so a drained channel dries (the thin edge of a pool is not a film, and stays). `stillDepth` (0.5 mm) is the surface change that counts: water that has stayed within it for a second sleeps, and a tile's serial moves only for more. A channel runs at the depth Manning's formula gives for its `roughness` (0.012 when none is given).
 
 ### `water.addWater`
 
@@ -3266,11 +3266,15 @@ water.depthAt(x, y, z) — or a vec3, or a node. Metres BELOW the surface at tha
 
 ### `water.exchanged`
 
-water.exchanged(id) → { [group] = m³ }: what each group of held points gave the water since the last ask (negative: what it took). A lake held at its level is a finite reservoir this way: a breach drains it by what left, and the water stops at the sill.
+water.exchanged(id) → { [group] = m³ }: what each group of held points gave the water since the last ask (negative: what it took). A lake held at its level is a finite reservoir this way: a breach drains it by what left, and the water stops at the sill. What newly held points give to fill the ground under them is not here but in water.filled.
 
 ### `water.falls`
 
 water.falls([id]) — every place simulated water (a `shape = "sim"` volume) pours off a drop of more than 1.5 m, in the world: { pos, dir, width, discharge, drop, volume }. `pos` is the top of the fall at the water's surface, `dir` the way it pours across the ground, `discharge` m³/s over the edge and `drop` metres from the surface above to the surface below. Refreshed as the water flows, so a fall that runs dry leaves the list: where a game puts a fall sheet and its mist, and takes them away. With an id, only that volume's.
+
+### `water.filled`
+
+water.filled(id) → { [group] = m³ }: what each group of held points gave to fill the ground under newly held points, since the last ask. Points held over dry ground pour until the ground below their level is full; from when a free point is first held until its group comes to rest (a second in which it gave next to nothing, or in which what it gave did not stay on the patch), what the group gives is counted here and not in water.exchanged, so a lake started dry does not read as a lake draining. Moving a held point's level does not start it again. A breach in that time is counted here too: give what is held later its own group to keep the two apart.
 
 ### `water.flowAt`
 
@@ -3278,7 +3282,7 @@ water.flowAt(point) → vec3, the water's velocity there in m/s: a river's curre
 
 ### `water.hold`
 
-water.hold(id, cells, level [, group]) → true if id is a sim laid with a `center`. Hold those points' surface at `level` (a radius on a round world): the sea at a coast, a lake at its live level, a river's rows at their surface. Water flows in or out there as the rest needs, and what they give or take is counted in `group` (1 by default) for water.exchanged. `cells` is a list of points in the parent's frame (the point under each), or {i, j} columns and rows from the patch's corner counted from 0, or one point. A point whose tile does not exist yet is held once the tile is made.
+water.hold(id, cells, level [, group]) → true if id is a sim laid with a `center`. Hold those points' surface at `level` (a radius on a round world): the sea at a coast, a lake at its live level, a river's rows at their surface. Water flows in or out there as the rest needs, and what they give or take is counted in `group` (1 by default) for water.exchanged, and for water.filled while newly held points fill the ground under them. Holding points as they are already held changes nothing, so it can be done every frame. `cells` is a list of points in the parent's frame (the point under each), or {i, j} columns and rows from the patch's corner counted from 0, or one point. A point whose tile does not exist yet is held once the tile is made.
 
 ### `water.isUnderwater`
 
@@ -3334,7 +3338,7 @@ water.surfaceChanged(id) → true when that declared water's surface is not what
 
 ### `water.tiles`
 
-water.tiles(id) → { { key, serial, i, j }, ... }: the tiles of a sim laid with a `center` that hold water, each 32 × 32 points, `i`, `j` its first point's column and row. A tile's `serial` changes only when its water does, so a game rebuilds only the tiles that moved, with water.surface(id, { tile = key }). nil for no such sim.
+water.tiles(id) → { { key, serial, i, j }, ... }: the tiles of a sim laid with a `center` that hold water, each 32 × 32 points, `i`, `j` its first point's column and row. A tile's `serial` moves only when its surface has moved by more than `stillDepth` (0.5 mm) somewhere in it, or its flow by more than 5 cm/s, since the serial last moved, so a game rebuilds only the tiles that changed, with water.surface(id, { tile = key }), and none for water at rest. nil for no such sim.
 
 ### `water.volumes`
 
