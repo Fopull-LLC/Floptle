@@ -207,6 +207,7 @@ local s = audio.play("audio/roar.ogg", bossNode, {
 | `s:seek(secs)` | jump the playhead |
 | `s:isPlaying()` / `s:position()` | playback state |
 | `s:isLoading()` | its clip is still being read (see below) |
+| `s:audible()` | the gain reaching the listener: volume × distance falloff (0..1 at volume 1); 0 while loading, paused or ended |
 
 The first time a clip is played, its file is read and decoded in the
 background, and the sound starts once that is done: a frame later for a
@@ -227,8 +228,121 @@ is playing are kept while they fit in 64 MB, and the least recently played
 goes first. A dropped clip is read again the next time it plays.
 `assets.preload` takes sound files too, beside models.
 
+`audio.duration(clip)` is a clip's length in seconds, or nil until it has
+been read: asking about a clip nothing has played or preloaded starts the
+read, so it answers a frame or so later, and once known the length stays
+known for the play session. It replaces a length typed into a script by
+hand:
+
+```lua
+local line = audio.play("audio/vo/line_04.ogg")
+local secs = audio.duration("audio/vo/line_04.ogg")   -- nil on the first frame of a cold clip
+if secs then after(secs + 0.3, nextLine) end
+```
+
+`s:audible()` (and `node:sound():audible()`) is the gain the listener gets
+from a sound, the same number the mixer plays it at before its track's fader:
+its volume times the distance falloff. A caption that fades with distance, or
+a guard that "hears" a footstep above 0.1, reads it rather than copying the
+falloff maths.
+
 `endBehavior = "Destroy"` on a node-following sound despawns that node when
 the sound finishes — spawn a node, hang a sound on it, and it cleans itself up.
+
+### Voice groups: a budget for sounds that come in crowds
+
+Splashes, impacts and footsteps are fired by physics, and physics does not
+count. Give those sounds a **group** and the group a **limit**, and the mixer
+keeps the ones that matter:
+
+```lua
+audio.limit("splash", 8)                     -- once, e.g. in start()
+
+audio.play("audio/splash.ogg", x, y, z, {
+  group = "splash",
+  priority = big and 2 or 0,                 -- default 0; higher matters more
+})
+```
+
+When the group is full, a new sound takes the place of the voice that ranks
+lowest: the lowest `priority`, then the quietest at the listener (its volume
+times its distance falloff), then the oldest. That voice fades out over a few
+milliseconds, exactly as `s:stop()` would. A new sound that ranks below every
+voice the group is playing is dropped instead, and its handle reads as
+finished.
+
+`audio.limit(group, nil)` lifts the cap, and lowering one below what is
+playing fades the extras out. `audio.groupCount("splash")` is how many voices
+the group is playing, as the mixer last counted them (a sound asked for this
+frame shows up a frame or so later). A limit holds until Play stops. A play
+session can name up to 64 groups; a sound in a group past that plays
+ungrouped. Sounds with no group are never counted and never replaced, so a
+game that names no groups plays exactly as before.
+
+### Distance dulls a sound: `airAbsorption` and `lowpassFalloff`
+
+Far away, a sound loses its highs before it loses its loudness: thunder
+rumbles, a distant waterfall hisses less than a near one. Two `audio.play`
+options make the mixer do that from the distance it already knows, every
+few milliseconds, as the sound or the listener moves:
+
+```lua
+audio.play("audio/waterfall.ogg", fallNode, {
+  loop = true, maxDistance = 400,
+  airAbsorption = 0.02,                        -- past minDistance: 20 kHz / (1 + k × metres)
+})
+
+audio.play("audio/horn.ogg", x, y, z, {
+  lowpassFalloff = { near = 12000, far = 600 }, -- Hz at minDistance → Hz at maxDistance
+})
+```
+
+- `airAbsorption = k`: inside `minDistance` nothing is cut; past it the
+  cutoff falls as `20000 / (1 + k × metres past minDistance)`. 0.02 dulls a
+  sound across a field (about 4 kHz at 200 m), 0.2 is thick fog or rain.
+- `lowpassFalloff = {near = Hz, far = Hz}`: `near` at `minDistance`, `far`
+  at `maxDistance`, and evenly in pitch in between (halfway along the range
+  is the geometric mean, which is how the ear hears it).
+
+With both, or with a sound's own `lowpass` (`s:setLowpass`) as well, the
+lowest cutoff wins: one filter on the sound, never two stacked. Only a sound
+in the world has a distance: a flat sound (no position, or `mode = "Flat"`)
+is never dulled by either. Both are off unless named.
+
+### Muffle the world, not the cockpit: `audio.setWorldLowpass`
+
+Under water, or in a vacuum suit, the world outside goes dull while the
+breath in the helmet and the beeps in the cockpit stay crisp. One call
+sets the listener's medium, and one option marks what is heard inside:
+
+```lua
+audio.play("audio/breath.ogg", diver, { loop = true, listenerSpace = true })
+audio.play("audio/sonar.ogg", sub, { listenerSpace = true })
+
+function update(node, dt)
+  audio.setWorldLowpass(camera.y < seaLevel and 600 or 0)   -- 0 / nil = clear air
+end
+```
+
+`audio.setWorldLowpass(hz)` puts a low-pass at `hz` on every sound out in the
+world: placed at a point or on a node, and not flat. A sound played with
+`listenerSpace = true` passes it by, and so does a flat one (music, UI,
+stingers), which is not in the world to begin with. The change glides over a
+few milliseconds, so flipping it on the frame the camera goes under never
+clicks; to ease in over a second, call it every frame with a moving value.
+It holds until Play stops.
+
+How the low-passes compose:
+
+- On each sound, its own `lowpass` (`s:setLowpass`), its distance low-pass
+  (`airAbsorption`, `lowpassFalloff`) and the world low-pass are one filter
+  at the **lowest** of their cutoffs. A sound behind a wall under water is
+  as dull as the duller of the two, not doubly so.
+- A track's `audio.track(name):setLowpass(hz)` is a separate filter on the
+  whole bus, after the sounds are mixed and after the track's effects, so it
+  stacks on top. That is still the tool for a whole bus (dull the music when
+  the pause menu opens); the world low-pass is the one that tells the world
+  from the cockpit.
 
 ### The Audio Source component
 

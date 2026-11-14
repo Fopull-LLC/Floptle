@@ -343,6 +343,7 @@
 ---@field isPlaying fun(self: AudioSourceHandle): boolean Is the source audible right now?
 ---@field isLoading fun(self: AudioSourceHandle): boolean True from play until its clip has been read in the background; it reads as playing, from 0 seconds, meanwhile.
 ---@field position fun(self: AudioSourceHandle): number Playhead in seconds.
+---@field audible fun(self: AudioSourceHandle): number The gain the listener gets from it (volume × distance falloff), 0 while loading, paused or stopped.
 
 ---Something that walks the navmesh, returned by `nav.agent(node)`. Order it with
 ---`moveTo` and read `state` as it goes — the engine steps the whole crowd once a
@@ -395,6 +396,7 @@
 ---@field isPlaying fun(self: SoundHandle): boolean Still audible (false once finished)?
 ---@field isLoading fun(self: SoundHandle): boolean True from audio.play until its clip has been read in the background; it reads as playing meanwhile, and what you do to it (seek, pause, volume, stop) applies when it starts.
 ---@field position fun(self: SoundHandle): number Playhead in seconds.
+---@field audible fun(self: SoundHandle): number The gain the listener gets from it (volume × distance falloff, 0..1 at volume 1), 0 while loading, paused or ended.
 
 ---A mixer track handle from `audio.track(name)` — live control of the
 ---project mixer. Changes hold for the whole play session, across
@@ -433,12 +435,21 @@
 ---@field loop boolean? Shorthand for endBehavior = "Loop".
 ---@field sends table<string, number>? Taps into other mixer tracks beside its own, track = level (a reverb bus heard partly).
 ---@field lowpass number? Muffle this sound alone above that many Hz (behind a wall); 0 = off.
+---@field group string? The voice group it counts against (see `audio.limit`).
+---@field priority integer? Which sound gives way when its group is full: the lowest goes first (default 0).
+---@field airAbsorption number? How fast distance dulls it: past minDistance its cutoff falls as 20 kHz / (1 + k × metres); 0 = off.
+---@field lowpassFalloff {near: number, far: number}? A low-pass that closes with distance: `near` Hz at minDistance to `far` Hz at maxDistance.
+---@field listenerSpace boolean? Heard inside the listener's own space (helmet, cockpit): `audio.setWorldLowpass` passes it by.
 
 ---The sound system: fire-and-forget playback + mixer control. Positions and
 ---following make it spatial; pass no position for flat 2D (UI, music).
 ---@class audio
 ---@field play fun(clip: string, a?: Node|number, b?: number|AudioPlayOpts, c?: number, opts?: AudioPlayOpts): SoundHandle Play a clip: `audio.play("audio/ding.ogg")` (flat) · `audio.play("audio/hit.ogg", x, y, z, opts)` (at a point) · `audio.play("audio/engine.ogg", carNode, {loop=true})` (follows the node).
 ---@field stopAll fun() Stop every playing sound (sources and one-shots).
+---@field limit fun(group: string, maxVoices: integer?) Cap how many sounds a voice group plays at once; nil lifts the cap. At the cap a new sound replaces the lowest-priority voice, then the quietest at the listener, or is dropped if it ranks below them all.
+---@field groupCount fun(group: string): integer How many voices a voice group is playing, as the mixer last counted them.
+---@field duration fun(clip: string): number? The clip's length in seconds, or nil until it has been read (asking starts the read).
+---@field setWorldLowpass fun(hz: number?) Muffle every sound out in the world above `hz` (under water, in a vacuum suit), sparing `listenerSpace` and flat ones; nil or 0 clears it.
 ---@field track fun(name: string): AudioTrackHandle? A mixer track handle ("Master" or a track name from the Mixer tab); nil when the mixer has no such track.
 ---@field tracks fun(): AudioTrackInfo[] Every mixer track, Master first, as this play session has it.
 audio = {}

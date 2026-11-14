@@ -17,7 +17,7 @@ use crate::clip::ClipRef;
 use crate::mixer::MixerDesc;
 use crate::source::PlayParams;
 use crate::spatial::Listener;
-use crate::voice::{AudioCore, VoiceId, VoiceStatus};
+use crate::voice::{AudioCore, VoiceId, VoiceStatus, MAX_GROUPS};
 
 /// Internal mixing block size (frames). Small enough for snappy control
 /// response, big enough to amortize per-block spatialization.
@@ -40,6 +40,11 @@ enum Cmd {
     Listener(Listener),
     Mixer(Box<MixerDesc>),
     Reset,
+    /// A voice group's name, sent once before anything uses it.
+    Group(String),
+    /// A group's cap, by its place in the list (see [`AudioEngine::group`]).
+    GroupLimit(u16, Option<usize>),
+    WorldLowpass(f32),
 }
 
 struct VoiceEntry {
@@ -56,6 +61,16 @@ struct Status {
     finished: Mutex<Vec<VoiceId>>,
     meters: Mutex<Vec<(String, f32)>>,
     active: AtomicUsize,
+    /// Voices playing per voice group, in the order the groups were named.
+    /// The names stay on the control side (`AudioEngine::group_names`), so
+    /// publishing this never copies a string on the audio thread.
+    groups: Mutex<Vec<u32>>,
+}
+
+impl Status {
+    fn new() -> Self {
+        Self { groups: Mutex::new(Vec::with_capacity(MAX_GROUPS)), ..Default::default() }
+    }
 }
 
 /// The thing that owns the output. On a desktop that is a cpal stream on its
@@ -74,6 +89,9 @@ pub struct AudioEngine {
     tx: Sender<Cmd>,
     status: Arc<Status>,
     next_id: VoiceId,
+    /// Every voice group named this play session, in the order the audio
+    /// thread was told them: a group's index here is its index there.
+    group_names: Mutex<Vec<String>>,
     /// Device output rate.
     pub sample_rate: u32,
 }
@@ -142,7 +160,7 @@ impl AudioEngine {
         let channels = config.channels as usize;
 
         let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
-        let status = Arc::new(Status::default());
+        let status = Arc::new(Status::new());
         let status_cb = Arc::clone(&status);
         let mut render = renderer(rx, status_cb, sample_rate, channels);
 
@@ -157,7 +175,7 @@ impl AudioEngine {
         stream.play().map_err(|e| format!("failed to start audio stream: {e}"))?;
 
         log::info!("audio: {sample_rate} Hz, {channels} ch, block {BLOCK}");
-        Ok(Self { _stream: Some(stream), tx, status, next_id: 1, sample_rate })
+        Ok(Self { _stream: Some(stream), tx, status, next_id: 1, group_names: Mutex::default(), sample_rate })
     }
 
     /// Open the page's audio output. Stereo, at whatever rate the browser's
@@ -167,7 +185,7 @@ impl AudioEngine {
     pub fn new() -> Result<Self, String> {
         let channels = 2usize;
         let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
-        let status = Arc::new(Status::default());
+        let status = Arc::new(Status::new());
         let status_cb = Arc::clone(&status);
 
         // The renderer is built inside, because only the context knows the
@@ -178,7 +196,7 @@ impl AudioEngine {
         let sample_rate = stream.sample_rate();
 
         log::info!("audio: {sample_rate} Hz, {channels} ch, block {BLOCK}");
-        Ok(Self { _stream: Some(stream), tx, status, next_id: 1, sample_rate })
+        Ok(Self { _stream: Some(stream), tx, status, next_id: 1, group_names: Mutex::default(), sample_rate })
     }
 
     /// An engine with no output: every call is accepted and every voice
@@ -187,7 +205,19 @@ impl AudioEngine {
     /// not what they sound like.
     pub fn silent() -> Self {
         let (tx, _rx) = std::sync::mpsc::channel::<Cmd>();
-        Self { _stream: None, tx, status: Arc::new(Status::default()), next_id: 1, sample_rate: 48_000 }
+        Self { _stream: None, tx, status: Arc::new(Status::new()), next_id: 1, group_names: Mutex::default(), sample_rate: 48_000 }
+    }
+
+    /// An engine with no device, mixed only when its caller asks: the
+    /// returned function fills a buffer of interleaved stereo exactly as an
+    /// output callback would, commands and status included. For rendering to
+    /// a file, and for tests that assert on what was mixed without a sound
+    /// card (or a sound) anywhere.
+    pub fn offline(sample_rate: u32) -> (Self, impl FnMut(&mut [f32])) {
+        let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
+        let status = Arc::new(Status::new());
+        let render = renderer(rx, Arc::clone(&status), sample_rate, 2);
+        (Self { _stream: None, tx, status, next_id: 1, group_names: Mutex::default(), sample_rate }, render)
     }
 
     fn send(&self, cmd: Cmd) {
@@ -212,11 +242,12 @@ impl AudioEngine {
             v.insert(
                 id,
                 VoiceEntry {
-                    st: VoiceStatus { playing: true, paused: false, position_secs: 0.0 },
+                    st: VoiceStatus { playing: true, paused: false, position_secs: 0.0, audible: 0.0 },
                     seen: false,
                 },
             );
         }
+        self.group(&params.group);
         self.send(Cmd::Play { id, clip, emitter, params: Box::new(params) });
         id
     }
@@ -239,11 +270,12 @@ impl AudioEngine {
             v.insert(
                 id,
                 VoiceEntry {
-                    st: VoiceStatus { playing: true, paused: false, position_secs: 0.0 },
+                    st: VoiceStatus { playing: true, paused: false, position_secs: 0.0, audible: 0.0 },
                     seen: false,
                 },
             );
         }
+        self.group(&params.group);
         self.send(Cmd::PlayStream { id, ring, emitter, params: Box::new(params) });
         id
     }
@@ -269,6 +301,7 @@ impl AudioEngine {
     }
 
     pub fn update_params(&self, id: VoiceId, params: PlayParams) {
+        self.group(&params.group);
         self.send(Cmd::Params(id, Box::new(params)));
     }
 
@@ -282,6 +315,9 @@ impl AudioEngine {
 
     /// Stop everything and clear all DSP state (Play stopped).
     pub fn reset(&self) {
+        if let Ok(mut names) = self.group_names.lock() {
+            names.clear();
+        }
         self.send(Cmd::Reset);
     }
 
@@ -319,6 +355,46 @@ impl AudioEngine {
     pub fn active_voices(&self) -> usize {
         self.status.active.load(Ordering::Relaxed)
     }
+
+    /// A voice group's place in the list, naming it to the audio thread the
+    /// first time it is seen. `None` for no group, or past [`MAX_GROUPS`]
+    /// (that sound plays ungrouped).
+    fn group(&self, name: &str) -> Option<u16> {
+        if name.is_empty() {
+            return None;
+        }
+        let mut names = self.group_names.lock().ok()?;
+        if let Some(i) = names.iter().position(|n| n == name) {
+            return Some(i as u16);
+        }
+        if names.len() >= MAX_GROUPS {
+            return None;
+        }
+        names.push(name.to_string());
+        self.send(Cmd::Group(name.to_string()));
+        Some(names.len() as u16 - 1)
+    }
+
+    /// Cap how many voices a group plays at once; `None` lifts the cap. See
+    /// [`AudioCore::set_group_limit`] for which voice gives way.
+    pub fn set_group_limit(&self, group: &str, limit: Option<usize>) {
+        if let Some(i) = self.group(group) {
+            self.send(Cmd::GroupLimit(i, limit));
+        }
+    }
+
+    /// Muffle every sound out in the world at `hz` (0 = off), sparing
+    /// listener-space and flat ones. See [`AudioCore::set_world_lowpass`].
+    pub fn set_world_lowpass(&self, hz: f32) {
+        self.send(Cmd::WorldLowpass(hz));
+    }
+
+    /// Voices playing per voice group, as of the last mixed block.
+    pub fn group_counts(&self) -> Vec<(String, u32)> {
+        let counts = self.status.groups.lock().map(|g| g.clone()).unwrap_or_default();
+        let names = self.group_names.lock().map(|n| n.clone()).unwrap_or_default();
+        names.into_iter().zip(counts).collect()
+    }
 }
 
 fn drain_commands(rx: &Receiver<Cmd>, core: &mut AudioCore) {
@@ -337,6 +413,9 @@ fn drain_commands(rx: &Receiver<Cmd>, core: &mut AudioCore) {
             Cmd::Listener(l) => core.set_listener(l),
             Cmd::Mixer(desc) => core.set_mixer(&desc),
             Cmd::Reset => core.reset(),
+            Cmd::Group(name) => core.add_group(name),
+            Cmd::GroupLimit(i, limit) => core.set_group_slot_limit(i, limit),
+            Cmd::WorldLowpass(hz) => core.set_world_lowpass(hz),
         }
     }
 }
@@ -371,8 +450,55 @@ fn publish_status(
         // and lands next callback.
         f.append(finished);
     }
+    if let Ok(mut g) = status.groups.try_lock() {
+        core.group_counts(&mut g);
+    }
     if let Ok(mut m) = status.meters.try_lock() {
         core.mixer.meters(meters);
         std::mem::swap(&mut *m, meters);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clip::Clip;
+    use crate::source::EndBehavior;
+
+    fn looped(group: &str, priority: i32) -> PlayParams {
+        PlayParams { group: group.into(), priority, end: EndBehavior::Loop, ..Default::default() }
+    }
+
+    /// **A group is named on the control side and capped on the audio
+    /// thread, and the counts come back under the names.** The engine sends
+    /// each name once, ahead of the first sound or limit that uses it, so the
+    /// audio thread only ever compares and counts; after a reset the next
+    /// session's groups start the list over.
+    #[test]
+    fn groups_named_by_the_engine_are_capped_and_counted() {
+        let (mut eng, mut render) = AudioEngine::offline(48_000);
+        let clip: ClipRef = Arc::new(Clip { sample_rate: 48_000, channels: 1, samples: vec![0.25; 4800] });
+        let mut mix = |frames: usize| render(&mut vec![0.0f32; frames * 2]);
+        eng.play(clip.clone(), None, looped("steps", 0));
+        eng.set_group_limit("water", Some(2));
+        let low = eng.play(clip.clone(), None, looped("water", 1));
+        eng.play(clip.clone(), None, looped("water", 5));
+        eng.play(clip.clone(), None, looped("water", 3));
+        eng.play(clip.clone(), None, PlayParams { end: EndBehavior::Loop, ..Default::default() });
+        mix(2400);
+        assert_eq!(eng.group_counts(), vec![("steps".to_string(), 1), ("water".to_string(), 2)]);
+        mix(2400);
+        assert!(eng.drain_finished().contains(&low), "the lowest-priority water voice was not replaced");
+        assert!(!eng.is_playing(low));
+        assert_eq!(eng.active_voices(), 4);
+
+        eng.reset();
+        mix(256);
+        assert_eq!(eng.group_counts(), vec![], "a reset forgets the session's groups");
+        for _ in 0..3 {
+            eng.play(clip.clone(), None, looped("water", 0));
+        }
+        mix(256);
+        assert_eq!(eng.group_counts(), vec![("water".to_string(), 3)], "the old cap of two outlived the reset");
     }
 }

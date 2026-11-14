@@ -19,6 +19,11 @@ pub type VoiceId = u64;
 /// mix is mush long before this anyway).
 pub const MAX_VOICES: usize = 256;
 
+/// How many voice groups a play session can name. The list is allocated
+/// once, up front, so naming a group never grows it on the audio thread; a
+/// group past this many plays ungrouped.
+pub const MAX_GROUPS: usize = 64;
+
 /// Per-voice gain smoothing (declick) — fast enough to feel instant.
 const VOICE_SMOOTH_MS: f32 = 4.0;
 
@@ -74,6 +79,84 @@ struct Voice {
     /// gliding from; a send to a track that doesn't exist is dropped.
     sends: Vec<SendTap>,
     lowpass: LowPass,
+    /// Its voice group: an index into `AudioCore::groups` plus one, so
+    /// counting a group and choosing which voice gives way compares
+    /// integers. 0 = in no group.
+    group: u16,
+}
+
+/// A named set of voices sharing one budget (`PlayParams::group`).
+struct Group {
+    name: String,
+    /// The most voices it plays at once; `usize::MAX` = no limit.
+    limit: usize,
+}
+
+/// The cutoff a voice is filtered at, in Hz (0 = open): the lowest of its own
+/// `lowpass`, what distance puts on it, and the world low-pass. `dist` is
+/// `None` for a sound with no place in the world, which neither distance nor
+/// the world's medium can dull; a sound in the listener's own space
+/// (`listener_space`) is in the world for distance but passes the medium by.
+fn voice_cutoff(params: &PlayParams, dist: Option<f32>, world_lowpass: f32) -> f32 {
+    let mut hz = params.lowpass.max(0.0);
+    let mut lower = |c: f32| {
+        if c > 0.0 && (hz == 0.0 || c < hz) {
+            hz = c;
+        }
+    };
+    if let Some(d) = dist {
+        lower(crate::spatial::distance_cutoff(
+            params.air_absorption,
+            params.lowpass_falloff,
+            d,
+            params.min_distance,
+            params.max_distance,
+        ));
+        if !params.listener_space {
+            lower(world_lowpass);
+        }
+    }
+    hz
+}
+
+/// How far a sound is from the listener, if it is in the world: placed (at a
+/// point or on a node) and not played flat.
+fn world_distance(params: &PlayParams, emitter: Option<DVec3>, listener: &Listener) -> Option<f32> {
+    match emitter {
+        Some(at) if params.mode != SpatialMode::Flat => Some((at - listener.position).length() as f32),
+        _ => None,
+    }
+}
+
+/// What reaches the listener from a sound before its track: its volume
+/// times its distance gain. This is what "the quietest" means when a full
+/// group gives a voice up.
+fn heard_gain(params: &PlayParams, emitter: Option<DVec3>, listener: &Listener) -> f32 {
+    let (mode, at) = match emitter {
+        Some(at) => (params.mode, at),
+        None => (SpatialMode::Flat, DVec3::ZERO),
+    };
+    let s = spatialize(
+        mode,
+        params.falloff,
+        params.min_distance,
+        params.max_distance,
+        params.pan,
+        at,
+        listener,
+    );
+    params.volume.clamp(0.0, 4.0) * s.gain
+}
+
+impl Voice {
+    fn heard(&self, listener: &Listener) -> f32 {
+        heard_gain(&self.params, self.positioned.then_some(self.emitter), listener)
+    }
+
+    /// Counted against its group: playing or paused, not already fading out.
+    fn holds_a_slot(&self, group: u16) -> bool {
+        self.group == group && !self.stopping && !self.done
+    }
 }
 
 /// One resolved send.
@@ -145,6 +228,10 @@ pub struct VoiceStatus {
     pub paused: bool,
     /// Playhead in seconds.
     pub position_secs: f32,
+    /// The gain the listener gets from it: its volume times its distance
+    /// falloff, before its track. 0..1 at a volume of 1 or less; 0 while
+    /// paused or fading out.
+    pub audible: f32,
 }
 
 /// Everything the audio thread mixes: voices → tracks → master.
@@ -160,6 +247,12 @@ pub struct AudioCore {
     /// One voice's block, before it is added to its tracks.
     tmp_l: Vec<f32>,
     tmp_r: Vec<f32>,
+    /// Every voice group seen since the last reset. A voice holds its group's
+    /// place in this list, so the list only grows.
+    groups: Vec<Group>,
+    /// The listener's medium: a low-pass on every sound out in the world, in
+    /// Hz; 0 = clear air.
+    world_lowpass: f32,
 }
 
 /// Match `params.sends` onto a voice's taps, keeping the level a surviving
@@ -188,6 +281,134 @@ impl AudioCore {
             finished: Vec::new(),
             tmp_l: vec![0.0; block],
             tmp_r: vec![0.0; block],
+            groups: Vec::with_capacity(MAX_GROUPS),
+            world_lowpass: 0.0,
+        }
+    }
+
+    /// Name a voice group ahead of its first sound. The engine sends each
+    /// name here once, from the control side, so the string is moved in
+    /// rather than copied on the audio thread, and the list (allocated at
+    /// [`MAX_GROUPS`]) never grows there either.
+    pub fn add_group(&mut self, name: String) {
+        if !name.is_empty()
+            && self.groups.len() < MAX_GROUPS
+            && !self.groups.iter().any(|g| g.name == name)
+        {
+            self.groups.push(Group { name, limit: usize::MAX });
+        }
+    }
+
+    /// A group's place in the list plus one; 0 = no group. A name nobody
+    /// added is added here, which copies it: that happens only for a core
+    /// driven directly (a test, an offline render), never behind the engine,
+    /// which names every group first.
+    fn group_slot(&mut self, name: &str) -> u16 {
+        if name.is_empty() {
+            return 0;
+        }
+        if let Some(i) = self.groups.iter().position(|g| g.name == name) {
+            return i as u16 + 1;
+        }
+        if self.groups.len() >= MAX_GROUPS {
+            return 0;
+        }
+        self.groups.push(Group { name: name.to_string(), limit: usize::MAX });
+        self.groups.len() as u16
+    }
+
+    /// How many voices hold a slot in `group`, and which of them gives way
+    /// first: the lowest priority, then the quietest at the listener, then
+    /// the oldest.
+    fn weakest_in(&self, group: u16) -> (usize, Option<(usize, i32, f32)>) {
+        let mut held = 0;
+        let mut weakest: Option<(usize, i32, f32)> = None;
+        for (i, v) in self.voices.iter().enumerate() {
+            if !v.holds_a_slot(group) {
+                continue;
+            }
+            held += 1;
+            let (priority, heard) = (v.params.priority, v.heard(&self.listener));
+            let weaker = match weakest {
+                None => true,
+                Some((_, p, h)) => priority < p || (priority == p && heard < h),
+            };
+            if weaker {
+                weakest = Some((i, priority, heard));
+            }
+        }
+        (held, weakest)
+    }
+
+    /// Make room in a full group for a sound of this priority and loudness.
+    /// False when the newcomer is itself the one that gives way: it ranks
+    /// below every voice the group is playing.
+    fn make_room(&mut self, group: u16, priority: i32, heard: f32) -> bool {
+        let limit = self.groups[group as usize - 1].limit;
+        let (held, weakest) = self.weakest_in(group);
+        if held < limit {
+            return true;
+        }
+        let Some((i, p, h)) = weakest else { return false };
+        if priority < p || (priority == p && heard < h) {
+            return false;
+        }
+        // The same declick fade as a stop, so a stolen voice never clicks.
+        self.voices[i].stopping = true;
+        true
+    }
+
+    /// Cap how many voices `group` plays at once; `None` lifts the cap.
+    ///
+    /// At the cap, a new sound in the group takes the place of the voice
+    /// ranking lowest (lowest priority, then quietest at the listener, then
+    /// oldest), which fades out. A newcomer ranking below all of them is
+    /// dropped instead. Lowering a cap below what is playing fades the
+    /// lowest-ranking extras out at once.
+    pub fn set_group_limit(&mut self, group: &str, limit: Option<usize>) {
+        let slot = self.group_slot(group);
+        if slot != 0 {
+            self.set_group_slot_limit(slot - 1, limit);
+        }
+    }
+
+    /// [`Self::set_group_limit`] by the group's place in the order groups
+    /// were named (from 0), the way the engine sends it.
+    pub fn set_group_slot_limit(&mut self, index: u16, limit: Option<usize>) {
+        if index as usize >= self.groups.len() {
+            return;
+        }
+        let slot = index + 1;
+        let limit = limit.unwrap_or(usize::MAX);
+        self.groups[slot as usize - 1].limit = limit;
+        loop {
+            let (held, weakest) = self.weakest_in(slot);
+            match weakest {
+                Some((i, _, _)) if held > limit => self.voices[i].stopping = true,
+                _ => break,
+            }
+        }
+    }
+
+    /// Voices playing in `group` right now (paused ones included, ones
+    /// fading out not).
+    pub fn group_count(&self, group: &str) -> usize {
+        match self.groups.iter().position(|g| g.name == group) {
+            Some(i) => self.voices.iter().filter(|v| v.holds_a_slot(i as u16 + 1)).count(),
+            None => 0,
+        }
+    }
+
+    /// Every group's voice count, in the order the groups were named,
+    /// written over `out`. Give it a buffer with room for [`MAX_GROUPS`] and
+    /// it never allocates, so the audio thread publishes it every callback.
+    pub fn group_counts(&self, out: &mut Vec<u32>) {
+        out.clear();
+        out.resize(self.groups.len(), 0);
+        for v in &self.voices {
+            if v.group != 0 && v.holds_a_slot(v.group) {
+                out[v.group as usize - 1] += 1;
+            }
         }
     }
 
@@ -202,6 +423,15 @@ impl AudioCore {
 
     pub fn set_listener(&mut self, listener: Listener) {
         self.listener = listener;
+    }
+
+    /// Muffle the world, not the cockpit: a low-pass at `hz` on every sound
+    /// out in the world (placed, and not flat), for a listener under water or
+    /// in a vacuum suit. A `listener_space` sound passes it by, and so does a
+    /// flat one (music, UI). 0 = off. It joins each sound's own cutoffs (the
+    /// lowest wins) and glides there over a block, so it never clicks.
+    pub fn set_world_lowpass(&mut self, hz: f32) {
+        self.world_lowpass = if hz.is_finite() { hz.max(0.0) } else { 0.0 };
     }
 
     /// Start a voice. `emitter` = None means the sound has no world position
@@ -232,9 +462,18 @@ impl AudioCore {
             self.finished.push(id);
             return;
         }
+        let group = self.group_slot(&params.group);
+        if group != 0 {
+            let heard = heard_gain(&params, emitter, &self.listener);
+            if !self.make_room(group, params.priority, heard) {
+                self.finished.push(id);
+                return;
+            }
+        }
         let sends = resolve_sends(&self.mixer, &[], &params);
         let mut lowpass = LowPass::off();
-        lowpass.set(params.lowpass, self.sample_rate);
+        let dist = world_distance(&params, emitter, &self.listener);
+        lowpass.set(voice_cutoff(&params, dist, self.world_lowpass), self.sample_rate);
         // A sound that starts muffled starts muffled, not gliding into it.
         lowpass.cur = lowpass.tgt;
         self.voices.push(Voice {
@@ -244,6 +483,7 @@ impl AudioCore {
             track_idx: self.mixer.track_index(&params.track),
             sends,
             lowpass,
+            group,
             params,
             emitter: emitter.unwrap_or(DVec3::ZERO),
             positioned: emitter.is_some(),
@@ -301,10 +541,13 @@ impl AudioCore {
     pub fn update_params(&mut self, id: VoiceId, params: PlayParams) {
         let idx = self.mixer.track_index(&params.track);
         let sr = self.sample_rate;
+        let group = self.group_slot(&params.group);
         let Some(pos) = self.voices.iter().position(|v| v.id == id) else { return };
         let sends = resolve_sends(&self.mixer, &self.voices[pos].sends, &params);
         let v = &mut self.voices[pos];
-        v.lowpass.set(params.lowpass, sr);
+        let dist = world_distance(&params, v.positioned.then_some(v.emitter), &self.listener);
+        v.lowpass.set(voice_cutoff(&params, dist, self.world_lowpass), sr);
+        v.group = group;
         v.params = params;
         v.track_idx = idx;
         v.sends = sends;
@@ -320,6 +563,7 @@ impl AudioCore {
                 Some(c) if c.sample_rate > 0 => (v.pos / c.sample_rate as f64) as f32,
                 _ => 0.0,
             },
+            audible: if v.done || v.paused || v.stopping { 0.0 } else { v.heard(&self.listener) },
         })
     }
 
@@ -337,6 +581,9 @@ impl AudioCore {
         for v in self.voices.drain(..) {
             self.finished.push(v.id);
         }
+        // Group limits and the medium belong to the play session that set them.
+        self.groups.clear();
+        self.world_lowpass = 0.0;
         self.mixer.reset();
     }
 
@@ -366,7 +613,7 @@ impl AudioCore {
     /// and into the tracks it sends to.
     fn render_block(&mut self, n: usize) {
         let smooth = self.smooth;
-        let Self { mixer, voices, listener, tmp_l, tmp_r, sample_rate, .. } = self;
+        let Self { mixer, voices, listener, tmp_l, tmp_r, sample_rate, world_lowpass, .. } = self;
         for v in voices.iter_mut() {
             if v.done || v.paused {
                 continue;
@@ -386,6 +633,11 @@ impl AudioCore {
             let vol = if v.stopping { 0.0 } else { v.params.volume.clamp(0.0, 4.0) * s.gain };
             let (pl, pr) = pan_gains(s.pan);
             let (tgt_l, tgt_r) = (vol * pl, vol * pr);
+            // The low-pass follows the distance block by block, like the gain:
+            // the filter glides its coefficient across the block, so a sound
+            // moving away dulls smoothly.
+            let dist = world_distance(&v.params, v.positioned.then_some(v.emitter), listener);
+            v.lowpass.set(voice_cutoff(&v.params, dist, *world_lowpass), *sample_rate);
 
             let step = v.source.sample_rate() as f64 / *sample_rate as f64
                 * v.params.pitch.clamp(0.05, 8.0) as f64;
@@ -698,6 +950,358 @@ mod tests {
         assert!(cut < open * 0.05, "4 kHz through SFX's 500 Hz low-pass kept {cut} of {open}");
         let other = run(500.0, "Music");
         assert!((other - open).abs() < open * 0.02, "SFX's low-pass changed Music: {other} vs {open}");
+    }
+
+    /// A looping sine at `hz`, for measuring what a filter leaves of it.
+    fn sine(hz: f32) -> ClipRef {
+        let n = 48_000;
+        Arc::new(Clip {
+            sample_rate: 48_000,
+            channels: 1,
+            samples: (0..n).map(|i| (std::f32::consts::TAU * hz * i as f32 / 48_000.0).sin() * 0.5).collect(),
+        })
+    }
+
+    /// The peak of the second half of 100 ms of a looping tone, played at
+    /// `at` with these params, then moved to `then` (if given) for another
+    /// 100 ms: what reaches the ear once the filter has settled.
+    fn heard_peak(hz: f32, at: Option<DVec3>, params: PlayParams, then: Option<DVec3>) -> f32 {
+        let mut core = AudioCore::new(48_000.0, 128);
+        core.play(1, sine(hz), at, PlayParams { end: EndBehavior::Loop, ..params });
+        let (mut l, mut r) = (vec![0.0f32; 4800], vec![0.0f32; 4800]);
+        core.render(&mut l, &mut r);
+        if let Some(p) = then {
+            core.move_voice(1, p);
+            core.render(&mut l, &mut r);
+        }
+        peak(&l[2400..]).max(peak(&r[2400..]))
+    }
+
+    /// **Air absorption dulls a far sound's highs and leaves its lows.** The
+    /// same 6 kHz tone 60 m off, with and without `air_absorption`: with it
+    /// the tone is a fraction of itself (distance gain is the same in both,
+    /// so it cancels); a 100 Hz tone barely changes; and close up, inside
+    /// `min_distance`, nothing is cut at all.
+    #[test]
+    fn air_absorption_dulls_a_far_sound_and_spares_a_near_one() {
+        let params = |k: f32| PlayParams {
+            air_absorption: k,
+            mode: SpatialMode::Distance,
+            min_distance: 2.0,
+            max_distance: 200.0,
+            falloff: crate::Falloff::Linear,
+            ..Default::default()
+        };
+        let far = Some(DVec3::new(0.0, 0.0, -60.0));
+        let (high, high_air) = (heard_peak(6000.0, far, params(0.0), None), heard_peak(6000.0, far, params(0.5), None));
+        let (low, low_air) = (heard_peak(100.0, far, params(0.0), None), heard_peak(100.0, far, params(0.5), None));
+        assert!(high > 0.05, "the fixture: the far tone is heard at all ({high})");
+        assert!(high_air < high * 0.25, "6 kHz at 60 m through k=0.5 kept {high_air} of {high}");
+        assert!(low_air > low * 0.9, "100 Hz at 60 m kept only {low_air} of {low}");
+        let near = Some(DVec3::new(0.0, 0.0, -1.0));
+        let (open, near_air) = (heard_peak(6000.0, near, params(0.0), None), heard_peak(6000.0, near, params(0.5), None));
+        assert!((near_air - open).abs() < open * 0.01, "inside minDistance it cut {near_air} vs {open}");
+    }
+
+    /// **The cutoff follows the sound as it moves**, block by block, both
+    /// ways: a tone that starts close and is moved far is dulled, and one
+    /// that starts far and is moved close opens back up.
+    #[test]
+    fn a_distance_lowpass_follows_a_moving_sound() {
+        let params = PlayParams {
+            lowpass_falloff: Some(crate::LowpassFalloff { near: 20_000.0, far: 100.0 }),
+            mode: SpatialMode::Distance,
+            min_distance: 2.0,
+            max_distance: 100.0,
+            falloff: crate::Falloff::Linear,
+            ..Default::default()
+        };
+        let (near, far) = (DVec3::new(0.0, 0.0, -1.0), DVec3::new(0.0, 0.0, -60.0));
+        // Without the curve, as the distance gain alone leaves it.
+        let plain = PlayParams { lowpass_falloff: None, ..params.clone() };
+        let gain_only = heard_peak(5000.0, Some(near), plain.clone(), Some(far));
+        let moved_away = heard_peak(5000.0, Some(near), params.clone(), Some(far));
+        assert!(gain_only > 0.005, "the fixture: the moved tone is heard at all ({gain_only})");
+        assert!(moved_away < gain_only * 0.1, "moved far, it kept {moved_away} of {gain_only}");
+        let came_back = heard_peak(5000.0, Some(far), params, Some(near));
+        let close_plain = heard_peak(5000.0, Some(far), plain, Some(near));
+        assert!(came_back > close_plain * 0.9, "moved close, it stayed dull: {came_back} vs {close_plain}");
+    }
+
+    /// **Distance cannot dull a sound that is not in the world**: a flat
+    /// sound, or one with no position, ignores both options, and a sound's
+    /// own `lowpass` still applies beside them (the lower cutoff wins).
+    #[test]
+    fn a_flat_sound_has_no_distance_lowpass_and_its_own_lowpass_still_counts() {
+        let curve = PlayParams {
+            air_absorption: 1.0,
+            lowpass_falloff: Some(crate::LowpassFalloff { near: 300.0, far: 300.0 }),
+            ..Default::default()
+        };
+        let open = heard_peak(5000.0, None, PlayParams::default(), None);
+        assert!((heard_peak(5000.0, None, curve.clone(), None) - open).abs() < open * 0.01, "no position, yet cut");
+        let flat = PlayParams { mode: SpatialMode::Flat, ..curve.clone() };
+        let at = Some(DVec3::new(0.0, 0.0, -40.0));
+        assert!((heard_peak(5000.0, at, flat, None) - open).abs() < open * 0.01, "flat, yet cut");
+        let own = PlayParams { lowpass: 300.0, air_absorption: 0.001, ..Default::default() };
+        let near = Some(DVec3::new(0.0, 0.0, -1.0));
+        assert!(heard_peak(5000.0, near, own, None) < open * 0.05, "its own 300 Hz low-pass was lost");
+    }
+
+    /// The settled peak of a looping 5 kHz tone with the world low-pass at
+    /// `world` Hz, set before the sound starts (`before`) or once it is
+    /// playing.
+    fn through_the_medium(world: f32, before: bool, at: Option<DVec3>, params: PlayParams) -> f32 {
+        let mut core = AudioCore::new(48_000.0, 128);
+        if before {
+            core.set_world_lowpass(world);
+        }
+        core.play(1, sine(5000.0), at, PlayParams { end: EndBehavior::Loop, ..params });
+        let (mut l, mut r) = (vec![0.0f32; 4800], vec![0.0f32; 4800]);
+        core.render(&mut l, &mut r);
+        if !before {
+            core.set_world_lowpass(world);
+            core.render(&mut l, &mut r);
+        }
+        peak(&l[2400..]).max(peak(&r[2400..]))
+    }
+
+    /// **The world low-pass muffles the world and spares the cockpit.** A
+    /// 5 kHz tone placed in the world goes dull under a 500 Hz medium; the
+    /// same tone marked `listener_space`, and a flat one, are untouched.
+    #[test]
+    fn the_world_lowpass_muffles_world_sounds_and_spares_listener_space_ones() {
+        let at = Some(DVec3::new(0.0, 0.0, -1.0));
+        let world = PlayParams::default();
+        let helmet = PlayParams { listener_space: true, ..Default::default() };
+        let open = through_the_medium(0.0, true, at, world.clone());
+        assert!(open > 0.1, "the fixture: the tone is heard ({open})");
+        let muffled = through_the_medium(500.0, true, at, world.clone());
+        assert!(muffled < open * 0.05, "a world sound under a 500 Hz medium kept {muffled} of {open}");
+        let spared = through_the_medium(500.0, true, at, helmet);
+        assert!((spared - open).abs() < open * 0.01, "a listener-space sound was muffled: {spared} vs {open}");
+        let flat = through_the_medium(500.0, true, None, PlayParams::default());
+        let flat_open = through_the_medium(0.0, true, None, PlayParams::default());
+        assert!((flat - flat_open).abs() < flat_open * 0.01, "a flat sound was muffled: {flat} vs {flat_open}");
+        // Set while the sound plays, as a dive would: it takes hold, and 0
+        // clears it.
+        assert!(through_the_medium(500.0, false, at, world.clone()) < open * 0.05, "set mid-sound, it did nothing");
+        assert!((through_the_medium(0.0, false, at, world) - open).abs() < open * 0.01, "0 did not clear it");
+    }
+
+    /// **The world low-pass joins a sound's own cutoffs: the lowest wins.**
+    /// Under a 4 kHz medium, a sound with its own 300 Hz low-pass sounds as
+    /// it does with that alone; a sound whose distance cutoff is the lower
+    /// keeps it. And a reset (Play stopped) clears the medium.
+    #[test]
+    fn the_world_lowpass_and_a_sounds_own_cutoffs_take_the_lowest() {
+        let at = Some(DVec3::new(0.0, 0.0, -1.0));
+        let own = PlayParams { lowpass: 300.0, ..Default::default() };
+        let alone = through_the_medium(0.0, true, at, own.clone());
+        let both = through_the_medium(4000.0, true, at, own);
+        assert!((both - alone).abs() < alone * 0.05 + 1e-4, "own 300 Hz under a 4 kHz medium: {both} vs {alone}");
+        let medium_only = through_the_medium(4000.0, true, at, PlayParams::default());
+        assert!(both < medium_only * 0.5, "the medium overrode the lower own cutoff: {both} vs {medium_only}");
+
+        let mut core = AudioCore::new(48_000.0, 128);
+        core.set_world_lowpass(500.0);
+        core.reset();
+        core.play(1, sine(5000.0), at, PlayParams { end: EndBehavior::Loop, ..Default::default() });
+        let (mut l, mut r) = (vec![0.0f32; 4800], vec![0.0f32; 4800]);
+        core.render(&mut l, &mut r);
+        let open = through_the_medium(0.0, true, at, PlayParams::default());
+        assert!((peak(&l[2400..]) - open).abs() < open * 0.01, "the medium outlived a reset");
+    }
+
+    /// **`audible` is what the listener gets: volume times distance gain.**
+    /// A flat sound at half volume reads 0.5; a placed one reads its volume
+    /// times the falloff at its distance, and follows it when it moves; a
+    /// paused or stopping one reads 0.
+    #[test]
+    fn audible_is_the_volume_times_the_distance_gain() {
+        let mut core = AudioCore::new(48_000.0, 128);
+        let loop_at = |volume: f32| PlayParams {
+            volume,
+            end: EndBehavior::Loop,
+            min_distance: 2.0,
+            max_distance: 100.0,
+            falloff: crate::Falloff::Linear,
+            ..Default::default()
+        };
+        core.play(1, tone_clip(48_000, 0.5), None, loop_at(0.5));
+        core.play(2, tone_clip(48_000, 0.5), Some(DVec3::new(0.0, 0.0, -51.0)), loop_at(0.8));
+        let heard = |core: &AudioCore, id| core.status(id).unwrap().audible;
+        assert!((heard(&core, 1) - 0.5).abs() < 1e-6, "a flat sound at half volume: {}", heard(&core, 1));
+        let want = 0.8 * crate::spatial::distance_gain(crate::Falloff::Linear, 51.0, 2.0, 100.0);
+        assert!(want > 0.1 && want < 0.6, "the fixture: a gain well inside the range ({want})");
+        assert!((heard(&core, 2) - want).abs() < 1e-5, "placed 51 m off: {} vs {want}", heard(&core, 2));
+        core.move_voice(2, DVec3::new(0.0, 0.0, -1.0));
+        assert!((heard(&core, 2) - 0.8).abs() < 1e-6, "moved inside minDistance: {}", heard(&core, 2));
+        core.set_paused(1, true);
+        core.stop(2);
+        assert_eq!((heard(&core, 1), heard(&core, 2)), (0.0, 0.0), "paused and stopping sounds are not heard");
+    }
+
+    /// Twenty looping voices' worth of render, to let a stolen voice fade out
+    /// and be reaped.
+    fn settle(core: &mut AudioCore) {
+        let (mut l, mut r) = (vec![0.0f32; 4800], vec![0.0f32; 4800]);
+        core.render(&mut l, &mut r);
+    }
+
+    fn looped(group: &str, priority: i32, volume: f32) -> PlayParams {
+        PlayParams {
+            group: group.into(),
+            priority,
+            volume,
+            end: EndBehavior::Loop,
+            mode: SpatialMode::Flat,
+            ..Default::default()
+        }
+    }
+
+    fn drained(core: &mut AudioCore) -> Vec<VoiceId> {
+        let mut fin = Vec::new();
+        core.drain_finished(&mut fin);
+        fin.sort();
+        fin
+    }
+
+    /// **A full group gives up its lowest-priority voice.** Three voices in
+    /// a group capped at three, a fourth arrives: the one with the lowest
+    /// priority fades out and reports finished, whatever its loudness.
+    #[test]
+    fn a_full_group_gives_up_its_lowest_priority_voice() {
+        let mut core = AudioCore::new(48_000.0, 128);
+        core.set_group_limit("water", Some(3));
+        core.play(1, tone_clip(48_000, 0.5), None, looped("water", 5, 0.1));
+        core.play(2, tone_clip(48_000, 0.5), None, looped("water", 1, 1.0));
+        core.play(3, tone_clip(48_000, 0.5), None, looped("water", 5, 0.2));
+        assert_eq!(core.group_count("water"), 3);
+        core.play(4, tone_clip(48_000, 0.5), None, looped("water", 2, 0.5));
+        assert_eq!(core.group_count("water"), 3, "the group went over its limit");
+        settle(&mut core);
+        assert_eq!(drained(&mut core), vec![2], "the loud priority-1 voice is the one that goes");
+        assert_eq!(core.active_voices(), 3);
+    }
+
+    /// **Among equals, the quietest at the listener goes** — by what the
+    /// listener gets, so a loud sound far away loses to a soft one close by.
+    #[test]
+    fn among_equal_priorities_the_quietest_at_the_listener_goes() {
+        let mut core = AudioCore::new(48_000.0, 128);
+        core.set_group_limit("hits", Some(2));
+        let spatial = |volume: f32| PlayParams {
+            group: "hits".into(),
+            volume,
+            end: EndBehavior::Loop,
+            min_distance: 1.0,
+            max_distance: 100.0,
+            falloff: crate::Falloff::Linear,
+            ..Default::default()
+        };
+        // Voice 1: half volume, at the listener (heard at 0.5). It is the
+        // oldest, so an order that ignored loudness would pick it.
+        core.play(1, tone_clip(48_000, 0.5), Some(DVec3::new(0.5, 0.0, 0.0)), spatial(0.5));
+        // Voice 2: full volume, 80 units away (heard at about 0.2).
+        core.play(2, tone_clip(48_000, 0.5), Some(DVec3::new(80.0, 0.0, 0.0)), spatial(1.0));
+        core.play(3, tone_clip(48_000, 0.5), Some(DVec3::new(0.5, 0.0, 0.0)), spatial(0.4));
+        settle(&mut core);
+        assert_eq!(drained(&mut core), vec![2], "the far voice is the quietest heard, though the loudest played");
+    }
+
+    /// **A newcomer ranking below the whole group is dropped**, and nothing
+    /// playing is touched: by priority, and among equals by loudness. An
+    /// equal newcomer wins, taking the oldest equal's place.
+    #[test]
+    fn a_newcomer_below_the_whole_group_is_dropped() {
+        let mut core = AudioCore::new(48_000.0, 128);
+        core.set_group_limit("water", Some(2));
+        core.play(1, tone_clip(48_000, 0.5), None, looped("water", 3, 0.5));
+        core.play(2, tone_clip(48_000, 0.5), None, looped("water", 3, 0.5));
+        core.play(3, tone_clip(48_000, 0.5), None, looped("water", 2, 1.0));
+        assert_eq!(drained(&mut core), vec![3], "a lower-priority newcomer is the one dropped");
+        core.play(4, tone_clip(48_000, 0.5), None, looped("water", 3, 0.25));
+        assert_eq!(drained(&mut core), vec![4], "an equal-priority, quieter newcomer is dropped");
+        settle(&mut core);
+        assert_eq!(drained(&mut core), Vec::<VoiceId>::new(), "a dropped newcomer cost a playing voice");
+        assert_eq!(core.group_count("water"), 2);
+        core.play(5, tone_clip(48_000, 0.5), None, looped("water", 3, 0.5));
+        settle(&mut core);
+        assert_eq!(drained(&mut core), vec![1], "an equal newcomer takes the oldest equal's place");
+    }
+
+    /// **A limit is its group's alone, and no limit is the old behaviour.**
+    /// A capped group does not count or steal another group's voices or
+    /// ungrouped ones; a group with no cap, or a cap lifted, plays everything.
+    #[test]
+    fn a_limit_touches_only_its_own_group() {
+        let mut core = AudioCore::new(48_000.0, 128);
+        core.set_group_limit("water", Some(1));
+        core.play(1, tone_clip(48_000, 0.5), None, looped("", 0, 1.0));
+        core.play(2, tone_clip(48_000, 0.5), None, looped("steps", -5, 0.1));
+        core.play(3, tone_clip(48_000, 0.5), None, looped("steps", -5, 0.1));
+        core.play(4, tone_clip(48_000, 0.5), None, looped("water", 0, 1.0));
+        settle(&mut core);
+        assert_eq!(drained(&mut core), Vec::<VoiceId>::new(), "a voice outside the capped group was stolen");
+        assert_eq!((core.group_count("water"), core.group_count("steps"), core.group_count("nope")), (1, 2, 0));
+        let mut counts = Vec::new();
+        core.group_counts(&mut counts);
+        assert_eq!(counts, vec![1, 2], "water, then steps: the order they were named");
+
+        core.set_group_limit("water", None);
+        core.play(5, tone_clip(48_000, 0.5), None, looped("water", 0, 1.0));
+        settle(&mut core);
+        assert_eq!(core.group_count("water"), 2, "a lifted cap still held");
+        assert_eq!(drained(&mut core), Vec::<VoiceId>::new());
+    }
+
+    /// **Lowering a cap below what is playing fades the extras out**, lowest
+    /// rank first; and a cap of zero plays nothing.
+    #[test]
+    fn lowering_a_limit_fades_out_the_lowest_ranked_extras() {
+        let mut core = AudioCore::new(48_000.0, 128);
+        for (id, priority) in [(1, 4), (2, 1), (3, 3), (4, 2)] {
+            core.play(id, tone_clip(48_000, 0.5), None, looped("crowd", priority, 1.0));
+        }
+        core.set_group_limit("crowd", Some(2));
+        assert_eq!(core.group_count("crowd"), 2);
+        settle(&mut core);
+        assert_eq!(drained(&mut core), vec![2, 4]);
+        core.set_group_limit("crowd", Some(0));
+        core.play(9, tone_clip(48_000, 0.5), None, looped("crowd", 99, 1.0));
+        settle(&mut core);
+        assert_eq!(drained(&mut core), vec![1, 3, 9]);
+        assert_eq!(core.active_voices(), 0);
+    }
+
+    /// **A stolen voice fades; it is not cut.** The sample-to-sample step of
+    /// the mix across the steal stays far below the tone's own amplitude.
+    #[test]
+    fn a_stolen_voice_fades_out_without_a_click() {
+        let mut core = AudioCore::new(48_000.0, 128);
+        core.set_group_limit("one", Some(1));
+        // A constant signal, so any step in the output is the gain moving.
+        let dc = || Arc::new(Clip { sample_rate: 48_000, channels: 1, samples: vec![0.5; 48_000] });
+        core.play(1, dc(), None, looped("one", 0, 1.0));
+        let (mut l, mut r) = (vec![0.0f32; 2400], vec![0.0f32; 2400]);
+        core.render(&mut l, &mut r);
+        let before = *l.last().unwrap();
+        assert!(before > 0.4, "the fixture: voice 1 is at full level ({before})");
+        // The newcomer outranks it and is silent, so what is heard next is
+        // voice 1 leaving.
+        core.play(2, dc(), None, looped("one", 1, 0.0));
+        let (mut l2, mut r2) = (vec![0.0f32; 4800], vec![0.0f32; 4800]);
+        core.render(&mut l2, &mut r2);
+        let mut prev = before;
+        let mut worst = 0.0f32;
+        for s in &l2 {
+            worst = worst.max((s - prev).abs());
+            prev = *s;
+        }
+        assert!(worst < 0.02, "the steal stepped the output by {worst}");
+        assert!(l2[4799].abs() < 1e-3, "the stolen voice never went quiet");
+        assert_eq!(drained(&mut core), vec![1]);
     }
 
     #[test]

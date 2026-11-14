@@ -49,6 +49,10 @@ enum Slot {
 
 pub(crate) struct ClipCache {
     slots: HashMap<String, Slot>,
+    /// Every clip's length in seconds, kept after the clip itself is dropped:
+    /// it is a number, and `audio.duration` should not go back to nil because
+    /// the cache made room.
+    durations: Arc<HashMap<String, f64>>,
     decode: Decoder,
     /// Bumped on every play, so "least recently played" is an order.
     clock: u64,
@@ -67,7 +71,7 @@ fn bytes(c: &Clip) -> usize {
 
 impl ClipCache {
     pub(crate) fn with_decoder(decode: Decoder, budget: usize) -> Self {
-        Self { slots: HashMap::new(), decode, clock: 0, budget }
+        Self { slots: HashMap::new(), durations: Arc::default(), decode, clock: 0, budget }
     }
 
     /// The clip for a play: ready, or started on a worker if nothing has
@@ -115,6 +119,17 @@ impl ClipCache {
         }
     }
 
+    /// Read a clip in the background for what it is (its length), without a
+    /// play or a preload's pin: once in, it is an idle clip like any other.
+    pub(crate) fn decode(&mut self, root: &Path, key: &str) {
+        self.request(root, key, false);
+    }
+
+    /// Every clip decoded so far, by key, with its length in seconds.
+    pub(crate) fn durations(&self) -> Arc<HashMap<String, f64>> {
+        self.durations.clone()
+    }
+
     pub(crate) fn is_loading(&self) -> bool {
         self.slots.values().any(|s| matches!(s, Slot::Loading { .. }))
     }
@@ -145,7 +160,11 @@ impl ClipCache {
             let Slot::Loading { rx, pinned } = slot else { continue };
             let pinned = *pinned;
             *slot = match rx.try_recv() {
-                Ok(Ok(c)) => Slot::Ready { clip: Arc::new(c), used: clock, pinned },
+                Ok(Ok(c)) => {
+                    let secs = if c.sample_rate > 0 { c.frames() as f64 / c.sample_rate as f64 } else { 0.0 };
+                    Arc::make_mut(&mut self.durations).insert(key.clone(), secs);
+                    Slot::Ready { clip: Arc::new(c), used: clock, pinned }
+                }
                 Ok(Err(e)) => {
                     log::warn!("audio: {e}");
                     Slot::Failed

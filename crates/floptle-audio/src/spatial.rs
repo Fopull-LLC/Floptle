@@ -6,7 +6,7 @@
 
 use glam::DVec3;
 
-use crate::source::{Falloff, SpatialMode};
+use crate::source::{Falloff, LowpassFalloff, SpatialMode};
 
 /// Where the ears are. Fed from the active camera each frame during Play.
 #[derive(Debug, Clone, Copy)]
@@ -50,6 +50,38 @@ pub fn distance_gain(falloff: Falloff, dist: f32, min_d: f32, max_d: f32) -> f32
         Falloff::Exponential => (min_d / dist) * (min_d / dist),
     };
     (base * fade).clamp(0.0, 1.0)
+}
+
+/// The top of the band a distance low-pass starts from: air absorption's
+/// cutoff right at a sound's `min_distance`.
+pub const AIR_OPEN_HZ: f32 = 20_000.0;
+
+/// The low-pass cutoff, in Hz, that distance puts on a sound; 0 = none.
+///
+/// `air` is air absorption: past `min_d` the cutoff falls as
+/// `AIR_OPEN_HZ / (1 + air × metres)`. `curve` closes from its `near` cutoff
+/// at `min_d` to its `far` one at `max_d`, evenly in pitch (each metre takes
+/// off the same number of octaves), which is how the ear hears a sound dull.
+/// With both, the lower cutoff wins.
+pub fn distance_cutoff(air: f32, curve: Option<LowpassFalloff>, dist: f32, min_d: f32, max_d: f32) -> f32 {
+    let min_d = min_d.max(0.01);
+    let max_d = max_d.max(min_d + 0.01);
+    let mut hz = 0.0f32;
+    let beyond = (dist - min_d).max(0.0);
+    if air > 0.0 && beyond > 0.0 {
+        hz = AIR_OPEN_HZ / (1.0 + air * beyond);
+    }
+    if let Some(LowpassFalloff { near, far }) = curve
+        && near > 0.0
+        && far > 0.0
+    {
+        let t = (beyond / (max_d - min_d)).clamp(0.0, 1.0);
+        let c = near * (far / near).powf(t);
+        if hz == 0.0 || c < hz {
+            hz = c;
+        }
+    }
+    hz
 }
 
 /// Result of spatializing one emitter against the listener.
@@ -145,6 +177,35 @@ mod tests {
             &listener,
         );
         assert!(c.pan.abs() < 0.01, "source dead ahead should be centered");
+    }
+
+    /// **Air absorption closes with distance and is open up close.** No
+    /// cutoff inside `minDistance`; past it the cutoff falls as the formula
+    /// says, monotonically, and a larger `k` dulls faster.
+    #[test]
+    fn air_absorption_closes_with_distance() {
+        assert_eq!(distance_cutoff(0.1, None, 1.5, 2.0, 50.0), 0.0, "inside minDistance");
+        assert_eq!(distance_cutoff(0.0, None, 40.0, 2.0, 50.0), 0.0, "k = 0 is off");
+        let at = |k: f32, d: f32| distance_cutoff(k, None, d, 2.0, 50.0);
+        assert!((at(0.1, 12.0) - AIR_OPEN_HZ / 2.0).abs() < 1.0, "10 m past min at k=0.1 halves it: {}", at(0.1, 12.0));
+        assert!(at(0.1, 30.0) < at(0.1, 12.0) && at(0.1, 60.0) < at(0.1, 30.0), "not monotonic");
+        assert!(at(0.5, 12.0) < at(0.1, 12.0), "a larger k dulls faster");
+    }
+
+    /// **A low-pass falloff runs from `near` to `far` across the sound's
+    /// range, evenly in pitch, and the lower of two cutoffs wins.**
+    #[test]
+    fn a_lowpass_falloff_runs_near_to_far_in_octaves() {
+        let curve = Some(LowpassFalloff { near: 8000.0, far: 500.0 });
+        let at = |d: f32| distance_cutoff(0.0, curve, d, 2.0, 50.0);
+        assert_eq!(at(1.0), 8000.0);
+        assert_eq!(at(2.0), 8000.0);
+        assert!((at(50.0) - 500.0).abs() < 0.5 && (at(90.0) - 500.0).abs() < 0.5, "{} {}", at(50.0), at(90.0));
+        // Halfway along the range is halfway in octaves: the geometric mean.
+        assert!((at(26.0) - 2000.0).abs() < 1.0, "halfway is {}", at(26.0));
+        let both = distance_cutoff(0.5, curve, 26.0, 2.0, 50.0);
+        assert!((both - AIR_OPEN_HZ / 13.0).abs() < 1.0, "the lower cutoff (air, {both}) wins");
+        assert_eq!(distance_cutoff(0.0, Some(LowpassFalloff { near: 0.0, far: 500.0 }), 26.0, 2.0, 50.0), 0.0);
     }
 
     #[test]

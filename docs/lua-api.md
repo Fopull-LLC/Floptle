@@ -45,7 +45,7 @@ each group, and meant to be searched.
 - [components — getcomponent](#components--getcomponent) — 125
 - [animation — node:animator](#animation--nodeanimator) — 33
 - [particles — effects from script](#particles--effects-from-script) — 16
-- [audio — sounds & the mixer](#audio--sounds--the-mixer) — 36
+- [audio — sounds & the mixer](#audio--sounds--the-mixer) — 42
 - [assets](#assets) — 19
 - [debug gizmos](#debug-gizmos) — 5
 - [lua stdlib](#lua-stdlib) — 43
@@ -1476,7 +1476,7 @@ Not a Material. A Material says what a thing is MADE OF and supersedes the mater
 
 ### `node:sound`
 
-node:sound() — the handle for this node's Audio Source component. :play() (restarts), :stop(), :pause(), :resume(), :setClip("audio/x.ogg"), :seek(secs), :isPlaying(), :isLoading(), :position(). Tunables (volume/pitch/distances/…) live on node:getcomponent("AudioSource").
+node:sound() — the handle for this node's Audio Source component. :play() (restarts), :stop(), :pause(), :resume(), :setClip("audio/x.ogg"), :seek(secs), :isPlaying(), :isLoading(), :position(), :audible(). Tunables (volume/pitch/distances/…) live on node:getcomponent("AudioSource").
 
 ### `node:terrainFinePaint`
 
@@ -4670,9 +4670,21 @@ spawnEffect(key, pos [, opts]) or spawnEffect(key, x, y, z [, vx, vy, vz]) — f
 
 Sounds and the mixer: audio.play for one-shots, audio.track for a mixer bus, node:sound() for a node's Audio Source.
 
+### `audio.duration`
+
+audio.duration(clip) → the clip's length in seconds, or nil until it has been read. Spell the clip as audio.play takes it. Asking about a clip nothing has played or preloaded starts reading it in the background, so it answers a frame or so later; once known, the length stays known for the play session, even after the clip itself is dropped to make room. nil on a host with no audio output, which reads no sound. e.g. local secs = audio.duration("audio/line_04.ogg"); if secs then after(secs, nextLine) end
+
+### `audio.groupCount`
+
+audio.groupCount(group) → how many voices that voice group is playing (paused ones count, ones fading out do not), as the mixer last counted them: a sound asked for this frame shows up a frame or so later. 0 for a group nothing has played in, and on a host with no audio output.
+
+### `audio.limit`
+
+audio.limit(group, maxVoices) — cap how many sounds a voice group plays at once; nil lifts the cap. A sound joins a group with audio.play's `group` option. At the cap, a new sound takes the place of the group's lowest-`priority` voice, then the quietest one at the listener (volume times distance falloff), then the oldest; that voice fades out in a few milliseconds and ends as if stopped. A new sound ranking below every voice in the group is dropped instead: its handle reads as finished. Lowering a cap below what is playing fades the extras out. The choice is made in the mixer, so it costs the game no per-frame bookkeeping. Holds until Play stops. e.g. audio.limit("splash", 8)
+
 ### `audio.play`
 
-audio.play(clip [, node | x, y, z] [, opts]) — play a clip with no setup: audio.play("audio/ding.ogg") is flat 2D; pass x,y,z for a world point; pass a node to follow it. Local to this machine: in a session, play it from state that replicates, or a sound the server's code plays is heard by nobody. opts: {volume, pitch, pan, mode="Spatial|Distance|Flat", falloff="Inverse|Linear|Exponential", minDistance, maxDistance, track, endBehavior="Stop|Destroy|Loop", loop=true, sends={["Verb Large"]=0.4}, lowpass=hz}. sends taps the sound into other mixer tracks beside its own, at those levels, after its volume and distance (a reverb bus heard partly); lowpass muffles it alone (a sound behind a wall), 0 = off. Returns a sound handle: :stop/:pause/:resume/:setVolume/:setPitch/:setPan/:setTrack/:setSend/:setLowpass/:setPosition/:seek/:isPlaying/:isLoading/:position. A clip's first play reads the file in the background, so the sound starts a frame or more after the call (a long music file takes longest); audio.preload removes the wait. e.g. audio.play("audio/hit.ogg", h.x, h.y, h.z, { maxDistance = 35, track = "SFX" })
+audio.play(clip [, node | x, y, z] [, opts]) — play a clip with no setup: audio.play("audio/ding.ogg") is flat 2D; pass x,y,z for a world point; pass a node to follow it. Local to this machine: in a session, play it from state that replicates, or a sound the server's code plays is heard by nobody. opts: {volume, pitch, pan, mode="Spatial|Distance|Flat", falloff="Inverse|Linear|Exponential", minDistance, maxDistance, track, endBehavior="Stop|Destroy|Loop", loop=true, sends={["Verb Large"]=0.4}, lowpass=hz, group="water", priority=n, airAbsorption=k, lowpassFalloff={near=hz, far=hz}, listenerSpace=true}. sends taps the sound into other mixer tracks beside its own, at those levels, after its volume and distance (a reverb bus heard partly); lowpass muffles it alone (a sound behind a wall), 0 = off; group counts it against that voice group's audio.limit, and priority (default 0, higher matters more) decides which sound gives way when the group is full; airAbsorption and lowpassFalloff dull a sound with its distance from the listener, set by the mixer as the sound or the listener moves (airAbsorption: past minDistance the cutoff falls as 20 kHz / (1 + k × metres), 0.02 across a field, 0.2 through fog; lowpassFalloff: near Hz at minDistance to far Hz at maxDistance, even in pitch between; with lowpass as well, the lowest cutoff wins; a flat sound has no distance and is not dulled); listenerSpace marks a sound heard inside the listener's own space (a helmet, a cockpit), which audio.setWorldLowpass passes by. Returns a sound handle: :stop/:pause/:resume/:setVolume/:setPitch/:setPan/:setTrack/:setSend/:setLowpass/:setPosition/:seek/:isPlaying/:isLoading/:position/:audible. A clip's first play reads the file in the background, so the sound starts a frame or more after the call (a long music file takes longest); audio.preload removes the wait. e.g. audio.play("audio/hit.ogg", h.x, h.y, h.z, { maxDistance = 35, track = "SFX" })
 
 ```lua
 audio.play("audio/footstep", node, { track = "SFX", volume = 0.6, minDistance = 4 })
@@ -4681,6 +4693,10 @@ audio.play("audio/footstep", node, { track = "SFX", volume = 0.6, minDistance = 
 ### `audio.preload`
 
 audio.preload({ "audio/hit", "music/level1.ogg" } [, function(failed) end]) — read sounds in the background ahead of their first play, so it starts on the frame audio.play is called, and call back once every one is in. Names are spelled as audio.play takes them (the extension is optional); `failed` lists any that could not load. A preloaded clip is kept until it has been played; after that, a clip nothing is playing is kept only while the idle ones fit in 64 MB, least recently played dropped first, and read again if it is played later. On a host with no audio output it calls back straight away.
+
+### `audio.setWorldLowpass`
+
+audio.setWorldLowpass(hz) — muffle the world, not the cockpit: a low-pass at hz on every sound out in the world (placed at a point or on a node, and not flat), for a listener under water or in a vacuum suit. A sound played with listenerSpace = true (the suit's breath, the cockpit's beeps) passes it by, and so does a flat one (music, UI). nil or 0 clears it. It joins each sound's own lowpass and distance low-pass, and the lowest cutoff wins; a track's setLowpass is a separate filter on the bus after that. The change glides over a few milliseconds, so it never clicks; call it every frame to ease in. Holds until Play stops. e.g. audio.setWorldLowpass(underwater and 600 or 0)
 
 ### `audio.stopAll`
 
@@ -4693,6 +4709,10 @@ audio.track(name) — a live mixer-track handle ("Master" or a track from the Mi
 ### `audio.tracks`
 
 audio.tracks() → { {name, gainDb, pan, muted, soloed, output, lowpass, effects}, ... } — every mixer track, Master first, as this play session has it (script changes included). output is the track it feeds, "Master" for a top-level track and nil for Master itself.
+
+### `sound:audible`
+
+sound:audible() → the gain the listener gets from this sound: its volume times its distance falloff at the listener, as the mixer last worked it out (0..1 at volume 1 or less; above 1 for a sound played louder). Before its track's fader and before any low-pass. 0 while its clip is loading, while paused, and once it is stopping or has ended. Use it to drive a subtitle's opacity or an AI's hearing without copying the falloff maths. e.g. if s:audible() > 0.1 then showCaption() end
 
 ### `sound:isLoading`
 
@@ -4749,6 +4769,10 @@ Linear volume (1 = as authored).
 ### `sound:stop`
 
 Fade the sound out and end it.
+
+### `source:audible`
+
+node:sound():audible() → the gain the listener gets from the node's Audio Source: its volume times its distance falloff, as the mixer last worked it out (0..1 at volume 1 or less). 0 while loading, paused, stopping or stopped.
 
 ### `source:isLoading`
 

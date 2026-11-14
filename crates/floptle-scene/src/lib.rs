@@ -7465,3 +7465,34 @@ mod spring_bones_doc_tests {
         assert_eq!(again.to_component(), c, "the spring bones changed through a save and a load");
     }
 }
+
+#[cfg(test)]
+mod audio_source_format_tests {
+    /// **An Audio Source saved before the mixer's newer options loads as it
+    /// was, and a default one writes none of them.** Voice groups, the
+    /// distance low-pass and listener space are opt-in: a scene file that never named them
+    /// must play exactly as it did, and saving it again must not grow keys.
+    #[test]
+    fn an_old_audio_source_keeps_its_sound_and_its_file() {
+        let old = r#"(clip: "audio/hum.ogg", params: (volume: 0.7, max_distance: 35.0, track: "SFX", end: Loop), play_on_start: false)"#;
+        let src: floptle_audio::AudioSource = ron::from_str(old).expect("an old file parses");
+        let p = &src.params;
+        assert_eq!((p.volume, p.max_distance, p.track.as_str()), (0.7, 35.0, "SFX"));
+        assert_eq!((p.group.as_str(), p.priority), ("", 0), "an old sound joined a voice group");
+        assert_eq!((p.air_absorption, p.lowpass_falloff), (0.0, None), "an old sound gained a distance low-pass");
+        let written = ron::to_string(&floptle_audio::AudioSource::default()).unwrap();
+        assert!(!p.listener_space, "an old sound moved into the listener's space");
+        for key in ["group", "priority", "air_absorption", "lowpass_falloff", "listener_space"] {
+            assert!(!written.contains(key), "a default Audio Source writes `{key}`: {written}");
+        }
+
+        let mut set = src.clone();
+        set.params.group = "water".into();
+        set.params.priority = 2;
+        set.params.air_absorption = 0.05;
+        set.params.lowpass_falloff = Some(floptle_audio::LowpassFalloff { near: 8000.0, far: 400.0 });
+        set.params.listener_space = true;
+        let back: floptle_audio::AudioSource = ron::from_str(&ron::to_string(&set).unwrap()).unwrap();
+        assert_eq!(back, set, "the options do not survive a save");
+    }
+}

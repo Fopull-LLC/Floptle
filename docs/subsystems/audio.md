@@ -100,6 +100,70 @@ not have; `setLowpass` is a bus low-pass after the effect chain, the
 `TrackDesc::lowpass` field), `audio.tracks()` to read the mixer, tunables via
 `getcomponent("AudioSource")`. See scripting.md §11.
 
+## Voice groups
+
+`PlayParams::group` + `priority`, capped per group with
+`AudioCore::set_group_limit` (`audio.limit` in Lua). The cap is enforced on
+the audio thread, in `AudioCore::start`, where the true voice list lives: a
+control-side count would lag the mixer by a callback and could not see a
+voice that had just ended.
+
+- A group is named on the control side: `AudioEngine` keeps the names and
+  sends each one to the audio thread once (`Cmd::Group`), ahead of the first
+  sound or limit that uses it, so the string is moved in, never copied there.
+  The core's group list is allocated at `MAX_GROUPS` (64) up front; a voice
+  carries its group as a `u16`. A new sound finds its group by name among at
+  most 64; counting the group and picking the voice to give way is then one
+  pass over at most 256 voices comparing integers, with one `spatialize` per
+  candidate. No allocation, no lock. A group past the 64th
+  plays ungrouped.
+- Rank: lowest `priority`, then the quietest at the listener (`volume ×
+  distance gain`, the same number the voice is mixed at), then the oldest.
+  The newcomer is ranked with the rest: one that ranks below every voice in
+  the group is dropped (it reports finished at once) rather than replacing a
+  louder sound.
+- A replaced voice gets `stopping = true`, the ordinary declick fade. It
+  stops counting against its group at once and is reaped a few milliseconds
+  later.
+- Per-group counts are published with the other status as a plain `u32`
+  per group, by index (`try_lock`, into a buffer allocated at `MAX_GROUPS`);
+  the engine puts the names back on, and scripts read it as
+  `audio.groupCount`.
+- Limits live in the core and are cleared by `reset` (Play stopped).
+
+## What scripts read back
+
+`VoiceStatus` (published after every callback with the other status) carries
+`audible`: `volume × distance gain` at the listener, the same `heard` number
+voice stealing ranks by, 0 while paused or stopping. Scripts read it as
+`s:audible()`. Clip lengths are a control-side fact: `ClipCache` records each
+clip's length in seconds when its decode lands, in an `Arc<HashMap>` it hands
+to the script mirror every frame (cloned only on a frame a clip arrives),
+and keeps after the clip itself is evicted. `audio.duration` reads that, and
+a miss queues `AudioCmd::Decode`, an unpinned background read.
+
+## The per-voice low-pass
+
+Each voice has one `LowPass` (two one-poles, 12 dB an octave, coefficient
+gliding across a block so a change never clicks). Its cutoff is worked out
+per block in `render_block`, beside the gain, by `voice_cutoff`: the lowest
+non-zero of
+
+- `PlayParams::lowpass` (`audio.play{lowpass=}`, `s:setLowpass`);
+- the distance cutoff, `spatial::distance_cutoff`, from `air_absorption`
+  (`20 kHz / (1 + k × (d − min_distance))`) and `lowpass_falloff` (`near` at
+  `min_distance` to `far` at `max_distance`, geometric in between);
+- the world low-pass, `AudioCore::world_lowpass` (`set_world_lowpass`,
+  `audio.setWorldLowpass` in Lua): the listener's medium, under water or in a
+  suit. A `listener_space` voice is exempt. Cleared by `reset`.
+
+Distance and the medium apply only to a voice in the world: positioned and
+not `Flat` (`world_distance`). A voice with none of these set gets the same cutoff
+every block, so its filter does exactly what it did before. The lowest
+cutoff, not a filter per source, keeps the cost at one filter per voice; the
+track's bus low-pass (`TrackDesc::lowpass`) is a separate filter after the
+effect chain and stacks in series with it.
+
 ## Real-time rules (keep these)
 
 - The callback never locks/allocates on the steady path. Status publishing

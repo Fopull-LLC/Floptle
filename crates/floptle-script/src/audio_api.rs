@@ -25,7 +25,8 @@ pub(crate) struct AudioBridges {
 /// Every key an `audio.play` options table reads. Anything else is refused.
 pub(crate) const PLAY_KEYS: &[&str] = &[
     "volume", "pitch", "pan", "minDistance", "maxDistance", "mode", "falloff", "track",
-    "endBehavior", "loop", "sends", "lowpass",
+    "endBehavior", "loop", "sends", "lowpass", "group", "priority", "airAbsorption",
+    "lowpassFalloff", "listenerSpace",
 ];
 
 /// Read a play-options table into `PlayParams`, refusing anything it does not
@@ -88,6 +89,53 @@ fn parse_params(opts: Option<&Table>) -> mlua::Result<PlayParams> {
     }
     if let Some(v) = num("lowpass") {
         p.lowpass = v.max(0.0) as f32;
+    }
+    match t.raw_get::<Value>("group")? {
+        Value::Nil => {}
+        Value::String(s) => p.group = s.to_str()?.to_string(),
+        v => {
+            return Err(mlua::Error::runtime(format!(
+                "{CALL}: `group` takes a group name (a string), got {}",
+                v.type_name()
+            )));
+        }
+    }
+    if let Some(v) = num("priority") {
+        p.priority = v.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+    }
+    if let Some(v) = crate::opts::opt_num(t, CALL, "airAbsorption", 0.0, 1.0e6)? {
+        p.air_absorption = v as f32;
+    }
+    match t.raw_get::<Value>("listenerSpace")? {
+        Value::Nil => {}
+        Value::Boolean(b) => p.listener_space = b,
+        v => {
+            return Err(mlua::Error::runtime(format!(
+                "{CALL}: `listenerSpace` is true or false, got {}",
+                v.type_name()
+            )));
+        }
+    }
+    match t.raw_get::<Value>("lowpassFalloff")? {
+        Value::Nil => {}
+        Value::Table(c) => {
+            check_keys(&c, &["near", "far"], "audio.play lowpassFalloff")?;
+            let hz = |k: &str| -> mlua::Result<f32> {
+                match crate::opts::opt_num(&c, CALL, k, 1.0, 1.0e6)? {
+                    Some(v) => Ok(v as f32),
+                    None => Err(mlua::Error::runtime(format!(
+                        "{CALL}: `lowpassFalloff` is {{near = Hz, far = Hz}}, and `{k}` is missing"
+                    ))),
+                }
+            };
+            p.lowpass_falloff = Some(floptle_audio::LowpassFalloff { near: hz("near")?, far: hz("far")? });
+        }
+        v => {
+            return Err(mlua::Error::runtime(format!(
+                "{CALL}: `lowpassFalloff` is {{near = Hz, far = Hz}}, got {}",
+                v.type_name()
+            )));
+        }
     }
     Ok(p)
 }
@@ -216,6 +264,17 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
             lua.create_function(move |_, this: Table| {
                 let id: u32 = this.raw_get("__sound")?;
                 Ok(inf.borrow().sounds.get(&id).map(|s| s.position).unwrap_or(0.0))
+            })?,
+        )?;
+    }
+    {
+        // s:audible() → the gain the listener gets from it, 0..1 at volume 1.
+        let inf = b.info.clone();
+        methods.set(
+            "audible",
+            lua.create_function(move |_, this: Table| {
+                let id: u32 = this.raw_get("__sound")?;
+                Ok(inf.borrow().sounds.get(&id).map_or(0.0, |s| s.audible))
             })?,
         )?;
     }
@@ -445,6 +504,74 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
             })?,
         )?;
     }
+    {
+        // audio.limit(group, maxVoices) — cap how many voices a group plays
+        // at once; nil lifts the cap.
+        let cmds = b.commands.clone();
+        audio.set(
+            "limit",
+            lua.create_function(move |_, (group, max): (String, Option<f64>)| {
+                if group.is_empty() {
+                    return Err(mlua::Error::runtime("audio.limit(group, maxVoices): the group name is empty"));
+                }
+                let max = match max {
+                    None => None,
+                    Some(n) if n.is_finite() && n >= 0.0 => Some(n.round().min(u32::MAX as f64) as u32),
+                    Some(n) => {
+                        return Err(mlua::Error::runtime(format!(
+                            "audio.limit(group, maxVoices): maxVoices is 0 or more, or nil for no limit; got {n}"
+                        )));
+                    }
+                };
+                cmds.borrow_mut().push(AudioCmd::GroupLimit { group, max });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // audio.setWorldLowpass(hz) — the listener's medium: muffle every
+        // sound out in the world; nil or 0 clears it.
+        let cmds = b.commands.clone();
+        audio.set(
+            "setWorldLowpass",
+            lua.create_function(move |_, hz: Option<f64>| {
+                let hz = hz.unwrap_or(0.0);
+                if !(hz.is_finite() && hz >= 0.0) {
+                    return Err(mlua::Error::runtime(format!(
+                        "audio.setWorldLowpass(hz): hz is 0 or more (0 or nil = clear air), got {hz}"
+                    )));
+                }
+                cmds.borrow_mut().push(AudioCmd::WorldLowpass { hz: hz.min(1.0e6) as f32 });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // audio.duration(clip) → its length in seconds, or nil until it has
+        // been read; asking starts the read.
+        let inf = b.info.clone();
+        let cmds = b.commands.clone();
+        audio.set(
+            "duration",
+            lua.create_function(move |_, clip: String| {
+                if let Some(secs) = inf.borrow().durations.get(&clip) {
+                    return Ok(Some(*secs));
+                }
+                cmds.borrow_mut().push(AudioCmd::Decode { clip });
+                Ok(None)
+            })?,
+        )?;
+    }
+    {
+        // audio.groupCount(group) → how many voices the group is playing.
+        let inf = b.info.clone();
+        audio.set(
+            "groupCount",
+            lua.create_function(move |_, group: String| {
+                Ok(inf.borrow().groups.iter().find(|(g, _)| *g == group).map_or(0, |(_, n)| *n))
+            })?,
+        )?;
+    }
     lua.globals().set("audio", audio)?;
 
     // ---- node:sound() — handle for the node's AudioSource component ---------
@@ -504,6 +631,16 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
             lua.create_function(move |_, this: Table| {
                 let e: u32 = this.raw_get("__id")?;
                 Ok(inf.borrow().sources.get(&e).map(|s| s.position).unwrap_or(0.0))
+            })?,
+        )?;
+    }
+    {
+        let inf = b.info.clone();
+        smethods.set(
+            "audible",
+            lua.create_function(move |_, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                Ok(inf.borrow().sources.get(&e).map_or(0.0, |s| s.audible))
             })?,
         )?;
     }
