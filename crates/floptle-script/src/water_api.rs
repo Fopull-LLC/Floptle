@@ -167,12 +167,20 @@ pub struct SurfaceBook {
     pub(crate) reports: Rc<RefCell<std::collections::HashMap<u32, floptle_core::water::SimReport>>>,
     /// Per declared-water id, [`surface_stamp`] at the last `water.surface`.
     pub(crate) taken: Rc<RefCell<std::collections::HashMap<u32, u64>>>,
+    /// Per simulated volume, what its last step cost and what it holds:
+    /// `water.stats`.
+    pub(crate) stats: Rc<RefCell<std::collections::HashMap<u32, floptle_core::water::SimStats>>>,
 }
 
 impl SurfaceBook {
     /// The driver's report on simulated water `id` this frame.
     pub fn set_report(&self, id: u32, report: floptle_core::water::SimReport) {
         self.reports.borrow_mut().insert(id, report);
+    }
+
+    /// What simulated water `id`'s step cost this frame, and what it holds.
+    pub fn set_stats(&self, id: u32, stats: floptle_core::water::SimStats) {
+        self.stats.borrow_mut().insert(id, stats);
     }
 
     /// Has the driver reported on simulated water `id` yet?
@@ -184,6 +192,7 @@ impl SurfaceBook {
     pub fn retain(&self, live: &dyn Fn(u32) -> bool) {
         self.reports.borrow_mut().retain(|id, _| live(*id));
         self.taken.borrow_mut().retain(|id, _| live(*id));
+        self.stats.borrow_mut().retain(|id, _| live(*id));
     }
 }
 
@@ -717,7 +726,7 @@ fn push_quads(out: &mut Vec<u32>, index: &[u32], columns: usize, rows: usize) {
 pub(crate) const VOLUME_KEYS: &[&str] = &[
     "shape", "parent", "center", "radius", "reach", "origin", "cell", "columns", "rows", "levels", "flow",
     "density", "drag", "angularDrag", "current", "depth", "tint", "visibility", "underwater", "level",
-    "roughness", "springs", "holdEdges", "size", "depths", "held", "solver", "flat", "budget", "state", "minDepth", "soak", "soakBelow", "stillDepth",
+    "roughness", "springs", "holdEdges", "size", "depths", "held", "solver", "flat", "budget", "state", "minDepth", "soak", "soakBelow", "stillDepth", "fillTime",
     "points", "halfWidth", "bed", "curve",
     "waves",
 ];
@@ -1025,6 +1034,10 @@ fn tiled_from(opts: &Table, call: &str) -> mlua::Result<(Surface, floptle_core::
     if !(0.0..=0.1).contains(&still_depth) {
         return Err(err("`stillDepth` is the surface change that counts, in metres: 0 to 0.1 (0.0005 by default)"));
     }
+    let fill_time = num("fillTime").unwrap_or(f64::INFINITY);
+    if fill_time.is_nan() || fill_time < 0.0 {
+        return Err(err("`fillTime` is the seconds after a point is first held that what it gives counts as exchange, 0 or more"));
+    }
     let spec = SimSpec {
         level: level as f32,
         roughness: roughness as f32,
@@ -1044,6 +1057,7 @@ fn tiled_from(opts: &Table, call: &str) -> mlua::Result<(Surface, floptle_core::
             soak,
             soak_below,
             still_depth: still_depth as f32,
+            fill_time: fill_time as f32,
         }),
     };
     let surface = Surface::Tiles(std::sync::Arc::new(TiledSurface { patch, tiles: Default::default() }));
@@ -1718,6 +1732,51 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
             Ok(out)
         }) {
             let _ = t.set("filled", f);
+        }
+    }
+
+    // water.endFill(id [, group]): end the fill of a group's held points
+    // (every group's when none is given) now, so from here on what they give
+    // reads in water.exchanged: a game that knows its reservoir is full.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |_, (id, group): (u32, Option<u16>)| {
+            let d = s.declared.borrow();
+            if !d.iter().any(|w| w.id == id && w.simulated.as_ref().is_some_and(|s| s.tiled.is_some())) {
+                return Ok(false);
+            }
+            s.sim_cmds.borrow_mut().push(floptle_core::water::SimCmd::EndFill { id, group });
+            Ok(true)
+        }) {
+            let _ = t.set("endFill", f);
+        }
+    }
+
+    // water.stats(id) → { ms, tiles, awakeTiles, awakePoints, solved,
+    // wetPoints, volume, filling, awakeBy = { surface, flow, soak, spring,
+    // woken, settling } }: what a simulated volume's step cost last frame
+    // and what it holds; nil before its first step.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |lua, id: u32| {
+            let Some(st) = s.surfaces.stats.borrow().get(&id).copied() else { return Ok(Value::Nil) };
+            let out = lua.create_table()?;
+            out.set("ms", st.ms as f64)?;
+            out.set("tiles", st.tiles)?;
+            out.set("awakeTiles", st.awake_tiles)?;
+            out.set("awakePoints", st.awake_points)?;
+            out.set("solved", st.solved)?;
+            out.set("wetPoints", st.wet_points)?;
+            out.set("volume", st.volume)?;
+            out.set("filling", st.filling)?;
+            let by = lua.create_table()?;
+            for (name, n) in floptle_core::water::AWAKE_REASONS.iter().zip(st.awake_by) {
+                by.set(*name, n)?;
+            }
+            out.set("awakeBy", by)?;
+            Ok(Value::Table(out))
+        }) {
+            let _ = t.set("stats", f);
         }
     }
 
@@ -2419,6 +2478,44 @@ mod tests {
             .eval()
             .unwrap();
         assert!(ms < 0.02, "one setLevel took {ms} ms");
+    }
+
+    /// **A script ends a fill, gives a fill a time, and reads what a sim
+    /// cost.** `fillTime` reaches the engine (never, unless given), and is
+    /// checked; water.endFill asks the engine to end a group's fill, or every
+    /// group's; water.stats reads the driver's last report, by name, and is
+    /// nil before there is one.
+    #[test]
+    fn a_tiled_sim_ends_its_fill_and_reports_its_cost() {
+        let (lua, shared) = host();
+        let sim = r#"water.addVolume{ shape = "sim", parent = "Planet", center = vec3(0, 0, 800), cell = 1.25, size = 64, level = false"#;
+        let id: u32 = lua.load(format!("return {sim}, fillTime = 30 }}")).eval().unwrap();
+        let plain: u32 = lua.load(format!("return {sim} }}")).eval().unwrap();
+        let fill_time = |v: u32| shared.declared.borrow().iter().find(|w| w.id == v).unwrap().simulated.as_ref().unwrap().tiled.as_ref().unwrap().fill_time;
+        assert_eq!((fill_time(id), fill_time(plain)), (30.0, f32::INFINITY));
+        let err = lua.load(format!("{sim}, fillTime = -1 }}")).exec().unwrap_err();
+        assert!(err.to_string().contains("fillTime"), "{err}");
+        let ok: bool = lua.load(format!("return water.endFill({id}, 4) and water.endFill({id})")).eval().unwrap();
+        assert!(ok);
+        assert_eq!(
+            shared.sim_cmds.borrow().clone(),
+            vec![floptle_core::water::SimCmd::EndFill { id, group: Some(4) }, floptle_core::water::SimCmd::EndFill { id, group: None }]
+        );
+        let missing: bool = lua.load("return water.endFill(9999)").eval().unwrap();
+        assert!(!missing, "a fill ended on water that is not there");
+        let none: bool = lua.load(format!("return water.stats({id}) == nil")).eval().unwrap();
+        assert!(none, "stats before the first step");
+        shared.surfaces.set_stats(
+            id,
+            floptle_core::water::SimStats { ms: 0.25, tiles: 6, awake_tiles: 2, awake_points: 2048, solved: 4096, wet_points: 900, volume: 1234.5, filling: 3, awake_by: [0, 1, 0, 0, 0, 1] },
+        );
+        let (ms, tiles, awake, points, solved, wet, volume, filling, flow, settling, surface): (f64, u32, u32, u32, u32, u32, f64, u32, u32, u32, u32) = lua
+            .load(format!(
+                "local s = water.stats({id}) return s.ms, s.tiles, s.awakeTiles, s.awakePoints, s.solved, s.wetPoints, s.volume, s.filling, s.awakeBy.flow, s.awakeBy.settling, s.awakeBy.surface"
+            ))
+            .eval()
+            .unwrap();
+        assert_eq!((ms, tiles, awake, points, solved, wet, volume, filling, flow, settling, surface), (0.25, 6, 2, 2048, 4096, 900, 1234.5, 3, 1, 1, 0));
     }
 
     /// **A sim declared with a `center` lies on a round world, in tiles.**

@@ -550,6 +550,8 @@ pub struct FrameProfile {
     anim_counts: (usize, usize),
     /// Simulated water last frame: points awake, points solved, tiles held.
     water_counts: (usize, usize, usize),
+    /// Tiled sims' tiles awake last frame, by why (`water::AWAKE_REASONS`).
+    water_awake_by: [usize; 6],
     /// Sleepers woken last frame, by cause, in the physics' `WakeReason`
     /// order.
     wakes: [u32; 10],
@@ -955,6 +957,17 @@ impl FrameProfile {
     /// [`Self::set_water_counts`]'s numbers.
     pub fn water_counts(&self) -> (usize, usize, usize) {
         self.water_counts
+    }
+
+    /// Last frame's tiled sims' tiles awake, by why, every sim summed, in
+    /// the order `water::AWAKE_REASONS` names them.
+    pub fn set_water_awake_by(&mut self, by: [usize; 6]) {
+        self.water_awake_by = by;
+    }
+
+    /// [`Self::set_water_awake_by`]'s numbers.
+    pub fn water_awake_by(&self) -> [usize; 6] {
+        self.water_awake_by
     }
 
     /// Last frame's animators, and how many culling skipped.

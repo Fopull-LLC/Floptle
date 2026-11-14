@@ -414,6 +414,8 @@ end
 | `water.hold(id, cells, level [, group])` / `water.release(id, cells)` | hold a sim's points at a level, or let them go. |
 | `water.exchanged(id)` | what each group of held points gave the water since the last ask, m³. |
 | `water.filled(id)` | what each group gave to fill the ground under newly held points, m³, kept out of `exchanged`. |
+| `water.endFill(id [, group])` | end a group's fill now: from here on what it gives is `exchanged`. |
+| `water.stats(id)` | what a simulated volume's step cost last frame (`ms`), what it holds, and why its tiles are awake. |
 | `water.tiles(id)` | a tiled sim's wet tiles, each with a serial that moves when its surface really has. |
 | `water.state(id)` | a tiled sim's wet points, for a save (`addVolume{ state = ... }` starts from it). |
 | `water.addWater(id, at, m3)` / `water.setSpring(id, at, rate)` | add or take water at a point; a spring changed while it runs. |
@@ -484,7 +486,10 @@ hundreds of metres across on a small world holds its water level with the
 world rather than sagging into the ground on one side and hanging in the air
 on the other. Its ground is read from the terrain's own field along each
 point's radial (from collision where the parent has no terrain), and read
-again where the ground is dug or filled. `level` is a radius from the body's
+again where the ground is dug or filled. Ground under a roof is found: a tile
+the water reaches is read from the water's own floor beside it, so water runs
+on along a tunnel through a hill or into a cave, where reading from above
+would find the hill. `level` is a radius from the body's
 centre. `flat = true` lays the patch on a flat world instead, its up the
 parent's +Y and `level` a height.
 
@@ -500,7 +505,12 @@ dropped once dry.
 tile sleeps once its surface has stayed within a quarter of it for a second
 with nothing in it moving faster than a millimetre a second: a lake held at its level, a pool
 that has found its own, a channel that has filled. Sleeping moves no water,
-so the volume is exactly what it was. A sleeping tile wakes when the surface
+so the volume is exactly what it was. A held lake that tops up a trickle
+still sleeps: water crossing a face counts as moving only where it is not
+standing level with a held level (within the tolerance, and flatter than 1
+in 2,000 away from the held points themselves), and not when it pours into a
+film that soaks it away; a film soaking with nothing feeding it keeps its
+tile awake until it is gone. A sleeping tile wakes when the surface
 beside it stands more than twice the tolerance off its own, when a held
 level moves, when water is added, or when its ground is dug. A river that
 keeps running stays awake, as it should. Holding points as they are already
@@ -538,10 +548,22 @@ local gave = water.exchanged(trench)[2] or 0       -- m³ the sea gave since the
   held fills the lake's whole footprint from them. That is the water
   reaching the state the holds describe, not anything happening to the lake,
   so it is kept out of `exchanged`: from when a free point is first held,
-  what its group gives lands in `filled`, until the group comes to rest (a
-  second in which it gave next to nothing, or in which what it gave did not
-  stay on the patch, as with a held source feeding a stream that runs off
-  the edge). After that everything is `exchanged`. Moving a held point's
+  what it gives lands in `filled`, until its fill ends. A group's points
+  fill their basin together, and their fill ends, looked at once a second,
+  at the first of:
+  - the basin standing at its level: no water within a metre under the
+    group's level rose or fell by more than a quarter of `stillDepth` in the
+    second. What it gives then is a steady exchange, a stream it feeds or a
+    trickle leaking at a thin edge, so a slow leak never holds a fill open;
+  - a second in which the group gave next to nothing;
+  - every tile asleep;
+  - `fillTime` seconds after the point was first held (`addVolume{ ...,
+    fillTime = 60 }`; never, by default);
+  - `water.endFill(id [, group])`, for a game that knows its reservoir is
+    full (every group when none is given; points held later start a fill
+    of their own).
+
+  After that everything is `exchanged`. Moving a held point's
   level does not start a fill again, so a lake lowered by what it gave keeps
   reading as exchange. A breach opened while a group is still filling is
   counted in `filled` with the rest; hold later points in a group of their
@@ -565,7 +587,21 @@ local gave = water.exchanged(trench)[2] or 0       -- m³ the sea gave since the
 - `budget` is the most a frame spends stepping it, in milliseconds (1 by
   default). Past it the water runs slow for a moment; the frame does not.
   `perf.counts()` reports `waterAwake` (points in tiles that are moving),
-  `waterSolved` (points solved in the frame) and `waterTiles` (tiles held).
+  `waterSolved` (points solved in the frame), `waterTiles` (tiles held) and
+  `waterAwakeBy` (why tiles are awake, below), and `perf.parts().waterSim` is
+  what the engine spent stepping simulated water in the frame, apart from
+  the scripts.
+- `water.stats(id)` is one simulated volume's last frame: `{ ms, tiles,
+  awakeTiles, awakePoints, solved, wetPoints, volume, filling, awakeBy }`.
+  `ms` is what its frame cost (ground read for new tiles, the steps, the
+  surface handed back); `filling` the held points still filling;
+  `awakeBy` counts awake tiles by why: `surface` (it moved by more than a
+  quarter of `stillDepth`), `flow` (water running across a face), `soak` (a
+  film soaking with nothing feeding it, or a pool's thin edge still finding
+  out whether it is one), `spring`, `woken` (a hold, water added, a dig or
+  moving water beside it woke it since its last step) and `settling`
+  (nothing: it is counting down the second to sleep). A lake that should be
+  asleep says here what keeps it up. nil before its first step.
 - `water.state(id)` is its wet points, `{ columns, rows, cells = { i, j,
   depth, ... } }`, for a save; `addVolume{ ..., state = s }` starts from it.
 - `water.addWater(id, at, m3)` adds water at a point (takes it, if negative):
