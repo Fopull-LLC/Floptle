@@ -1675,6 +1675,84 @@ pub fn drawn_surface(field: &floptle_field::ChunkField) -> Vec<[Vec3; 3]> {
     out
 }
 
+/// How far along the ray from `ro` along unit `rd` the field crosses zero,
+/// starting the trace at `t0`, which is outside and near the surface.
+///
+/// A step of the field's own distance lands on the surface when the field
+/// rises one unit a metre, as a true distance does. Generated ground can rise
+/// far slower than that: a distance bounded by the steepest slope nearby is
+/// one twentieth of the true one beside a cliff or a river's bank, and stepping
+/// by it crawls, each step a twentieth of the gap left, so a fixed number of
+/// steps stopped metres short. So each step is divided by how fast the field
+/// was seen to fall over the step before, never by more than 64 and never
+/// past half a voxel beyond the distance itself, and once a step has crossed,
+/// the crossing is found between its two ends. Where the field rises one a
+/// metre every step is the distance, as it always was.
+fn field_crossing(field: &floptle_field::ChunkField, ro: Vec3, rd: Vec3, t0: f32, max_t: f32) -> f32 {
+    let voxel = field.voxel();
+    let eps = voxel * 1e-3;
+    let at = |t: f32| field.d(ro + rd * t);
+    let (mut t, mut d) = (t0, at(t0));
+    // The last point outside, and how fast the field fell reaching here.
+    let (mut prev, mut slope): (Option<(f32, f32)>, f32) = (None, 1.0);
+    for _ in 0..64 {
+        if d.abs() < eps * slope {
+            return t;
+        }
+        if d < 0.0 {
+            match prev {
+                Some(p) => return crossing_between(&at, p, (t, d), eps * slope),
+                // Started in rock: back out the way the distance says.
+                None => {
+                    t += d;
+                    d = at(t);
+                    continue;
+                }
+            }
+        }
+        let step = (d / slope).min(d + voxel * 0.5);
+        prev = Some((t, d));
+        t += step;
+        if t > max_t + voxel {
+            return t;
+        }
+        let next = at(t);
+        slope = ((d - next) / step).clamp(1.0 / 64.0, 1.0);
+        d = next;
+    }
+    t
+}
+
+/// The zero of the field between `a`, outside, and `b`, in rock, by false
+/// position (the Illinois kind, which never stalls on one end), to within
+/// `tol` of field distance.
+fn crossing_between(at: &impl Fn(f32) -> f32, a: (f32, f32), b: (f32, f32), tol: f32) -> f32 {
+    let ((mut a, mut fa), (mut b, mut fb)) = (a, b);
+    let mut side = 0;
+    let mut m = b;
+    for _ in 0..24 {
+        m = (a * fb - b * fa) / (fb - fa);
+        let fm = at(m);
+        if fm.abs() < tol || b - a < tol {
+            return m;
+        }
+        if fm < 0.0 {
+            (b, fb) = (m, fm);
+            if side < 0 {
+                fa *= 0.5;
+            }
+            side = -1;
+        } else {
+            (a, fa) = (m, fm);
+            if side > 0 {
+                fb *= 0.5;
+            }
+            side = 1;
+        }
+    }
+    m
+}
+
 /// The surface normal at `q`, a point on triangle `tri`: the vertex normals
 /// blended by `q`'s barycentric weights.
 fn normal_at(tri: &SurfaceTri, q: Vec3) -> Vec3 {
@@ -1812,14 +1890,7 @@ impl CollisionShape for ChunkTerrain {
             }
         }
         // The field's surface, traced the rest of the way.
-        let mut t = near;
-        for _ in 0..32 {
-            let d = self.field.d(local + ld * t);
-            if d.abs() < lvoxel * 1e-3 {
-                break;
-            }
-            t += d;
-        }
+        let t = field_crossing(&self.field, local, ld, near, tmax / scale);
         if t * scale > tmax {
             return RayAnswer::Miss;
         }
@@ -3792,6 +3863,163 @@ mod drawn_surface_tests {
             "600 ground queries took {:.2} ms against the ordinary rays' {:.2} ms",
             ground_s * 1e3,
             ray_s * 1e3
+        );
+    }
+
+    /// The ground query on unmeshed ground as it was before it learned to
+    /// step by how fast the field falls: from a voxel off the surface, the
+    /// field's own distance, 32 times, and the normal there. The reference
+    /// the new trace is held to on ground whose field is a true distance.
+    fn ground_trace_by_distance_alone(field: &ChunkField, o: Vec3, rd: Vec3, tmax: f32) -> Option<f32> {
+        if field.d(o) < 0.0 {
+            return None;
+        }
+        let near = field.raycast_within(o, rd, tmax, field.voxel())?;
+        let mut t = near;
+        for _ in 0..32 {
+            let d = field.d(o + rd * t);
+            if d.abs() < field.voxel() * 1e-3 {
+                break;
+            }
+            t += d;
+        }
+        std::hint::black_box(field.grad(o + rd * t));
+        (t <= tmax).then_some(t)
+    }
+
+    /// Flat ground at height zero whose field rises only `rise` a metre:
+    /// what a distance bounded by a steep slope nearby stores over flat sand.
+    fn slow_rising_ground(rise: f32) -> ChunkField {
+        let mut f = ChunkField::new(0.5);
+        for z in -32..=32 {
+            for y in -40..=100 {
+                for x in -32..=32 {
+                    f.write_voxel([x, y, z], rise * (y as f32 * 0.5));
+                }
+            }
+        }
+        f
+    }
+
+    /// **A prop settles on the surface where the field rises slowly.** Over
+    /// ground whose field rises a twentieth of a metre a metre, as beside a
+    /// cliff or a river's bank, stepping by the field's distance stopped
+    /// metres short of where it crosses zero: props stood 1.4-2.1 m over sand
+    /// that `terrain.raycast` and the physics mesh both found lower. The
+    /// ground query lands within a couple of centimetres of the field's own
+    /// raycast at every rise from a fiftieth to a whole metre a metre, straight
+    /// down and at a slant.
+    #[test]
+    fn a_ground_query_lands_on_ground_whose_field_rises_slowly() {
+        for rise in [1.0 / 50.0, 0.05, 0.1, 0.3, 1.0] {
+            let field = slow_rising_ground(rise);
+            let ground = ChunkTerrain::new(field.clone());
+            for rd in [Vec3::NEG_Y, Vec3::new(0.3, -1.0, 0.2).normalize()] {
+                // Aimed at the middle of the patch from 45 m up.
+                let from = rd * (45.0 / rd.y);
+                let truth = field.raycast(from, rd, 100.0).expect("the field has a surface");
+                assert!(truth.y.abs() < 0.01, "the field's own raycast is off the ground: {truth}");
+                let RayAnswer::Hit(t, n) = ground.ground_cast(from, rd, 100.0) else {
+                    panic!("the ground query missed ground rising {rise} a metre")
+                };
+                let off = (from + rd * t).y - truth.y;
+                assert!(off.abs() < 0.02, "rising {rise} a metre, the ground query stopped {off} m off the surface");
+                assert!(n.dot(Vec3::Y) > 0.99, "the normal is {n}");
+            }
+        }
+        // The fixture is the reported one: the old trace stopped metres short.
+        let field = slow_rising_ground(0.05);
+        let old = ground_trace_by_distance_alone(&field, Vec3::Y * 45.0, Vec3::NEG_Y, 100.0).unwrap();
+        assert!(45.0 - old > 1.0, "the old trace stopped only {} m up; the fixture is not slow", 45.0 - old);
+    }
+
+    /// **On ground whose field is a true distance, the ground query answers as
+    /// it did.** Six hundred settle rays onto a generated planet, the new
+    /// trace against the old one, ray for ray: the same rays hit, each within
+    /// the old trace's own tolerance (a thousandth of a voxel of field
+    /// distance) of the exact crossing, so the two answers agree to a few
+    /// millimetres.
+    #[test]
+    fn a_ground_query_on_true_distances_answers_as_it_did() {
+        let radius = 150.0;
+        let field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 11,
+            radius,
+            voxel: 1.5,
+            relief: radius * 0.065,
+            cave_depth: radius * 0.35,
+            core_r: 10.5,
+            ..Default::default()
+        });
+        let ground = ChunkTerrain::new(field.clone());
+        let (mut far, mut off_new, mut off_old, mut n) = (0f32, 0f32, 0f32, 0);
+        for k in 0..600 {
+            let (a, b) = ((k % 25) as f32 * 0.011, (k / 25) as f32 * 0.011);
+            let up = Vec3::new(a.sin(), b.sin(), 1.0).normalize();
+            let from = up * (radius + 60.0);
+            let new = match ground.ground_cast(from, -up, 150.0) {
+                RayAnswer::Hit(t, _) => Some(t),
+                _ => None,
+            };
+            let old = ground_trace_by_distance_alone(&field, from, -up, 150.0);
+            assert_eq!(new.is_some(), old.is_some(), "ray {k}: hit {new:?} where it hit {old:?}");
+            if let (Some(a), Some(b)) = (new, old) {
+                let exact = (field.raycast(from, -up, 150.0).expect("the field's raycast missed") - from).length();
+                far = far.max((a - b).abs());
+                off_new = off_new.max((a - exact).abs());
+                off_old = off_old.max((b - exact).abs());
+                n += 1;
+            }
+        }
+        assert!(n > 500, "only {n} of 600 rays hit");
+        // Both stop within a thousandth of a voxel of field distance of the
+        // crossing, 1.5 mm here, so they may sit either side of it.
+        assert!(off_new < 2e-3, "the ground query is up to {off_new} m off the field's crossing (the old trace {off_old} m)");
+        assert!(far < 3e-3, "the ground query moved up to {far} m on true distances");
+    }
+
+    /// **The ground query costs what it did.** Six hundred settle rays onto a
+    /// generated planet, totalled, against the old trace: the step that
+    /// divides by the field's fall is a subtraction a step, and the crossing
+    /// is found in a few samples. Totals over several passes, the fastest
+    /// kept, so a busy machine pausing one ray cannot decide it.
+    #[test]
+    fn a_ground_query_costs_what_it_did() {
+        let radius = 150.0;
+        let field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 11,
+            radius,
+            voxel: 1.5,
+            relief: radius * 0.065,
+            cave_depth: radius * 0.35,
+            core_r: 10.5,
+            ..Default::default()
+        });
+        let ground = ChunkTerrain::new(field.clone());
+        let rays: Vec<Vec3> = (0..600)
+            .map(|k| {
+                let (a, b) = ((k % 25) as f32 * 0.011, (k / 25) as f32 * 0.011);
+                Vec3::new(a.sin(), b.sin(), 1.0).normalize()
+            })
+            .collect();
+        let (mut new_s, mut old_s) = (f64::INFINITY, f64::INFINITY);
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            for up in &rays {
+                std::hint::black_box(ground.ground_cast(*up * (radius + 60.0), -*up, 150.0));
+            }
+            new_s = new_s.min(t.elapsed().as_secs_f64());
+            let t = std::time::Instant::now();
+            for up in &rays {
+                std::hint::black_box(ground_trace_by_distance_alone(&field, *up * (radius + 60.0), -*up, 150.0));
+            }
+            old_s = old_s.min(t.elapsed().as_secs_f64());
+        }
+        assert!(
+            new_s < old_s * 1.5,
+            "600 ground queries took {:.3} ms against the old trace's {:.3} ms",
+            new_s * 1e3,
+            old_s * 1e3
         );
     }
 
