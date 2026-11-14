@@ -394,6 +394,7 @@ pub mod ui_make;
 pub mod vm;
 mod view_api;
 pub mod water_api;
+mod water_ribbon;
 mod weather_api;
 
 pub(crate) use api::install_handle_api;

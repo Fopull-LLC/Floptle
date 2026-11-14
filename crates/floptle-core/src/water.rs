@@ -28,6 +28,10 @@ pub enum Surface {
     /// on a patch of a round world or of a plane, each tile's levels shared
     /// until it changes. What a `sim` declared with `center` reads from.
     Tiles(Arc<TiledSurface>),
+    /// A river: a line of points down its channel, each with a width, a
+    /// depth and a current, and `lift` metres its whole surface has been
+    /// raised since it was declared (`water.setLevel`).
+    Ribbon { course: Arc<crate::water_ribbon::Ribbon>, lift: f64 },
 }
 
 /// Surface heights on a regular grid, and optionally the water's velocity at
@@ -505,6 +509,16 @@ impl DeclaredWater {
                     }
                     None => return dry(up),
                 }
+            }
+            Surface::Ribbon { course, lift } => {
+                let dry = |up: DVec3| WaterAt { above: f64::INFINITY, up: self.frame.to_world(up) - self.frame.origin, ..Default::default() };
+                let Some(hit) = course.locate(local) else { return dry(course.up_at(local)) };
+                let above = hit.height - (hit.level + lift);
+                // Under the channel's bed is the ground, or a cave in it.
+                if -above > hit.bed + crate::water_ribbon::BED_SLACK {
+                    return dry(hit.up);
+                }
+                (above, hit.up, current + hit.flow)
             }
         };
         let dir = |v: DVec3| self.frame.to_world(v) - self.frame.origin;

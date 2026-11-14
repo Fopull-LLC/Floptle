@@ -405,10 +405,10 @@ end
 | `water.setFrozen(node, on)` | freeze or thaw a volume. |
 | `water.volumes()` | every water node in the scene. |
 | `water.flowAt(x, y, z)` | the water's velocity there, m/s; zero in still water. |
-| `water.addVolume{...}` | declare a lake or a heightfield of water no node carries; returns an id. |
+| `water.addVolume{...}` | declare a lake, a heightfield, a river or simulated water no node carries; returns an id. |
 | `water.surface(id [, {cells, colors, fixed, buffers, tile}])` | its surface as the arrays `mesh.build` takes, in the parent's frame. `colors` adds depth, flow and foam per vertex; `fixed` keeps every grid point a vertex, ready for `mesh.update`. |
 | `water.surfaceChanged(id)` | whether the surface moved since `water.surface(id)` last took it. |
-| `water.setLevel(id, level)` | move its surface in place: a lake's radius, a heightfield's or a sim's held level. |
+| `water.setLevel(id, level)` | move its surface in place: a lake's radius, a heightfield's or a sim's held level, a river's first point's height. |
 | `water.setLevels(id, levels)` | a heightfield's levels, one per point. |
 | `water.levelOf(id)` | its level now. |
 | `water.hold(id, cells, level [, group])` / `water.release(id, cells)` | hold a sim's points at a level, or let them go. |
@@ -537,14 +537,90 @@ local gave = water.exchanged(trench)[2] or 0       -- m³ the sea gave since the
   rebuilds only the tiles that moved: `water.surface(id, { tile = key })` is
   one tile's surface, wet points only, and `water.surface(id)` all of them.
 
+### A river as a ribbon
+
+A `shape = "ribbon"` volume is a river laid down as a line of points: the
+cheap, authorable river, next to a sim for water that has to find its own
+way. Each point is on the water's surface in the middle of the channel, in
+the parent's frame, with how far the banks are, how deep it is and how fast
+it runs there:
+
+```lua
+local river = water.addVolume{ shape = "ribbon", parent = "Planet", points = {
+  { pos = spring, halfWidth = 2, depth = 0.8, current = 2.5 },   -- narrow and quick
+  { pos = ford,   halfWidth = 5, depth = 0.5, current = 1.2 },
+  { pos = pool,   halfWidth = 9, depth = 4,   current = 0.3 },   -- wide, deep and slow
+  { pos = mouth,  halfWidth = 6, depth = 2,   current = 0.8 },
+} }
+mesh.build(water.surface(river, { colors = true }))   -- on a node at the parent's origin
+```
+
+- **Between points** the centreline is a smooth curve through every point,
+  and the surface height, half-width, depth and current are eased from one
+  point's value to the next without ever leaving the range between them: a
+  river does not run uphill between two points, and with two points the
+  values run straight from one to the other. Up to 4,096 points.
+- **`curve = "straight"`** joins the points with straight lines instead, and
+  every value runs straight from one point to the next. The curve swings a
+  little wide going into a sharp turn (about 3 m on a right angle between
+  points 40 m apart); straight lines never leave the line between two
+  points, so a river traced point by point down a channel stays in it. Each
+  corner is whole: the outside is rounded, the water running round it, and
+  the inside banks meet at a point.
+- **`current`** is metres a second along the channel towards the next point
+  (negative runs back towards the first), following every bend and the
+  river's slope. `water.flowAt` and `water.at(...).flow` answer with it, and
+  drag carries what floats down the channel at it.
+- **`halfWidth`, `depth` and a number `current` on the volume** are what a
+  point that gives none of its own takes, so a river of one width is written
+  once: `{ shape = "ribbon", halfWidth = 4, depth = 2, current = 1, points =
+  { { pos = a }, { pos = b } } }`. A `vec3` `current` is, as for every
+  shape, a current everywhere on top.
+- **The bed** is a gentle U by default (`bed = "u"`): the full `depth` in the
+  middle, three quarters of it halfway to a bank and nothing at the bank, so
+  the water shallows to the shore and `colors` shade it so. `bed = "flat"` is
+  the same depth from bank to bank: a canal. Below the bed (and half a metre
+  of slack for ground that is a little lower than the shape says) there is
+  no water, so a cave under a river is dry. Give no `depth` at all and the
+  river has no bed.
+- **In or out** is decided by the nearest place on the centreline: a point
+  is in the river when that place is no further off than the half-width
+  there. A bend is whole: no wedge of dry ground on the outside of a turn,
+  no strip counted twice on the inside. The river ends square at its first
+  and last points.
+- **On a round world** the points are positions in the parent's frame, about
+  the parent's centre, as a lake's `center` is: up is each point's own
+  radial and a height is a distance from the centre. `flat = true` lays it on
+  a flat world instead: up is the parent's +Y and a height is a `y`.
+- **`water.surface(id [, { cells, colors, fixed, buffers }])`** is a strip
+  down the channel over exactly the water `water.at` answers for, `cells`
+  columns of triangles from bank to bank (4 by default). Its `uvs` are
+  metres: u down the channel from the first point, so a shader scrolls its
+  ripples along the flow by `uv.x - time * speed`, and v across from the
+  middle. `colors` are r = the depth over the bed (metres / 16), g and b =
+  the current as flow along the parent's x and z, a = foam where the
+  current outruns its waves. The strip's vertices are always the same ones,
+  so `mesh.update` takes a new one as it stands.
+- **`water.setLevel(id, level)`** raises or lowers the whole river: its level
+  (what `water.levelOf` reads) is its first point's height, and every point
+  moves by the same amount, so it keeps its slope.
+
+A smooth river that turns tighter than it is wide (a centreline that curves
+in less than its half-width) still floats things correctly, but its strip
+folds over itself on the inside of the turn; space the points so the bend is
+wider than the channel, or make it `curve = "straight"`. Finding the water at a point looks only at the few pieces of the
+river near it, so a river of thousands of points costs a floating body what a
+short one does.
+
 `water.falls([id])` lists every place simulated water pours off a drop of more
 than 1.5 m, in the world, refreshed as the water flows: where a game puts its
 waterfall sheets and mist, and takes them away when a fall runs dry.
 
 A declared volume's level can move without removing and adding it again:
 `water.setLevel(id, level)` gives a lake a new surface radius, puts every wet
-point of a heightfield at `level` (`water.setLevels` sets them one by one), and
-holds a sim's held points at `level`, so the sim's water flows in or out there.
+point of a heightfield at `level` (`water.setLevels` sets them one by one),
+holds a sim's held points at `level`, so the sim's water flows in or out there,
+and moves a river's every point by what brings its first to `level`.
 The id and everything else about the volume stay, the physics floats things on
 the new level from the next tick, and the call is cheap enough to make every
 frame while a pool fills or a lake drains through a breach. `water.levelOf(id)`

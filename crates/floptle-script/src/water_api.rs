@@ -153,6 +153,11 @@ fn surface_stamp(surface: &Surface) -> u64 {
                 h.write_u64(serial);
             }
         }
+        // A course never changes once declared; only its lift does.
+        Surface::Ribbon { course, lift } => {
+            h.write_u64(course.stamp);
+            h.write_u64(lift.to_bits());
+        }
     }
     h.finish()
 }
@@ -248,7 +253,7 @@ pub(crate) struct SurfaceColors<'a> {
     pub current: glam::Vec3,
 }
 
-fn surface_color(depth: f64, flow: [f64; 2], foam: f64) -> [f32; 4] {
+pub(crate) fn surface_color(depth: f64, flow: [f64; 2], foam: f64) -> [f32; 4] {
     let lane = |v: f64| (0.5 + (v / COLOR_FLOW).clamp(-1.0, 1.0) * 0.5) as f32;
     [(depth / COLOR_DEPTH).clamp(0.0, 1.0) as f32, lane(flow[0]), lane(flow[1]), foam.clamp(0.0, 1.0) as f32]
 }
@@ -412,6 +417,7 @@ pub(crate) fn surface_mesh_with(
             m.index_capacity = g.columns.saturating_sub(1) * g.rows.saturating_sub(1) * 6;
         }
         Surface::Tiles(t) => tiles_mesh(&mut m, t, None, look),
+        Surface::Ribbon { course, lift } => crate::water_ribbon::ribbon_mesh(&mut m, course, *lift, cells, look),
     }
     m
 }
@@ -511,6 +517,7 @@ pub(crate) const VOLUME_KEYS: &[&str] = &[
     "shape", "parent", "center", "radius", "reach", "origin", "cell", "columns", "rows", "levels", "flow",
     "density", "drag", "angularDrag", "current", "depth", "tint", "visibility", "underwater", "level",
     "roughness", "springs", "holdEdges", "size", "depths", "held", "solver", "flat", "budget", "state", "minDepth", "soak", "soakBelow",
+    "points", "halfWidth", "bed", "curve",
 ];
 
 /// The most cells a tiled sim may span, held or not: 4,096 a side.
@@ -625,7 +632,9 @@ fn declared_from(opts: &Table, id: u32) -> mlua::Result<DeclaredWater> {
             let origin = vec("origin").unwrap_or(glam::DVec3::ZERO);
             Surface::Grid(std::sync::Arc::new(HeightGrid { x0: origin.x, z0: origin.z, cell, columns, rows, levels, flow }))
         }
-        other => return Err(err(&format!("`shape` is \"lake\", \"heightfield\" or \"sim\", not \"{other}\""))),
+        // A river: a line of points down its channel.
+        "ribbon" => crate::water_ribbon::ribbon_from(opts, CALL)?,
+        other => return Err(err(&format!("`shape` is \"lake\", \"heightfield\", \"sim\" or \"ribbon\", not \"{other}\""))),
     };
     let anchor = match opts.get::<Value>("parent")? {
         Value::Nil => None,
@@ -642,6 +651,8 @@ fn declared_from(opts: &Table, id: u32) -> mlua::Result<DeclaredWater> {
         angular_drag: num("angularDrag").unwrap_or(1.0).max(0.0) as f32,
         current: vec("current").unwrap_or(glam::DVec3::ZERO).as_vec3(),
         floor: match num("depth") {
+            // A ribbon's `depth` is its channel's, shaped from bank to bank.
+            _ if shape == "ribbon" => f64::INFINITY,
             Some(d) if d > 0.0 => d,
             Some(_) => return Err(err("`depth` is how far below the surface the bed lies, in metres, more than 0")),
             None => f64::INFINITY,
@@ -859,6 +870,7 @@ fn level_of(w: &DeclaredWater) -> Option<f64> {
             (!wet.is_empty()).then(|| wet.iter().sum::<f64>() / wet.len() as f64)
         }
         Surface::Tiles(t) => t.mean_level(),
+        Surface::Ribbon { course, lift } => Some(course.level() + lift),
     }
 }
 
@@ -1058,6 +1070,7 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
                     let up = t.patch.locate(local).map_or(t.patch.up, |(_, _, _, up)| up);
                     (w.frame.to_world(up) - w.frame.origin).normalize_or_zero()
                 }
+                Surface::Ribbon { course, .. } => (w.frame.to_world(course.up_at(local)) - w.frame.origin).normalize_or_zero(),
             };
             let under = |local: glam::DVec3| -> bool {
                 if cols.is_empty() {
@@ -1069,6 +1082,8 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
                     Surface::Lake { reach, .. } => reach.max(10.0),
                     Surface::Grid(g) => (g.cell * g.columns.max(g.rows) as f64).max(10.0),
                     Surface::Tiles(t) => (t.patch.cell * t.patch.columns.max(t.patch.rows) as f64).max(10.0),
+                    // A river is drawn where it was laid, ground or no.
+                    Surface::Ribbon { .. } => return false,
                 };
                 let from = (at + up * height - origin).as_vec3();
                 floptle_physics::raycast_colliders(&cols, from, -up.as_vec3(), height as f32 - 0.01, !0).is_some()
@@ -1102,6 +1117,12 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
                     let mut m = SurfaceMesh { positions: Vec::new(), normals: Vec::new(), uvs: Vec::new(), indices: Vec::new(), colors: Vec::new(), index_capacity: 0 };
                     tiles_mesh(&mut m, t, Some(key), &look);
                     m
+                }
+                // A river's `cells` count from bank to bank, a few by default.
+                (Surface::Ribbon { .. }, _) => {
+                    let across = opts.as_ref().and_then(|o| o.get::<Option<f64>>("cells").ok().flatten());
+                    let across = across.map_or(crate::water_ribbon::CELLS_ACROSS, |c| c.round().clamp(2.0, 64.0) as usize);
+                    surface_mesh_with(&w.surface, across, &under, &look)
                 }
                 _ => surface_mesh_with(&w.surface, cells, &under, &look),
             };
@@ -1219,6 +1240,9 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
                 }
                 // Tiled water is always a sim's.
                 (Surface::Tiles(_), None) => return Ok(false),
+                // A river keeps its slope: every point rises or falls by
+                // what brings its first point to `level`.
+                (Surface::Ribbon { course, lift }, None) => *lift = level - course.level(),
             }
             s.changed.borrow_mut().push(id);
             Ok(true)

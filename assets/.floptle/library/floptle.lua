@@ -1919,13 +1919,21 @@ function water.flowAt(x, y, z) end
 ---and `holdEdges` make it a river; with `center` instead of `origin` it lies on
 ---a round world, each point's up its own radial, `level` a radius or `false`
 ---to start dry, ground read from the terrain's field, `size` metres across,
----stored in tiles only where water is). It floats things, slows
+---stored in tiles only where water is), or a river (`shape = "ribbon"`:
+---`points`, a list of `{ pos, halfWidth, depth, current }` down the channel on
+---the water's surface; between them the centreline is a smooth curve and the
+---height, width, depth and current are eased from one point's to the next;
+---`halfWidth`, `depth` and a number `current` on the volume are what a point
+---that gives none takes; `current` runs along the channel, m/s; `bed = "u"`,
+---the default, shallows to the banks and `"flat"` does not;
+---`curve = "straight"` joins the points with straight lines; it lies on a
+---round world about its parent's origin unless `flat = true`). It floats things, slows
 ---them and carries them on its `current`, and
 ---`water.at` answers for it. `depth` is how far below the surface its bed lies,
 ---so a cave under a lake is dry. From inside it looks like a Water Volume node
 ---(`tint`, `visibility` to change that, `underwater = false` for none). Returns
 ---an id.
----@param opts { shape?: "lake"|"heightfield"|"sim", level?: number|false, size?: number, depths?: number[], held?: { pos?: Vec3, cell?: integer[], level?: number, group?: integer }[], solver?: "swe"|"pipes", budget?: number, flat?: boolean, state?: { columns: integer, rows: integer, cells: number[] }, minDepth?: number, soak?: number, soakBelow?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
+---@param opts { shape?: "lake"|"heightfield"|"sim"|"ribbon", points?: { pos: Vec3, halfWidth?: number, depth?: number, current?: number }[], halfWidth?: number, bed?: "u"|"flat", curve?: "smooth"|"straight", level?: number|false, size?: number, depths?: number[], held?: { pos?: Vec3, cell?: integer[], level?: number, group?: integer }[], solver?: "swe"|"pipes", budget?: number, flat?: boolean, state?: { columns: integer, rows: integer, cells: number[] }, minDepth?: number, soak?: number, soakBelow?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3|number, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
 ---@return integer
 function water.addVolume(opts) end
 ---Every place simulated water pours off a drop of more than 1.5 m, in the
@@ -1944,6 +1952,9 @@ function water.falls(id) end
 ---about 0.5), a = foam. `fixed = true` keeps every grid point as a vertex and
 ---marks the answer `dynamic`, so it goes to `mesh.build` once and then to
 ---`mesh.update`. `buffers = true` returns buffers instead of lists.
+---A ribbon is a strip down its channel, `cells` (4) columns from bank to
+---bank, always the same vertices; its `uvs` are metres down the channel (u)
+---and across it from the middle (v).
 ---@param id integer
 ---A sim laid with a `center` is its wet points only; `tile` (a key from
 ---`water.tiles`) is one tile of it.
@@ -2019,7 +2030,8 @@ function water.wet(node) end
 ---look, density, drag, current and depth stay, and the physics floats things on
 ---the new level from the next tick. A lake's `level` is its surface's radius
 ---from its parent's centre; a heightfield's wet points all go to `level`; a
----sim's held points go to `level`. Cheap enough to call every frame. true if
+---sim's held points go to `level`; a ribbon's every point rises or falls by
+---what brings its first point's height to `level`. Cheap enough to call every frame. true if
 ---there was such water.
 ---@param id integer
 ---@param level number
@@ -2032,7 +2044,8 @@ function water.setLevel(id, level) end
 ---@return boolean
 function water.setLevels(id, levels) end
 ---The level of water `water.addVolume` declared: a lake's radius, the mean of
----a heightfield's wet points, a sim's mean surface where it is wet. nil when
+---a heightfield's wet points, a sim's mean surface where it is wet, a
+---ribbon's first point's height. nil when
 ---there is none, or none of it is wet.
 ---@param id integer
 ---@return number|nil
