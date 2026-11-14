@@ -1893,6 +1893,23 @@ impl Sim {
             .collect()
     }
 
+    /// How many parts of the assembly rooted at `eid` touched something in
+    /// the last stepped tick: the level, a body, another assembly. A craft
+    /// asleep counts the parts it rests on. 0 for a node that roots none.
+    ///
+    /// With `compound_grounded` it tells a craft lying on the ground from
+    /// one held off it: a craft that never sleeps while it reads 0 is not
+    /// resting on anything the solver can see.
+    pub fn compound_contact_parts(&self, eid: u32) -> u32 {
+        let Some(ci) = self.cmap.iter().find(|l| l.entity.index() == eid).map(|l| l.compound) else {
+            return 0;
+        };
+        let mut parts: Vec<u64> = self.tick_cc.iter().filter(|cc| cc.compound == ci).map(|cc| cc.shape_id).collect();
+        parts.sort_unstable();
+        parts.dedup();
+        parts.len() as u32
+    }
+
     /// Per-part impact attribution for the last stepped tick: one entry per
     /// (assembly root, part) that touched anything. The raw material for
     /// damage and stress systems: a lander's legs report a touchdown's impulse,

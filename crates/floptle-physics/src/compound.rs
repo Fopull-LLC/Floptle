@@ -27,6 +27,15 @@ pub enum ShapeGeom {
 }
 
 impl ShapeGeom {
+    /// How thin the shape is, measured from its centre: a sphere's or a
+    /// capsule's radius, a box's smallest half-extent.
+    pub fn thinness(&self) -> f32 {
+        match *self {
+            ShapeGeom::Sphere { radius } | ShapeGeom::Capsule { radius, .. } => radius,
+            ShapeGeom::Box { half } => half.min_element(),
+        }
+    }
+
     /// Solid-body inertia (diagonal, in the shape's local frame) for `mass`,
     /// as the classic closed forms. The capsule splits its mass by volume
     /// between the cylinder and the end spheres.
@@ -122,6 +131,20 @@ pub struct CompoundContact {
     pub speed_abs: f32,
 }
 
+/// How far a shape may stand, in metres, or be turned, in radians, from where
+/// it was when a re-pose last woke its compound before the next re-pose
+/// wakes it: see [`Compound::resync_shape_geometry`].
+pub const RESHAPE_GIVE: f32 = 1e-3;
+
+/// How much of its mass a compound may gain or lose since a change of mass
+/// last woke it before the next change wakes it: see
+/// [`Compound::set_shape_masses`].
+pub const MASS_GIVE: f32 = 0.05;
+
+/// How far a compound's centre of mass may move, as a share of its reach,
+/// since a change of mass last woke it before the next change wakes it.
+pub const COM_GIVE: f32 = 0.01;
+
 /// A compound rigid body. Positions and velocities are sim-frame
 /// (origin-relative) like every other body; `pos` is the centre of mass, the frame
 /// rigid dynamics integrates in. The assembly origin the caller authored
@@ -198,6 +221,15 @@ pub struct Compound {
     pub(crate) recheck_next: usize,
     /// Seconds into the current round of that re-check.
     pub(crate) recheck_time: f32,
+    /// The mass and the assembly origin's place in the body frame (which
+    /// moves as the centre of mass does) when a change of mass last woke it:
+    /// what [`Self::set_shape_masses`] measures the drift since against.
+    pub(crate) mass_ref: (f32, Vec3),
+    /// Each shape's pose when a re-pose last woke it, in shape order: what
+    /// [`Self::resync_shape_geometry`] measures the drift since against.
+    /// Empty until the first re-pose, so a craft whose parts never move
+    /// holds nothing.
+    pub(crate) pose_ref: Vec<(Vec3, Quat)>,
     /// Force accumulator (sim frame, applied at the CoM), cleared each step.
     pub(crate) force: Vec3,
     /// Torque accumulator (sim frame), cleared each step.
@@ -263,6 +295,8 @@ impl Compound {
             rest_pens: Vec::new(),
             recheck_next: 0,
             recheck_time: 0.0,
+            mass_ref: (mass, -com),
+            pose_ref: Vec::new(),
             force: Vec3::ZERO,
             torque: Vec3::ZERO,
         }
@@ -296,18 +330,42 @@ impl Compound {
     /// would cost more than it's worth (and risk jitter). Offsets are stored
     /// about the CoM, so we shift each incoming origin-relative offset by
     /// `local_origin` (= −CoM).
-    pub fn resync_shape_geometry(&mut self, updates: &[(u64, Vec3, Quat)]) {
-        let lo = self.local_origin;
-        // A leg that moved may no longer be what the craft stands on.
-        if !updates.is_empty() {
-            self.wake(crate::body::WakeReason::Reshaped);
+    ///
+    /// Every pose given is taken exactly. The craft is woken only once a
+    /// shape stands more than [`RESHAPE_GIVE`] from where it stood when a
+    /// re-pose last woke it: a leg that moved may no longer be what the craft
+    /// stands on, but a game that re-poses its parts every tick, moved or
+    /// not, hands back the poses it was given to within rounding, and a wake
+    /// for each kept a parked craft awake for good. Measured against the pose
+    /// at the last wake rather than the last call, so a part creeping a hair
+    /// a tick still wakes the craft once the creep adds up. Returns whether
+    /// it woke the craft.
+    pub fn resync_shape_geometry(&mut self, updates: &[(u64, Vec3, Quat)]) -> bool {
+        if updates.is_empty() {
+            return false;
         }
+        if self.pose_ref.len() != self.shapes.len() {
+            self.pose_ref = self.shapes.iter().map(|s| (s.offset, s.rot)).collect();
+        }
+        let lo = self.local_origin;
+        let mut moved = false;
         for (id, off_origin, rot) in updates {
-            if let Some(s) = self.shapes.iter_mut().find(|s| s.id == *id) {
+            if let Some(i) = self.shapes.iter().position(|s| s.id == *id) {
+                let s = &mut self.shapes[i];
                 s.offset = *off_origin + lo;
                 s.rot = *rot;
+                let (at, turned) = self.pose_ref[i];
+                // The turn between the two, as the sine of its half angle
+                // near enough: `w` near 1 is a turn near zero.
+                let turn = 2.0 * (turned.inverse() * *rot).xyz().length();
+                moved |= !(s.offset.distance(at) <= RESHAPE_GIVE && turn <= RESHAPE_GIVE);
             }
         }
+        if moved {
+            self.pose_ref.clear();
+            self.wake(crate::body::WakeReason::Reshaped);
+        }
+        moved
     }
 
     /// Sim-frame world center of one shape.
@@ -336,6 +394,16 @@ impl Compound {
     /// impulse, so the new centre of mass takes the velocity that body-fixed
     /// point already had (`v + ω×r`) and the spin is kept. Returns whether
     /// any mass changed; an unchanged list costs a comparison per entry.
+    ///
+    /// The mass, the centre of mass and the inertia are exact after every
+    /// call. The craft is woken only once the change could matter to what it
+    /// rests on: its mass more than [`MASS_GIVE`] of what it was, or its
+    /// centre of mass more than [`COM_GIVE`] of its reach from where it was,
+    /// when a change of mass last woke it. A tank burning off a few grams a
+    /// tick woke its craft every tick, which never slept; measured against
+    /// the last wake rather than the last call, the same slow burn still
+    /// wakes a sleeper once it adds up. The same idea as the held force a
+    /// sleeper rests under: see `PhysicsWorld::step_compound`.
     pub fn set_shape_masses(&mut self, masses: &[(u64, f32)]) -> bool {
         let mut changed = false;
         for &(id, m) in masses {
@@ -367,8 +435,20 @@ impl Compound {
         self.prev_pos += shift;
         self.mass = mass;
         self.inv_inertia_local = compose_inertia(&self.shapes).inverse();
+        // The poses a re-pose is measured against are about the centre of
+        // mass, as the shapes are.
+        for p in &mut self.pose_ref {
+            p.0 -= com;
+        }
         // A centre of mass that moved can tip a craft that was standing.
-        self.wake(crate::body::WakeReason::Reshaped);
+        let (was, at) = self.mass_ref;
+        let lighter_or_heavier = (mass - was).abs() > MASS_GIVE * was;
+        let shifted = self.local_origin.distance(at) > COM_GIVE * self.reach();
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        if lighter_or_heavier || shifted || !(mass.is_finite() && was.is_finite()) {
+            self.mass_ref = (mass, self.local_origin);
+            self.wake(crate::body::WakeReason::Reshaped);
+        }
         true
     }
 
@@ -377,17 +457,11 @@ impl Compound {
         self.vel + self.ang_vel.cross(p - self.pos)
     }
 
-    /// The thinnest any shape is, measured from its centre: a sphere's or a
-    /// capsule's radius, a box's smallest half-extent. A move longer than half
-    /// of it in one step is swept (see `PhysicsWorld::step_compound`).
+    /// The thinnest any shape is ([`ShapeGeom::thinness`]). No part moving
+    /// further than half of it in a step, nothing of the craft is swept (see
+    /// `PhysicsWorld::step_compound`).
     pub fn thinnest(&self) -> f32 {
-        self.shapes
-            .iter()
-            .map(|s| match s.geom {
-                ShapeGeom::Sphere { radius } | ShapeGeom::Capsule { radius, .. } => radius,
-                ShapeGeom::Box { half } => half.min_element(),
-            })
-            .fold(f32::INFINITY, f32::min)
+        self.shapes.iter().map(|s| s.geom.thinness()).fold(f32::INFINITY, f32::min)
     }
 
     /// Wake it for `why`: the next step simulates it in full, and its
@@ -472,10 +546,12 @@ impl Compound {
         // that point sat at `old_origin` in the old CoM frame, and the new CoM
         // frame is shifted from it by the body-frame CoM delta.
         kept.local_origin = old_origin - old_orient.inverse() * (kept.pos - old_pos);
+        kept.mass_ref.1 = kept.local_origin;
         let mut detached = rebuilt(detached_shapes);
         // The detached half is a new assembly: its origin is its own CoM (the
         // game layer roots a fresh node there via `origin()`).
         detached.local_origin = Vec3::ZERO;
+        detached.mass_ref.1 = detached.local_origin;
         detached.restitution = self.restitution;
         detached.friction = self.friction;
         detached.use_gravity = self.use_gravity;
@@ -549,6 +625,7 @@ impl Compound {
         // frame is shifted from it by the CoM delta (same rule as `split`'s
         // kept half).
         merged.local_origin = origin1 - inv_r0 * (merged.pos - p0);
+        merged.mass_ref.1 = merged.local_origin;
         let c = merged.pos;
         merged.vel = (v1 * m1 + v2 * m2) / merged.mass;
         // L about the new CoM = Σ (I_i ω_i + m_i (c_i − c) × v_i).

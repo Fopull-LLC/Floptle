@@ -625,6 +625,7 @@ impl Editor {
                     ang_vel: [c.ang_vel.x, c.ang_vel.y, c.ang_vel.z],
                     inertia: inertia_rows(c.world_inertia()),
                     grounded,
+                    contacts: sim.compound_contact_parts(eid),
                     anchored,
                     gripped: sim.gripped(eid),
                     parts: c.shapes.iter().map(|s| s.id as u32).collect(),

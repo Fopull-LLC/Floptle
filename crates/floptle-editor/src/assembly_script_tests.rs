@@ -272,6 +272,68 @@ end
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A craft whose script writes a tank's mass every frame, a little less each
+/// time, still falls asleep where it lands, and `assembly.info` counts the
+/// parts it rests on: none in the air, all four on the slab, asleep or not.
+/// A real load then wakes it, and says why. Woken by every change of mass,
+/// however small, it never slept.
+#[test]
+fn a_craft_burning_fuel_sleeps_where_it_lands_and_counts_what_it_rests_on() {
+    let (mut ed, dir) = project(
+        "burn",
+        r#"
+local ship, parts, step = nil, {}, 0
+function update(node, dt)
+  step = step + 1
+  if step == 1 then
+    spawn("Vessel", vec3(0, 2.0, -10), function(v)
+      ship = v
+      v:getcomponent("RigidBody").gravity = true
+      for i = 1, 4 do
+        local x, z = (i % 2) - 0.5, math.floor((i - 1) / 2) - 0.5
+        spawn("Part", vec3(x, 2.0, -10 + z), function(p)
+          parts[#parts + 1] = p
+          if #parts == 4 then assembly.rebuild(v) end
+        end, v)
+      end
+    end)
+  elseif ship and #parts == 4 then
+    local tank = parts[1]:getcomponent("RigidBody")
+    if step < 241 then tank.mass = 2 - 0.0001 * step end
+    local i = assembly.info(ship)
+    if step == 8 then log(string.format("BURN air %d %s", i.contacts, tostring(i.asleep))) end
+    if step == 240 then log(string.format("BURN landed %d %s %.4f", i.contacts, tostring(i.asleep), i.mass)) end
+    if step == 241 then tank.mass = 40 end
+    if step == 243 then log(string.format("BURN loaded %s %s %.1f", tostring(i.asleep), i.wake, i.mass)) end
+  end
+end
+"#,
+    );
+    let ground = ed.world.spawn();
+    ed.world.insert(
+        ground,
+        Transform { translation: DVec3::new(0.0, -1.0, -10.0), rotation: Quat::IDENTITY, scale: Vec3::ONE },
+    );
+    ed.world.insert(ground, Name("Ground".into()));
+    ed.world.insert(ground, Matter::Empty);
+    ed.world.insert(
+        ground,
+        RigidBody { kind: BodyKind::Box, mode: floptle_core::BodyMode::Static, half_extents: [10.0, 1.0, 10.0], ..Default::default() },
+    );
+    let g = ed.world.spawn();
+    ed.world.insert(g, Transform::IDENTITY);
+    ed.world.insert(g, Matter::GravityVolume { mode: floptle_core::GravityMode::Down, strength: 9.81, radius: 1000.0 });
+    ed.toggle_play();
+    run(&mut ed, 245);
+    let got = lines(&mut ed, "BURN");
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(got[0], "air 0 false", "falling, it touches nothing");
+    // The mass the script wrote at frame 239 or 240, whichever the tick read.
+    assert!(got[1].starts_with("landed 4 true 7.97"), "burning a tenth of a gram a frame, it rests on its four parts, asleep: {got:?}");
+    assert_eq!(got[2], "loaded false reshaped 46.0", "a tank made twenty times heavier wakes it: {got:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A body switched off on a planet that is moving on its rails rides the
 /// planet while it is off, node and all, and is where it was relative to the
 /// planet when it is switched back on.
