@@ -1884,14 +1884,18 @@ water = {}
 ---@param z? number
 ---@return number
 function water.depthAt(x, y, z) end
----nil in air, else `{depth, density, frozen, node, up, flow, volume}` — `up`
----being the direction OUT of the water (radial on a sea; NOT −gravity in a
----tilted tank) and `flow` its current. `node` is the Water Volume node; water a
----script declared has `volume`, its id, instead.
+---nil in air, else `{depth, density, frozen, node, up, flow, normal, wave,
+---volume}` — `up` being the direction OUT of the water (radial on a sea; NOT
+---−gravity in a tilted tank) and `flow` its current. `node` is the Water Volume
+---node; water a script declared has `volume`, its id, instead. On water with a
+---swell, `depth` is under the moving surface at `simTime`, `normal` is that
+---surface's own normal over the point (`up` on still water), `wave` how far it
+---stands above its still level, and `flow` includes the water's motion as the
+---waves pass.
 ---@param x number|Vec3|Node
 ---@param y? number
 ---@param z? number
----@return { depth: number, density: number, frozen: boolean, node?: Node, up: Vec3, flow: Vec3, volume?: integer }|nil
+---@return { depth: number, density: number, frozen: boolean, node?: Node, up: Vec3, flow: Vec3, normal: Vec3, wave: number, volume?: integer }|nil
 function water.at(x, y, z) end
 ---The yes/no, when that is all you wanted.
 ---@param x number|Vec3|Node
@@ -1927,13 +1931,23 @@ function water.flowAt(x, y, z) end
 ---and `holdEdges` make it a river; with `center` instead of `origin` it lies on
 ---a round world, each point's up its own radial, `level` a radius or `false`
 ---to start dry, ground read from the terrain's field, `size` metres across,
----stored in tiles only where water is). It floats things, slows
+---stored in tiles only where water is), or a river (`shape = "ribbon"`:
+---`points`, a list of `{ pos, halfWidth, depth, current }` down the channel on
+---the water's surface; between them the centreline is a smooth curve and the
+---height, width, depth and current are eased from one point's to the next;
+---`halfWidth`, `depth` and a number `current` on the volume are what a point
+---that gives none takes; `current` runs along the channel, m/s; `bed = "u"`,
+---the default, shallows to the banks and `"flat"` does not;
+---`curve = "straight"` joins the points with straight lines; it lies flat
+---in its parent's frame, or round its parent when that is a celestial body,
+---and `flat = true` or `false` says which). It floats things, slows
 ---them and carries them on its `current`, and
 ---`water.at` answers for it. `depth` is how far below the surface its bed lies,
 ---so a cave under a lake is dry. From inside it looks like a Water Volume node
 ---(`tint`, `visibility` to change that, `underwater = false` for none). Returns
----an id.
----@param opts { shape?: "lake"|"heightfield"|"sim", level?: number|false, size?: number, depths?: number[], held?: { pos?: Vec3, cell?: integer[], level?: number, group?: integer }[], solver?: "swe"|"pipes", budget?: number, flat?: boolean, state?: { columns: integer, rows: integer, cells: number[] }, minDepth?: number, soak?: number, soakBelow?: number, stillDepth?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
+---an id. `waves` gives it a swell, as `water.setSwell` does (a ribbon carries
+---none).
+---@param opts { waves?: { amplitude?: number, wavelength?: number, direction?: number[]|Vec3, steepness?: number, speed?: number, phase?: number }[], shape?: "lake"|"heightfield"|"sim"|"ribbon", points?: { pos: Vec3, halfWidth?: number, depth?: number, current?: number }[], halfWidth?: number, bed?: "u"|"flat", curve?: "smooth"|"straight", level?: number|false, size?: number, depths?: number[], held?: { pos?: Vec3, cell?: integer[], level?: number, group?: integer }[], solver?: "swe"|"pipes", budget?: number, flat?: boolean, state?: { columns: integer, rows: integer, cells: number[] }, minDepth?: number, soak?: number, soakBelow?: number, stillDepth?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3|number, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
 ---@return integer
 function water.addVolume(opts) end
 ---Every place simulated water pours off a drop of more than 1.5 m, in the
@@ -1952,6 +1966,9 @@ function water.falls(id) end
 ---about 0.5), a = foam. `fixed = true` keeps every grid point as a vertex and
 ---marks the answer `dynamic`, so it goes to `mesh.build` once and then to
 ---`mesh.update`. `buffers = true` returns buffers instead of lists.
+---A ribbon is a strip down its channel, `cells` (4) columns from bank to
+---bank, always the same vertices; its `uvs` are metres down the channel (u)
+---and across it from the middle (v).
 ---@param id integer
 ---A sim laid with a `center` is its wet points only; `tile` (a key from
 ---`water.tiles`) is one tile of it.
@@ -2030,11 +2047,44 @@ function water.setSlam(volume, k) end
 ---@param node Node
 ---@return number|nil
 function water.wet(node) end
+---The swell on a body of water: Gerstner waves, replacing any it had (nil or
+---`{}` for a still surface). `water` is a Water Volume node or an addVolume
+---id. Each wave is `{ amplitude, wavelength, direction, steepness, speed,
+---phase }`: metres to the crest, metres crest to crest, `{x, z}` along the
+---water (or a vec3), 0 (a sine) to 1 (a true deep-water wave), m/s (omit for
+---deep-water speed) and radians. At most 16. Bodies float on the moving
+---surface, `water.at` and splashes answer at it, and a shader on the surface
+---reads the same waves with `waterSwell(objectPos)`. The waves run on
+---`simTime`. true if there was such water.
+---@param water integer|Node
+---@param waves? { amplitude?: number, wavelength?: number, direction?: number[]|Vec3, steepness?: number, speed?: number, phase?: number }[]
+---@return boolean
+function water.setSwell(water, waves) end
+---The waves on a body of water as `water.setSwell` takes them, each with the
+---`speed` it travels at; nil for a still surface.
+---@param water integer|Node
+---@return { amplitude: number, wavelength: number, direction: number[], steepness: number, speed: number, phase: number }[]|nil
+function water.swell(water) end
+---Where the swell has moved the point of the still surface under `pos`, and
+---the surface's normal there, both in the world: what a shader's
+---`waterSwell` gives the vertex at that point. nil, nil without a swell.
+---@param water integer|Node
+---@param pos Vec3
+---@return Vec3|nil offset
+---@return Vec3|nil normal
+function water.swellAt(water, pos) end
+---Name the water whose swell a shader on `node` reads (`waterSwell`). Without
+---it a node reads the Water Volume it is or is under, or the declared water on
+---its parent whose surface it is nearest; nil for `water` goes back to that.
+---@param node Node
+---@param water? integer|Node
+function water.bindSwell(node, water) end
 ---Move the surface of water `water.addVolume` declared, in place: its id,
 ---look, density, drag, current and depth stay, and the physics floats things on
 ---the new level from the next tick. A lake's `level` is its surface's radius
 ---from its parent's centre; a heightfield's wet points all go to `level`; a
----sim's held points go to `level`. Cheap enough to call every frame. true if
+---sim's held points go to `level`; a ribbon's every point rises or falls by
+---what brings its first point's height to `level`. Cheap enough to call every frame. true if
 ---there was such water.
 ---@param id integer
 ---@param level number
@@ -2047,7 +2097,8 @@ function water.setLevel(id, level) end
 ---@return boolean
 function water.setLevels(id, levels) end
 ---The level of water `water.addVolume` declared: a lake's radius, the mean of
----a heightfield's wet points, a sim's mean surface where it is wet. nil when
+---a heightfield's wet points, a sim's mean surface where it is wet, a
+---ribbon's first point's height. nil when
 ---there is none, or none of it is wet.
 ---@param id integer
 ---@return number|nil

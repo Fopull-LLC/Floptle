@@ -2714,7 +2714,11 @@ impl Editor {
                 if let Some(sim) = self.sim.as_mut() {
                     // Component writes (friction etc.) land on the body too.
                     sim.sync_dynamic_params(&self.world);
+                    // A swell is read at the replayed tick's own time.
+                    let live = sim.water_time();
+                    sim.set_water_time(rtick as f64 * step as f64);
                     sim.step_body_tick(eid, step);
+                    sim.set_water_time(live);
                     if let Some(bs) = sim.body_snapshot(eid) {
                         let rot = self
                             .world

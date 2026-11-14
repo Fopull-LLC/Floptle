@@ -56,7 +56,20 @@ fn modules() -> Vec<(&'static str, String)> {
         // A screen shader with texture slots and a uniform array: every slot
         // has its own sampler, which is the pairing GLSL insists on.
         ("post prelude + a textured screen shader", textured_post_module()),
+        // A material shader that moves and lights a water surface by its
+        // swell: the vertex and the pixel stage both loop over the waves in
+        // the material's own parameter block.
+        ("raster.wgsl + field.wgsl + a water shader reading the swell", swell_material_module()),
     ]
+}
+
+fn swell_material_module() -> String {
+    let compiled = floptle_shader::compile_fragment(
+        "shader sea {\n  stage fragment\n  let n = waterSwellNormal(objectPos)\n  \
+         output color = vec4(litSurface(vec3(0.05, 0.25, 0.35), n), 1)\n  output offset = waterSwell(objectPos)\n}\n",
+    )
+    .expect("a water shader compiles");
+    format!("{}\n{}\n{}", floptle_render::raster::pass_prelude(), floptle_shader::stdlib::SUPPORT_WGSL, compiled.chunk)
 }
 
 fn textured_post_module() -> String {

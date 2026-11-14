@@ -400,7 +400,7 @@ end
 | Call | Answers |
 | --- | --- |
 | `water.depthAt(x, y, z)` | metres below the surface; `0` in air. Takes a vec3 or a node too. |
-| `water.at(x, y, z)` | `nil` in air, else `{depth, density, frozen, node, up, flow}` (`volume`, not `node`, for water a script declared). |
+| `water.at(x, y, z)` | `nil` in air, else `{depth, density, frozen, node, up, flow, normal, wave}` (`volume`, not `node`, for water a script declared). |
 | `water.isUnderwater(x, y, z)` | the yes/no, when that's all you wanted. |
 | `water.setFrozen(node, on)` | freeze or thaw a volume. |
 | `water.volumes()` | every water node in the scene. |
@@ -420,6 +420,10 @@ end
 | `water.splashes()` | what entered or left water since the last call. |
 | `water.setSlam(volume, k)` | the impulse a fast entry meets. |
 | `water.wet(node)` | seconds since a node was last in water. |
+| `water.setSwell(water, waves)` | the waves on a Water Volume node or declared water; `nil` for a still surface. |
+| `water.swell(water)` | its waves, each with the speed it travels at; `nil` when still. |
+| `water.swellAt(water, pos)` | `offset, normal`: where the swell has moved the still surface's point at `pos`. |
+| `water.bindSwell(node, water)` | name the water whose swell a shader on `node` reads. |
 | `water.removeVolume(id)` | take it away again. |
 
 A lake on a round world is part of a sphere about the planet's centre, and only
@@ -724,15 +728,115 @@ state can't disagree with the physics floating it — which is exactly what
 happened when a game carried its own `seaDepth()` against a sea radius it had
 to keep in step with the sphere it drew.
 
+### A swell: waves the water carries
+
+A sea drawn with waves and floated as a flat sheet disagree: the boat sits
+level while the water it is drawn in heaves past. So the waves belong to the
+water. Give a volume a list of **Gerstner waves** and everything that asks
+where its surface is gets the moving one: the solver that floats a hull,
+`water.at`, `water.depthAt`, `water.isUnderwater`, a splash, the camera's
+own test of being under, and the shader that draws it.
+
+```lua
+local sea = water.addVolume{ shape = "heightfield", origin = vec3(-200, 0, -200), cell = 400,
+                             columns = 2, rows = 2, levels = { 0, 0, 0, 0 },
+  waves = {
+    { amplitude = 1.2, wavelength = 60, direction = { 1, 0 },     steepness = 0.8 },
+    { amplitude = 0.4, wavelength = 17, direction = { 0.6, 0.8 }, steepness = 0.6, phase = 2.1 },
+  } }
+water.setSwell(seaNode, { { amplitude = 0.5, wavelength = 30 } })   -- on a Water Volume node; nil stills it
+```
+
+| Key | Is |
+| --- | --- |
+| `amplitude` | metres from the still surface to the crest (0.5). |
+| `wavelength` | metres from crest to crest (20). |
+| `direction` | the way it travels: `{x, z}` along the water, or a vec3 whose x and z are read (`{1, 0}`). |
+| `steepness` | how far a point of the surface moves along the wave for each metre it rises. 0 is a rolling sine; 1 (the default) is the circle a real deep-water wave turns, which sharpens crests and flattens troughs. |
+| `speed` | m/s its crests travel. Left out, it travels as deep water carries a wave of its length, `√(g·λ / 2π)` with g = 9.81: long waves outrun short ones. Give it on a world with another gravity. |
+| `phase` | where in its cycle it starts, radians (0). |
+
+- **A body of water carries up to 16 waves.** A Water Volume node keeps its
+  list in the scene (Inspector → Water Volume → swell); `water.setSwell` on a
+  node writes that list. A scene with no waves saves no key for them and
+  behaves exactly as it did.
+- **The clock is `simTime`.** The surface at a tick is a function of that
+  tick's time alone, so a dropped tick, slow motion and a rollback's replay all
+  float things on the water they floated on the first time. `water.at` in
+  `fixedUpdate` answers for the tick's surface; in `update`, for the frame's.
+- **`water.at` says more.** `depth` is under the moving surface, `normal` is
+  that surface's normal over the point (a deck can lean with it), `wave` is how
+  far the surface stands above its still level there, and `flow` includes the
+  water's own motion as a wave passes, which fades with depth. The solver's
+  drag is against that motion, so a floating crate rises, falls and surges
+  with the swell rather than being held against it.
+- **The water carries what floats in it.** A float is a weight on a spring,
+  and waves near its own bobbing rate would set it ringing a metre clear of
+  the water drawn under it. On water with a swell a floating body's rise and
+  fall is damped towards the surface's own, by the volume's `drag` times what
+  stops the ringing dead (1 by default; 0 for none), so a crate on a short
+  chop stays in its water. Still water floats things exactly as it did.
+- **On a round world the waves are laid about an axis:** a Sea's +Y, a lake's
+  own centre. `direction` is on the tangent plane there, as on a flat pool,
+  and each wave's fronts are the circles a fixed distance along the ground
+  from where it comes from. Its wavelength is the same all over the sphere,
+  and near the axis the swell is the flat one. A sea's swell turns with its
+  planet.
+- **Waves too steep to sum are eased back together.** Where the sum of
+  `2π · steepness · amplitude / wavelength` over the waves passes 0.8 the
+  surface would fold over itself, so every wave's sideways motion is scaled
+  down by the same factor. Heights are never changed.
+- **The swell rides the water's level.** `water.setLevel`, a heightfield's
+  levels and a sim's surface move the still surface; the waves stand on it.
+  They do not shoal: a wave is as high in the shallows as in the deep.
+- **A ribbon carries no swell.** A river's surface slopes and turns with its
+  course, so there is no plane or sphere to lay waves on: `waves` on a
+  `shape = "ribbon"` volume, and `water.setSwell` on one, are refused by name.
+
+**Drawing it.** The mesh stays flat and the shader moves it. `water.surface`
+gives the still surface, as before, and a surface shader on it reads the
+volume's own waves, the same numbers the solver has, so nothing is typed twice:
+
+```
+shader sea {
+  stage fragment
+  let n = waterSwellNormal(objectPos)
+  output color = vec4(litSurface(vec3(0.05, 0.25, 0.35), n), 1)
+  output offset = waterSwell(objectPos)
+}
+```
+
+A node reads the swell of the Water Volume it is or is under, or of the
+declared water (lying on it, on a node above it or on the world) whose surface
+it is nearest, so a surface drawn where its water is needs nothing more. `water.bindSwell(node,
+water)` names another: a camera-following patch of sea parented elsewhere, say.
+The surface is drawn at the time the frame's bodies are drawn at, one tick
+behind `simTime`, so a boat sits in the water it is drawn in. Leaving the mesh
+flat means a swell costs no remeshing and no upload, `water.surfaceChanged`
+stays quiet on a sea that only heaves, and the drawn surface is exact at any
+mesh density. For anything a script places on the drawn surface itself,
+`water.swellAt(water, pos)` is what the shader gives the vertex at `pos`.
+
+**Cost.** Asking where the surface is costs one pass over the waves for a
+sea of sines, and a few for steep ones (to find which point of the still
+surface has moved over the place asked about): about 0.3 µs and 0.8 µs an ask
+with 8 waves. A floating body asks three times a tick (two solver steps and
+the splash pass) and a part of an assembly twice, so a thousand crates in an
+8-wave sea add about 1.1 ms a tick on sines and 2.6 ms on steep waves, and a
+thousand-part raft 0.7 to 1.5 ms. Anything clear of the highest a wave can
+stand is known dry from the still surface and asks nothing, so everything
+ashore on a world with a wavy sea is free. Water with no waves costs what it
+always did. `examples/swell_bench.rs` in `floptle-physics` prints these.
+
 ### Not yet
 
-The surface is a translucent, tinted, specular volume sized to what the solver
-uses. It has **no waves, no shoreline softening against terrain and no
-depth-based tint from outside** of its own. A `.flsl` surface shader on the sea
-mesh can draw them: `litSurface(albedo, n)` lights a wave normal through the
-engine's sun, shadow and point lights, and `lightDir` / `lightColor` give a glint
-the key light's direction and colour (see the shader reference, §4.4).
-Underwater is a fog/colour grade, not refraction.
+A Water Volume node draws itself as a translucent, tinted, specular volume
+sized to its still surface, with **no shoreline softening against terrain and
+no depth-based tint from outside** of its own; its waves are drawn by a `.flsl`
+surface shader on a mesh of the sea (above). `litSurface(albedo, n)` lights a
+wave normal through the engine's sun, shadow and point lights, and `lightDir` /
+`lightColor` give a glint the key light's direction and colour (see the shader
+reference, §4.4). Underwater is a fog/colour grade, not refraction.
 
 ---
 

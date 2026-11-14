@@ -44,6 +44,8 @@ fn river_with(ball: DVec3) -> (Sim, floptle_core::Entity) {
         floor: f64::INFINITY,
         look: None,
         simulated: None,
+        swell: None,
+        time: 0.0,
     };
     sim.world.water.volumes.push(WaterVolume {
         shape: WaterShape::Declared { water: Arc::new(water), origin: DVec3::ZERO },
@@ -53,6 +55,7 @@ fn river_with(ball: DVec3) -> (Sim, floptle_core::Entity) {
         frozen: false,
         entity: u32::MAX - 1,
         carry: Default::default(),
+        swell: None,
     });
     (sim, e)
 }

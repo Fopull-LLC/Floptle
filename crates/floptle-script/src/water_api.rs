@@ -15,7 +15,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use floptle_core::water::{DeclaredWater, HeightGrid, Surface};
+use floptle_core::water::{DeclaredWater, HeightGrid, Lay, Surface, Swell, Wave};
 use mlua::{Lua, Table, Value};
 
 /// One body of water, mirrored for scripts each frame.
@@ -97,6 +97,65 @@ pub(crate) struct WaterShared {
     pub sim_origin: Rc<RefCell<glam::DVec3>>,
     /// What `water.surface` needs beyond the declared water itself.
     pub surfaces: SurfaceBook,
+    /// The waves on each Water Volume node that has any, by entity,
+    /// refreshed by the driver with `volumes`.
+    pub swells: Rc<RefCell<std::collections::HashMap<u32, NodeSwell>>>,
+    /// The simulation's clock every swell is read at, seconds: `simTime`.
+    pub clock: Rc<std::cell::Cell<f64>>,
+    /// `water.setSwell(node, waves)` requests, drained by the driver.
+    pub swell_writes: Rc<RefCell<SwellWrites>>,
+    /// `water.bindSwell(node, water)`: the water whose swell a shader on a
+    /// node reads, by the node's entity.
+    pub swell_binds: Rc<RefCell<std::collections::HashMap<u32, SwellSource>>>,
+}
+
+/// Waves scripts asked to be written to Water Volume nodes, by entity.
+pub type SwellWrites = Vec<(u32, Vec<Wave>)>;
+
+/// The waves on a Water Volume node, mirrored for scripts.
+#[derive(Clone, Debug)]
+pub struct NodeSwell {
+    pub swell: std::sync::Arc<Swell>,
+    /// The node's rotation: the frame the waves are laid in.
+    pub rot: glam::DQuat,
+}
+
+/// A body of water named by a script: a Water Volume node, or water it
+/// declared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwellSource {
+    Node(u32),
+    Declared(u32),
+}
+
+impl WaterInfo {
+    /// The swell over world point `p` on this volume, with the up there, or
+    /// `None` outside a pool's walls.
+    fn swell_over(&self, sw: &NodeSwell, p: glam::DVec3, t: f64) -> Option<(floptle_core::swell::Over, glam::DVec3, glam::DQuat)> {
+        let d = p - glam::DVec3::from(self.center);
+        if self.sea {
+            let o = sw.swell.over(sw.rot.inverse() * d, Lay::Round { radius: self.radius }, t);
+            Some((o, d.try_normalize().unwrap_or(glam::DVec3::Y), sw.rot))
+        } else {
+            let q = glam::DQuat::from_xyzw(self.rot[0], self.rot[1], self.rot[2], self.rot[3]);
+            let local = q.inverse() * d;
+            let h = glam::DVec3::from(self.half);
+            if local.x.abs() > h.x || local.z.abs() > h.z || local.y < -h.y {
+                return None;
+            }
+            Some((sw.swell.over(local, Lay::Flat { level: h.y }, t), q * glam::DVec3::Y, q))
+        }
+    }
+
+    /// What a swell on this volume is laid on, and the turn from its frame
+    /// to the world's.
+    fn lay(&self, sw: &NodeSwell) -> (Lay, glam::DQuat) {
+        if self.sea {
+            (Lay::Round { radius: self.radius }, sw.rot)
+        } else {
+            (Lay::Flat { level: self.half[1] }, glam::DQuat::from_xyzw(self.rot[0], self.rot[1], self.rot[2], self.rot[3]))
+        }
+    }
 }
 
 /// What `water.surface` and `water.surfaceChanged` keep between calls: the
@@ -179,24 +238,57 @@ struct Hit {
     volume: Option<u32>,
     up: glam::DVec3,
     flow: glam::DVec3,
+    /// Out of the surface over the point: `up`, leant with a wave's face.
+    normal: glam::DVec3,
+    /// Metres the surface over the point stands above its still level.
+    wave: f64,
 }
 
 /// The deepest water containing `p` across both kinds, by the same
-/// "innermost wins" rule the solver uses.
+/// "innermost wins" rule the solver uses. Water with a swell answers for
+/// its moving surface, at the simulation's clock.
 fn deepest_any(s: &WaterShared, p: [f64; 3]) -> Option<Hit> {
-    let mut best = deepest(&s.volumes.borrow(), p).map(|(v, d)| Hit {
-        depth: d,
-        density: v.density,
-        frozen: v.frozen,
-        node: Some(v.entity),
-        volume: None,
-        up: if v.sea {
+    let swells = s.swells.borrow();
+    let still_up = |v: &WaterInfo| {
+        if v.sea {
             (glam::DVec3::from(p) - glam::DVec3::from(v.center)).try_normalize().unwrap_or(glam::DVec3::Y)
         } else {
             glam::DQuat::from_xyzw(v.rot[0], v.rot[1], v.rot[2], v.rot[3]) * glam::DVec3::Y
-        },
-        flow: glam::DVec3::ZERO,
-    });
+        }
+    };
+    let still = |v: &WaterInfo, depth: f64| {
+        let up = still_up(v);
+        Hit { depth, density: v.density, frozen: v.frozen, node: Some(v.entity), volume: None, up, flow: glam::DVec3::ZERO, normal: up, wave: 0.0 }
+    };
+    let mut best = if swells.is_empty() {
+        // No node has waves: the still answer, as it always was.
+        deepest(&s.volumes.borrow(), p).map(|(v, d)| still(v, d))
+    } else {
+        let mut best: Option<Hit> = None;
+        for v in s.volumes.borrow().iter() {
+            let hit = match swells.get(&v.entity) {
+                Some(sw) if !v.frozen => {
+                    let Some((o, up, rot)) = v.swell_over(sw, glam::DVec3::from(p), s.clock.get()) else { continue };
+                    Hit {
+                        depth: (-o.above).max(0.0),
+                        density: v.density,
+                        frozen: v.frozen,
+                        node: Some(v.entity),
+                        volume: None,
+                        up,
+                        flow: rot * o.flow,
+                        normal: rot * o.normal,
+                        wave: o.height,
+                    }
+                }
+                _ => still(v, v.depth_at(p)),
+            };
+            if hit.depth > 0.0 && best.as_ref().is_none_or(|b| hit.depth > b.depth) {
+                best = Some(hit);
+            }
+        }
+        best
+    };
     for w in s.declared.borrow().iter() {
         let at = w.at(glam::DVec3::from(p));
         if at.depth > 0.0 && best.as_ref().is_none_or(|b| at.depth > b.depth) {
@@ -208,10 +300,112 @@ fn deepest_any(s: &WaterShared, p: [f64; 3]) -> Option<Hit> {
                 volume: Some(w.id),
                 up: at.up,
                 flow: at.flow,
+                normal: at.normal,
+                wave: at.wave,
             });
         }
     }
     best
+}
+
+/// Every key one wave of a `waves` list reads.
+pub(crate) const WAVE_KEYS: &[&str] = &["amplitude", "wavelength", "direction", "steepness", "speed", "phase"];
+
+/// A `waves` list as the waves it names: `{ { amplitude = 1, wavelength = 40,
+/// direction = {1, 0}, steepness = 0.6, speed = nil, phase = 0 }, ... }`.
+/// `nil` and an empty list are no waves.
+fn waves_from(v: &Value, call: &str) -> mlua::Result<Vec<Wave>> {
+    let err = |m: String| mlua::Error::RuntimeError(format!("{call}: {m}"));
+    let list = match v {
+        Value::Nil => return Ok(Vec::new()),
+        Value::Table(t) => t,
+        _ => return Err(err("`waves` is a list of waves, each { amplitude, wavelength, direction, steepness }".into())),
+    };
+    let n = list.raw_len();
+    if n > floptle_core::swell::MAX_WAVES {
+        return Err(err(format!("`waves` has {n} waves; a body of water carries at most {}", floptle_core::swell::MAX_WAVES)));
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 1..=n {
+        let Value::Table(w) = list.raw_get::<Value>(i)? else {
+            return Err(err(format!("wave {i} is a table: {{ amplitude, wavelength, direction, steepness }}")));
+        };
+        crate::opts::check_keys(&w, WAVE_KEYS, &format!("{call} waves[{i}]"))?;
+        let num = |k: &str, or: f64| -> mlua::Result<f64> {
+            match w.get::<Value>(k)? {
+                Value::Nil => Ok(or),
+                Value::Number(x) if x.is_finite() => Ok(x),
+                Value::Integer(x) => Ok(x as f64),
+                _ => Err(err(format!("wave {i}'s `{k}` is a number"))),
+            }
+        };
+        let dflt = Wave::default();
+        let amplitude = num("amplitude", dflt.amplitude as f64)?;
+        let wavelength = num("wavelength", dflt.wavelength as f64)?;
+        let steepness = num("steepness", dflt.steepness as f64)?;
+        if amplitude < 0.0 || wavelength <= 0.0 || steepness < 0.0 {
+            return Err(err(format!(
+                "wave {i}: `amplitude` and `steepness` are 0 or more and `wavelength` is more than 0 metres"
+            )));
+        }
+        let direction = match w.get::<Value>("direction")? {
+            Value::Nil => dflt.direction,
+            Value::Table(d) if d.raw_len() == 2 => [d.raw_get::<f32>(1)?, d.raw_get::<f32>(2)?],
+            other => match crate::math_api::vec3_of(&other) {
+                Some(d) => [d.x as f32, d.z as f32],
+                None => return Err(err(format!("wave {i}'s `direction` is {{x, z}} along the water, or a vec3 whose x and z are read"))),
+            },
+        };
+        if direction == [0.0, 0.0] || !direction[0].is_finite() || !direction[1].is_finite() {
+            return Err(err(format!("wave {i}'s `direction` has no length")));
+        }
+        let speed = match w.get::<Value>("speed")? {
+            Value::Nil => None,
+            _ => Some(num("speed", 0.0)? as f32),
+        };
+        out.push(Wave {
+            amplitude: amplitude as f32,
+            wavelength: wavelength as f32,
+            direction,
+            steepness: steepness as f32,
+            speed,
+            phase: num("phase", 0.0)? as f32,
+        });
+    }
+    Ok(out)
+}
+
+/// The water a script names: a Water Volume node, or the id of water it
+/// declared.
+fn source_of(v: &Value) -> Option<SwellSource> {
+    match v {
+        Value::Table(t) => t.raw_get::<u32>("__id").ok().map(SwellSource::Node),
+        Value::Integer(i) => Some(SwellSource::Declared(*i as u32)),
+        Value::Number(n) => Some(SwellSource::Declared(*n as u32)),
+        _ => None,
+    }
+}
+
+/// The swell on the water a script names, what it is laid on at world point
+/// `p`, where its frame is and how that frame is turned.
+fn swell_frame(s: &WaterShared, src: SwellSource, p: glam::DVec3) -> Option<(std::sync::Arc<Swell>, Lay, glam::DVec3, glam::DQuat, f64)> {
+    match src {
+        SwellSource::Node(e) => {
+            let vols = s.volumes.borrow();
+            let v = vols.iter().find(|v| v.entity == e)?;
+            let swells = s.swells.borrow();
+            let sw = swells.get(&e)?;
+            let (lay, rot) = v.lay(sw);
+            Some((sw.swell.clone(), lay, glam::DVec3::from(v.center), rot, s.clock.get()))
+        }
+        SwellSource::Declared(id) => {
+            let d = s.declared.borrow();
+            let w = d.iter().find(|w| w.id == id)?;
+            let r = w.frame.rot;
+            let rot = glam::DQuat::from_xyzw(r.x as f64, r.y as f64, r.z as f64, r.w as f64);
+            Some((w.swell.clone()?, w.lay_at(p)?, w.frame.origin, rot, w.time))
+        }
+    }
 }
 
 /// A declared water's surface as triangles in its anchor's frame: what
@@ -525,6 +719,7 @@ pub(crate) const VOLUME_KEYS: &[&str] = &[
     "density", "drag", "angularDrag", "current", "depth", "tint", "visibility", "underwater", "level",
     "roughness", "springs", "holdEdges", "size", "depths", "held", "solver", "flat", "budget", "state", "minDepth", "soak", "soakBelow", "stillDepth",
     "points", "halfWidth", "bed", "curve",
+    "waves",
 ];
 
 /// The most cells a tiled sim may span, held or not: 4,096 a side.
@@ -653,7 +848,8 @@ fn declared_from(opts: &Table, id: u32, worlds: &std::collections::HashSet<Strin
         Value::String(n) => Some(n.to_str()?.to_string()),
         _ => return Err(err("`parent` is the name of the node the water lies on")),
     };
-    Ok(DeclaredWater {
+    let waves = waves_from(&opts.get::<Value>("waves")?, CALL)?;
+    let mut water = DeclaredWater {
         id,
         anchor,
         frame: floptle_core::scatter::Frame::IDENTITY,
@@ -671,7 +867,17 @@ fn declared_from(opts: &Table, id: u32, worlds: &std::collections::HashSet<Strin
         },
         look: look_from(opts, CALL)?,
         simulated: sim_level,
-    })
+        swell: None,
+        time: 0.0,
+    };
+    // A river's surface slopes and turns with its course: nothing to lay
+    // waves on. Said here rather than left to float things on a flat river
+    // a game believes has waves.
+    if !waves.is_empty() && matches!(water.surface, Surface::Ribbon { .. }) {
+        return Err(err("a ribbon carries no swell: `waves` are for a lake, a heightfield or a sim"));
+    }
+    water.swell = water.swell_of(&waves);
+    Ok(water)
 }
 
 /// A cell of tiled water named by a script: a point in the parent's frame
@@ -954,6 +1160,10 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
             // not −gravity in a tilted tank.
             out.set("up", crate::math_api::LuaVec3(h.up))?;
             out.set("flow", crate::math_api::LuaVec3(h.flow))?;
+            // The surface over the point: which way it faces, and how far a
+            // wave has lifted it from its still level.
+            out.set("normal", crate::math_api::LuaVec3(h.normal))?;
+            out.set("wave", h.wave)?;
             Ok(Value::Table(out))
         }) {
             let _ = t.set("at", f);
@@ -1037,12 +1247,136 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
         let s = shared.clone();
         if let Ok(f) = lua.create_function(move |_, opts: Table| {
             let id = s.next_id.get().wrapping_add(1).max(1);
-            let w = declared_from(&opts, id, &s.worlds.borrow())?;
+            let mut w = declared_from(&opts, id, &s.worlds.borrow())?;
+            w.time = s.clock.get();
             s.next_id.set(id);
             s.declared.borrow_mut().push(w);
             Ok(id)
         }) {
             let _ = t.set("addVolume", f);
+        }
+    }
+
+    // water.setSwell(water, waves): the waves on a body of water, replacing
+    // any it had; nil or {} for a still surface. `water` is a Water Volume
+    // node or the id of declared water. The solver, `water.at`, splashes and
+    // a shader's `waterSwell` all read the one list.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |_, (water, waves): (Value, Value)| {
+            const CALL: &str = "water.setSwell";
+            let waves = waves_from(&waves, CALL)?;
+            match source_of(&water) {
+                Some(SwellSource::Node(e)) => {
+                    s.swell_writes.borrow_mut().push((e, waves));
+                    Ok(true)
+                }
+                Some(SwellSource::Declared(id)) => {
+                    let mut d = s.declared.borrow_mut();
+                    let Some(w) = d.iter_mut().find(|w| w.id == id) else { return Ok(false) };
+                    if !waves.is_empty() && matches!(w.surface, Surface::Ribbon { .. }) {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "{CALL}: a ribbon carries no swell: waves are for a lake, a heightfield or a sim"
+                        )));
+                    }
+                    w.swell = w.swell_of(&waves);
+                    w.time = s.clock.get();
+                    s.changed.borrow_mut().push(id);
+                    Ok(true)
+                }
+                None => Err(mlua::Error::RuntimeError(format!(
+                    "{CALL}(water, waves): `water` is a Water Volume node or the id water.addVolume gave"
+                ))),
+            }
+        }) {
+            let _ = t.set("setSwell", f);
+        }
+    }
+
+    // water.swell(water) → the waves on it, as setSwell takes them, each with
+    // the `speed` it travels at; nil for a still surface.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |lua, water: Value| {
+            let swell = match source_of(&water) {
+                Some(SwellSource::Node(e)) => s.swells.borrow().get(&e).map(|sw| sw.swell.clone()),
+                Some(SwellSource::Declared(id)) => s.declared.borrow().iter().find(|w| w.id == id).and_then(|w| w.swell.clone()),
+                None => {
+                    return Err(mlua::Error::RuntimeError(
+                        "water.swell(water): `water` is a Water Volume node or the id water.addVolume gave".into(),
+                    ));
+                }
+            };
+            let Some(swell) = swell else { return Ok(Value::Nil) };
+            let out = lua.create_table()?;
+            for (i, w) in swell.waves().iter().enumerate() {
+                let row = lua.create_table()?;
+                row.set("amplitude", w.amplitude as f64)?;
+                row.set("wavelength", w.wavelength as f64)?;
+                let dir = lua.create_table()?;
+                dir.raw_set(1, w.direction[0] as f64)?;
+                dir.raw_set(2, w.direction[1] as f64)?;
+                row.set("direction", dir)?;
+                row.set("steepness", w.steepness as f64)?;
+                row.set("speed", swell.speed(i))?;
+                row.set("phase", w.phase as f64)?;
+                out.raw_set(i + 1, row)?;
+            }
+            Ok(Value::Table(out))
+        }) {
+            let _ = t.set("swell", f);
+        }
+    }
+
+    // water.swellAt(water, pos) → offset, normal: where the swell has moved
+    // the point of the still surface under (or over) `pos`, and the
+    // surface's normal there, both in the world. Exactly what a shader's
+    // waterSwell gives the vertex at that point, for a script that places
+    // foam, a buoy or a mesh of its own on the drawn surface. nil without a
+    // swell.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |lua, (water, pos): (Value, Value)| {
+            use mlua::IntoLua;
+            let (Some(src), Some(p)) = (source_of(&water), crate::math_api::vec3_of(&pos)) else {
+                return Err(mlua::Error::RuntimeError(
+                    "water.swellAt(water, pos): a Water Volume node or a declared water's id, and a vec3".into(),
+                ));
+            };
+            let Some((swell, lay, origin, rot, time)) = swell_frame(&s, src, p) else {
+                return Ok((Value::Nil, Value::Nil));
+            };
+            let (offset, normal) = swell.offset(rot.inverse() * (p - origin), lay, time);
+            Ok((crate::math_api::LuaVec3(rot * offset).into_lua(lua)?, crate::math_api::LuaVec3(rot * normal).into_lua(lua)?))
+        }) {
+            let _ = t.set("swellAt", f);
+        }
+    }
+
+    // water.bindSwell(node, water): the shader on `node` reads `water`'s
+    // swell (waterSwell, waterSwellNormal). Without it a node reads the
+    // Water Volume it is or is under, or the declared water on its parent
+    // whose surface it is nearest. nil for `water` goes back to that.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |_, (node, water): (Value, Value)| {
+            let err = || {
+                mlua::Error::RuntimeError(
+                    "water.bindSwell(node, water): a node, and a Water Volume node or a declared water's id (nil to unbind)".into(),
+                )
+            };
+            let Some(SwellSource::Node(e)) = source_of(&node).filter(|_| matches!(node, Value::Table(_))) else { return Err(err()) };
+            match &water {
+                Value::Nil => {
+                    s.swell_binds.borrow_mut().remove(&e);
+                }
+                other => {
+                    s.swell_binds.borrow_mut().insert(e, source_of(other).ok_or_else(err)?);
+                }
+            }
+            Ok(())
+        }) {
+            let _ = t.set("bindSwell", f);
         }
     }
 
@@ -1672,6 +2006,10 @@ mod tests {
             colliders: Rc::default(),
             sim_origin: Rc::default(),
             surfaces: SurfaceBook::default(),
+            swells: Rc::default(),
+            clock: Rc::default(),
+            swell_writes: Rc::default(),
+            swell_binds: Rc::default(),
         };
         install_water_api(&lua, shared.clone());
         (lua, shared)
@@ -2230,5 +2568,166 @@ mod tests {
         v.frozen = true;
         assert_eq!(v.depth_at([0.0, 50.0, 0.0]), 0.0);
         assert!(deepest(&[v], [0.0, 50.0, 0.0]).is_none());
+    }
+
+    /// A flat sea 400 m across at y = 0, declared with one 1.5 m wave
+    /// running along +x, and the clock at `t`.
+    fn swell_host(steepness: f64, t: f64) -> (Lua, WaterShared) {
+        let (lua, shared) = host();
+        shared.clock.set(t);
+        lua.load(format!(
+            r#"sea = water.addVolume{{ shape = "heightfield", origin = vec3(-200, 0, -200), cell = 400, columns = 2, rows = 2,
+                 levels = {{ 0, 0, 0, 0 }},
+                 waves = {{ {{ amplitude = 1.5, wavelength = 40, direction = {{ 1, 0 }}, steepness = {steepness} }} }} }}"#
+        ))
+        .exec()
+        .unwrap();
+        (lua, shared)
+    }
+
+    /// **`water.at` is the formula.** Under a rolling wave `A·sin(k·x − ω·t)`
+    /// high, a point 5 m under the still level is `5 + A·sin(…)` deep, the
+    /// surface stands that `wave` above its level, and `depthAt` and
+    /// `isUnderwater` agree: a point between the still level and a crest is
+    /// under water, one in a trough's air is not. The clock is the one the
+    /// host sets with `simTime`.
+    #[test]
+    fn water_at_answers_at_the_moving_surface() {
+        let t = 3.25;
+        let (lua, shared) = swell_host(0.0, t);
+        let k = std::f64::consts::TAU / 40.0;
+        let omega = (9.81 * k).sqrt();
+        for x in [-37.0, 0.0, 4.5, 10.0, 26.0] {
+            let h = 1.5 * (k * x - omega * t).sin();
+            let (depth, wave, plain, ny): (f64, f64, f64, f64) = lua
+                .load(format!("local w = water.at(vec3({x}, -5, 2)); return w.depth, w.wave, water.depthAt({x}, -5, 2), w.normal.y"))
+                .eval()
+                .unwrap();
+            assert!((depth - (5.0 + h)).abs() < 1e-9, "at x = {x}: {depth} deep, the formula says {}", 5.0 + h);
+            assert!((wave - h).abs() < 1e-9 && (plain - depth).abs() < 1e-12);
+            let slope = 1.5 * k * (k * x - omega * t).cos();
+            assert!((ny - 1.0 / (1.0 + slope * slope).sqrt()).abs() < 1e-9, "the normal leans with the wave's face: {ny}");
+            // Half way up (or down) to where the wave has the surface.
+            let (wet, dry): (bool, bool) = lua
+                .load(format!("return water.isUnderwater({x}, {}, 2), water.isUnderwater({x}, {}, 2)", h - 0.1, h + 0.1))
+                .eval()
+                .unwrap();
+            assert!(wet && !dry, "at x = {x} the surface is at {h}");
+        }
+        // The clock moves it: the host's simTime is the swell's time.
+        shared.clock.set(t + 1.0);
+        for w in shared.declared.borrow_mut().iter_mut() {
+            w.time = t + 1.0;
+        }
+        let later: f64 = lua.load("return water.depthAt(10, -5, 2)").eval().unwrap();
+        assert!((later - (5.0 + 1.5 * (k * 10.0 - omega * (t + 1.0)).sin())).abs() < 1e-9, "{later}");
+    }
+
+    /// **A steep wave is the trochoid a shader draws.** `water.swellAt`
+    /// moves a point of the still surface as `waterSwell` moves its vertex:
+    /// `s·A·cos θ` along the wave and `A·sin θ` up. Asked the other way,
+    /// `water.at` finds that moved point on the surface, and a point 2 m
+    /// under it 2 m deep.
+    #[test]
+    fn swell_at_and_water_at_agree_on_a_steep_wave() {
+        let t = 1.75;
+        let (lua, _) = swell_host(0.8, t);
+        let k = std::f64::consts::TAU / 40.0;
+        let omega = (9.81 * k).sqrt();
+        for x0 in [-30.0, 3.0, 10.0, 17.5] {
+            let theta = k * x0 - omega * t;
+            let (ox, oy, depth, wave): (f64, f64, f64, f64) = lua
+                .load(format!(
+                    "local off, n = water.swellAt(sea, vec3({x0}, 0, 7))
+                     local w = water.at(vec3({x0}, 0, 7) + off - vec3(0, 2, 0))
+                     return off.x, off.y, w.depth, w.wave"
+                ))
+                .eval()
+                .unwrap();
+            assert!((ox - 0.8 * 1.5 * theta.cos()).abs() < 1e-6 && (oy - 1.5 * theta.sin()).abs() < 1e-6, "the offset at {x0}: {ox}, {oy}");
+            assert!((depth - 2.0).abs() < 1e-4, "2 m under the moved point is {depth} m deep");
+            assert!((wave - oy).abs() < 1e-4);
+        }
+    }
+
+    /// **`setSwell` gives, changes and takes away a swell, and `swell` reads
+    /// it back.** Water declared without waves is the still surface it
+    /// always was; a list that is not waves is refused by name.
+    #[test]
+    fn set_swell_changes_the_waves_and_no_waves_is_still_water() {
+        let (lua, shared) = host();
+        lua.load(
+            r#"id = water.addVolume{ shape = "heightfield", origin = vec3(-50, 0, -50), cell = 100, columns = 2, rows = 2,
+                 levels = { 0, 0, 0, 0 } }"#,
+        )
+        .exec()
+        .unwrap();
+        assert!(shared.declared.borrow()[0].swell.is_none(), "water declared without waves has a swell");
+        let (still, none): (f64, bool) = lua.load("return water.depthAt(5, -3, 5), water.swell(id) == nil").eval().unwrap();
+        assert_eq!(still, 3.0);
+        assert!(none);
+        let (ok, n, speed, depth): (bool, usize, f64, f64) = lua
+            .load(
+                "local ok = water.setSwell(id, { { amplitude = 1, wavelength = 20, steepness = 0, phase = math.pi / 2 },
+                                                 { amplitude = 0.25, wavelength = 5, direction = vec3(0, 9, 2), steepness = 0, speed = 1.5 } })
+                 local s = water.swell(id)
+                 return ok, #s, s[2].speed, water.depthAt(0, -3, 0)",
+            )
+            .eval()
+            .unwrap();
+        assert!(ok && n == 2 && (speed - 1.5).abs() < 1e-6);
+        // At the origin at time 0 the first wave is at its crest (phase π/2).
+        assert!((depth - 4.0).abs() < 1e-6, "{depth}");
+        assert_eq!(*shared.changed.borrow(), [1], "the solver is told the surface changed");
+        let back: f64 = lua.load("water.setSwell(id, nil); return water.depthAt(0, -3, 0)").eval().unwrap();
+        assert_eq!(back, 3.0, "a swell taken away leaves the still surface");
+        assert!(shared.declared.borrow()[0].swell.is_none());
+        let missing: bool = lua.load("return water.setSwell(99, {})").eval().unwrap();
+        assert!(!missing);
+        for (bad, says) in [
+            ("{ { amplitude = 1, wavelenght = 20 } }", "wavelenght"),
+            ("{ { 1, 20 } }", "waves[1]"),
+            ("{ { amplitude = 1, wavelength = 0 } }", "more than 0"),
+            ("{ { direction = { 0, 0 } } }", "no length"),
+            ("5", "list of waves"),
+        ] {
+            let err = lua.load(format!("water.setSwell(id, {bad})")).exec().unwrap_err().to_string();
+            assert!(err.contains(says), "`{bad}` said: {err}");
+        }
+        let many = (0..17).map(|_| "{}").collect::<Vec<_>>().join(", ");
+        let err = lua.load(format!("water.setSwell(id, {{ {many} }})")).exec().unwrap_err().to_string();
+        assert!(err.contains("at most 16"), "{err}");
+    }
+
+    /// **A Water Volume node's swell answers too, in its node's frame.** A
+    /// sea of radius 100 with a wave along its +x: `water.at` over its +Y is
+    /// the formula, and with the node turned the waves turn with it.
+    #[test]
+    fn a_sea_nodes_swell_is_read_in_the_nodes_frame() {
+        let (lua, shared) = host();
+        shared.volumes.borrow_mut().push(sea());
+        let wave = Wave { amplitude: 0.5, wavelength: 25.0, direction: [1.0, 0.0], steepness: 0.0, speed: None, phase: 0.0 };
+        let swell = std::sync::Arc::new(Swell::new(&[wave], glam::DVec3::Y).unwrap());
+        shared.clock.set(2.0);
+        let k = std::f64::consts::TAU / 25.0;
+        let omega = (9.81 * k).sqrt();
+        // 6 m along +x from the top of the sea, 1 m under its still level.
+        let a: f64 = 6.0 / 100.0;
+        let p = glam::DVec3::new(a.sin(), a.cos(), 0.0) * 99.0;
+        let depth_with = |rot: glam::DQuat, p: glam::DVec3| -> f64 {
+            shared.swells.borrow_mut().insert(1, NodeSwell { swell: swell.clone(), rot });
+            lua.load(format!("return water.depthAt({}, {}, {})", p.x, p.y, p.z)).eval().unwrap()
+        };
+        let want = 1.0 + 0.5 * (k * 6.0 - omega * 2.0).sin();
+        let plain = depth_with(glam::DQuat::IDENTITY, p);
+        assert!((plain - want).abs() < 1e-6, "{plain} deep, the formula says {want}");
+        let turn = glam::DQuat::from_rotation_y(1.1);
+        assert!((depth_with(turn, turn * p) - want).abs() < 1e-6, "the swell did not turn with its node");
+        // No swell on the node: the still sphere, exactly.
+        shared.swells.borrow_mut().clear();
+        let still: f64 = lua.load(format!("return water.depthAt({}, {}, {})", p.x, p.y, p.z)).eval().unwrap();
+        assert_eq!(still, sea().depth_at(p.to_array()));
+        let (ny, wave_h): (f64, f64) = lua.load("local w = water.at(0, 99, 0); return w.normal.y, w.wave").eval().unwrap();
+        assert_eq!((ny, wave_h), (1.0, 0.0));
     }
 }

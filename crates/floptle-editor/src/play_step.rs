@@ -638,6 +638,7 @@ impl Editor {
         // answers the same question the solver does, from the same geometry,
         // so a swim state can never disagree with the physics floating it.
         self.script_host.set_water_volumes(crate::shading::water_infos(&self.world));
+        self.script_host.set_water_swells(crate::shading::water_swells(&self.world));
         self.script_host.set_materials(
             self.materials.iter().map(|(n, d)| (n.clone(), d.to_material())).collect(),
         );
@@ -742,6 +743,22 @@ impl Editor {
         // frame, takes it from there this same frame. Nothing is rebuilt: a
         // game freezing and thawing a sea as the camera comes and goes must
         // not re-import every collider in the level each time.
+        // `water.setSwell(node, waves)`: the node's waves are a field of its
+        // Water Volume, so they save with the scene and show in the
+        // Inspector like any other.
+        for (eid, waves) in self.script_host.take_water_swell_writes() {
+            let Some(e) = self.world.entity_with::<Matter>(eid) else {
+                continue;
+            };
+            match self.world.get_mut::<Matter>(e) {
+                Some(Matter::WaterVolume { waves: w, .. }) => *w = waves,
+                _ => self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    "water.setSwell: that node is not a Water Volume".into(),
+                    None,
+                ),
+            }
+        }
         for (eid, on) in self.script_host.take_water_freezes() {
             let Some(e) = self.world.entity_with::<Matter>(eid) else {
                 continue;

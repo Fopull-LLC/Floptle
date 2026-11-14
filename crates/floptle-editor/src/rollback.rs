@@ -824,9 +824,14 @@ impl RollbackDriver {
         // each rollback body advances exactly one tick. Non-rollback bodies are
         // untouched here — the caller's own physics step still owns them.
         ctx.sim.sync_dynamic_params(ctx.world);
+        // A swell is read at the tick's own time, so a replay floats a body
+        // on the surface the live tick did.
+        let live = ctx.sim.water_time();
+        ctx.sim.set_water_time(tick as f64 * ctx.step as f64);
         for n in self.nodes.clone() {
             ctx.sim.step_body_tick(n.eid, ctx.step);
         }
+        ctx.sim.set_water_time(live);
     }
 
     /// The raw input snapshot for the node about to run: **neutral**, carrying

@@ -154,6 +154,10 @@ mod tests {
             colliders: Rc::default(),
             sim_origin: Rc::default(),
             surfaces: SurfaceBook::default(),
+            swells: Rc::default(),
+            clock: Rc::default(),
+            swell_writes: Rc::default(),
+            swell_binds: Rc::default(),
         };
         install_water_api(&lua, shared.clone());
         (lua, shared)
@@ -391,6 +395,29 @@ mod tests {
     /// **A ribbon that cannot be a river says why.** No points, one point,
     /// a point with no width, a misspelt key, half a bed, a river on a
     /// round world laid at its parent's centre: each is refused by name.
+    /// **A ribbon carries no swell, and says so.** A river's surface slopes
+    /// and turns with its course, so there is no plane or sphere to lay
+    /// waves on: `waves` at the declaration and `water.setSwell` after are
+    /// refused by name rather than floating things on a flat river a game
+    /// believes is wavy. Stilling it (nil) is no error, and its water is the
+    /// ribbon's own.
+    #[test]
+    fn a_ribbon_refuses_a_swell_by_name() {
+        let (lua, shared) = host();
+        let wavy = BEND.replacen("flat = true,", "flat = true, waves = { { amplitude = 1, wavelength = 20 } },", 1);
+        assert_ne!(wavy, BEND, "the fixture: the declaration took the waves");
+        let err = lua.load(&wavy).exec().unwrap_err().to_string();
+        assert!(err.contains("ribbon carries no swell"), "{err}");
+        assert!(shared.declared.borrow().is_empty());
+        lua.load(BEND).exec().unwrap();
+        let err = lua.load("water.setSwell(river, { { amplitude = 1, wavelength = 20 } })").exec().unwrap_err().to_string();
+        assert!(err.contains("ribbon carries no swell"), "{err}");
+        let (ok, none): (bool, bool) = lua.load("return water.setSwell(river, nil), water.swell(river) == nil").eval().unwrap();
+        assert!(ok && none);
+        let w = &shared.declared.borrow()[0];
+        assert!(w.swell.is_none() && w.swell_of(&[floptle_core::water::Wave::default()]).is_none());
+    }
+
     #[test]
     fn a_misdeclared_ribbon_is_refused_by_name() {
         let (lua, shared) = host();

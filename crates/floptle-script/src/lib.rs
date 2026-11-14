@@ -1042,6 +1042,15 @@ pub struct ScriptHost {
     water_wet: Rc<RefCell<(f64, HashMap<u32, f64>)>>,
     /// `water.setSlam`, by the water's entity.
     water_slam: Rc<RefCell<HashMap<u32, f32>>>,
+    /// The waves on each Water Volume node that has any, with the node's
+    /// rotation, by entity.
+    water_swells: Rc<RefCell<HashMap<u32, water_api::NodeSwell>>>,
+    /// The simulation time every swell is read at: `simTime`.
+    water_clock: Rc<std::cell::Cell<f64>>,
+    /// `water.setSwell(node, waves)` calls waiting for the driver.
+    water_swell_writes: Rc<RefCell<water_api::SwellWrites>>,
+    /// `water.bindSwell`: the water a node's shader reads its swell from.
+    water_swell_binds: Rc<RefCell<HashMap<u32, water_api::SwellSource>>>,
     /// The nodes that are round worlds, by name: what a river declared on
     /// one lies round.
     water_worlds: Rc<RefCell<std::collections::HashSet<String>>>,

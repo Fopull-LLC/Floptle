@@ -20,6 +20,7 @@ fn pool_with(body: RigidBody, at: DVec3, g: f32) -> (Sim, floptle_core::Entity) 
         frozen: false,
         entity: 7,
         carry: Default::default(),
+        swell: None,
     });
     (sim, e)
 }

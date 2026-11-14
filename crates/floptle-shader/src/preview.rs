@@ -448,6 +448,15 @@ fn flsl_frag_scene_depth(uv: vec2<f32>) -> f32 { return 3.0 + uv.y; }
 fn env_radiance(r: vec3<f32>, rough: f32) -> vec3<f32> {
     return mix(vec3<f32>(0.75, 0.82, 0.9), vec3<f32>(0.3, 0.5, 0.85), clamp(r.y, 0.0, 1.0));
 }
+// A thumbnail lies on no water: a small fixed swell stands in, so a node
+// reading waterSwell shows waves rather than a flat swatch.
+fn flsl_swell_offset(p: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(0.0, 0.08 * sin(p.x * 6.0) + 0.04 * sin(p.z * 9.0 + 1.0), 0.0);
+}
+fn flsl_swell_normal(p: vec3<f32>, still: vec3<f32>) -> vec3<f32> {
+    return normalize(still + vec3<f32>(-0.48 * cos(p.x * 6.0), 0.0, -0.36 * cos(p.z * 9.0 + 1.0)));
+}
+fn flsl_swell_normal_local(p: vec3<f32>, still: vec3<f32>) -> vec3<f32> { return flsl_swell_normal(p, still); }
 fn base_texel(in: VsOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); }
 fn facing_normal(n: vec3<f32>, front: bool) -> vec3<f32> { return select(-n, n, front); }
 // A thumbnail has no Material maps or sky to reflect: `litPbr` previews as the

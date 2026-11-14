@@ -382,6 +382,7 @@ mod tests {
             tint: [0.0; 3],
             visibility: 28.0,
             underwater: true,
+            waves: Vec::new(),
         }
     }
 }

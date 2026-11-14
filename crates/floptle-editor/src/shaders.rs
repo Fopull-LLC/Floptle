@@ -159,6 +159,10 @@ struct FlslPlan<K> {
 /// which slots are declared `data`.
 type MaterialPlan = (FlslShaderId, Vec<u8>, Vec<Option<String>>, Vec<bool>);
 
+/// A binding whose swell moved on: its shader, its params with this frame's
+/// swell written in, and the textures and data slots it keeps.
+type SwellRebind = (FlslShaderId, Vec<u8>, Vec<Option<TexId>>, Vec<bool>);
+
 /// A screen pass's shader, its packed params, and each slot's image path
 /// with whether the slot is declared `data`.
 type PostPlan = (floptle_render::PostShaderId, Vec<u8>, Vec<(Option<String>, bool)>);
@@ -244,6 +248,53 @@ impl Editor {
     /// shader, a changed texture registry, or a change log that cannot say
     /// what happened walks every material.
     pub(crate) fn ensure_flsl_materials(&mut self) {
+        // The clock every swell is drawn at this frame, for the shaders
+        // below and for the camera's own test of being under water.
+        crate::shading::set_swell_clock(self.swell_draw_time());
+        self.walk_flsl_materials();
+        self.refresh_swell_binds();
+    }
+
+    /// Hand every material whose shader reads the water's swell
+    /// (`waterSwell`) the swell as it stands this frame: the waves of the
+    /// water its node lies on, their phases at the time the frame is drawn,
+    /// and where the node is in the water's frame. A uniform write per
+    /// surface, and nothing at all in a project with no such shader.
+    fn refresh_swell_binds(&mut self) {
+        if self.gpu.is_none() || self.raster.is_none() {
+            return;
+        }
+        let reads: Vec<(FlslShaderId, &CompiledFragment)> = self
+            .flsl_cache
+            .values()
+            .filter_map(|en| en.compiled.as_ref())
+            .filter(|(c, _)| c.swell_offset.is_some())
+            .map(|(c, id)| (*id, c))
+            .collect();
+        if reads.is_empty() {
+            return;
+        }
+        // The block a binding should hold now, where it differs from the one
+        // it holds.
+        let fresh = |e: Entity, b: &FlslMatBind| -> Option<SwellRebind> {
+            let (_, compiled) = reads.iter().find(|(id, _)| *id == b.shader)?;
+            let mut params = b.content.params.clone();
+            compiled.write_swell(&mut params, &self.swell_lanes_for(e));
+            (params != b.content.params)
+                .then(|| (b.shader, params, b.content.textures.iter().map(|t| t.map(TexId)).collect(), b.content.data.clone()))
+        };
+        let nodes: Vec<_> = self.flsl_binds.iter().filter_map(|(e, b)| Some((*e, fresh(*e, b)?))).collect();
+        let parts: Vec<_> = self.obj_flsl_binds.iter().filter_map(|(k, b)| Some((k.clone(), fresh(k.0, b)?))).collect();
+        let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else { return };
+        for (e, (shader, params, textures, data)) in nodes {
+            apply_flsl_bind(&mut self.flsl_binds, &mut self.flsl_pool, gpu, raster, (e, shader, params, textures, data));
+        }
+        for (k, (shader, params, textures, data)) in parts {
+            apply_flsl_bind(&mut self.obj_flsl_binds, &mut self.flsl_pool, gpu, raster, (k, shader, params, textures, data));
+        }
+    }
+
+    fn walk_flsl_materials(&mut self) {
         if self.gpu.is_none() || self.raster.is_none() {
             return;
         }
@@ -329,13 +380,18 @@ impl Editor {
         // node-level materials, one for the per-part overrides. The plans
         // borrow the world's materials rather than cloning them: in a scene of
         // thousands of parts the clones were most of the cost.
-        let plan_of = |cache: &FlslCache, m: &Material| -> Option<MaterialPlan> {
+        let plan_of = |cache: &FlslCache, e: Entity, m: &Material| -> Option<MaterialPlan> {
             let rel = m.shader.as_deref().unwrap_or_default();
             let (compiled, shader) = cache.get(rel).and_then(|en| en.compiled.as_ref())?;
-            let params = compiled.pack_params(
+            let mut params = compiled.pack_params(
                 &|name| m.shader_params.get(name).copied(),
                 &|slot| m.shader_tiling.get(slot).map(tiling_pack),
             );
+            // A shader that reads the water's swell takes it from the water
+            // its node lies on.
+            if compiled.swell_offset.is_some() {
+                compiled.write_swell(&mut params, &self.swell_lanes_for(e));
+            }
             // The material's override wins; a slot it leaves empty falls back to
             // the image the shader itself declares, so a texture shader looks
             // right the moment it's assigned instead of sampling nothing.
@@ -352,7 +408,7 @@ impl Editor {
             .query::<Material>()
             .filter(|(e, m)| m.shader.is_some() && wanted(e) && !field_shape.contains(e))
             .filter_map(|(e, m)| {
-                let (shader, params, slot_paths, data) = plan_of(&self.flsl_cache, m)?;
+                let (shader, params, slot_paths, data) = plan_of(&self.flsl_cache, e, m)?;
                 Some(FlslPlan { key: e, shader, params, slot_paths, data })
             })
             .collect();
@@ -364,7 +420,7 @@ impl Editor {
                 om.0.iter().filter(|(_, m)| m.shader.is_some()).map(move |(k, m)| (e, k, m))
             })
             .filter_map(|(e, key, m)| {
-                let (shader, params, slot_paths, data) = plan_of(&self.flsl_cache, m)?;
+                let (shader, params, slot_paths, data) = plan_of(&self.flsl_cache, e, m)?;
                 Some(FlslPlan { key: (e, key.clone()), shader, params, slot_paths, data })
             })
             .collect();

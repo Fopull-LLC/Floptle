@@ -224,6 +224,7 @@ impl Editor {
                 drag,
                 angular_drag,
                 frozen,
+                waves,
                 ..
             } = m
             else {
@@ -234,6 +235,13 @@ impl Editor {
             }
             let wt = floptle_core::world_transform(world, e);
             let center = (wt.translation - origin).as_vec3();
+            // The node's waves, laid in its own frame; the solver's clock
+            // sets the time as it steps.
+            let swell = floptle_core::water::Swell::new(waves, DVec3::Y).map(|swell| floptle_physics::VolumeSwell {
+                swell: std::sync::Arc::new(swell),
+                rot: wt.rotation,
+                time: 0.0,
+            });
             let shape = match kind {
                 WaterKind::Sea => floptle_physics::WaterShape::Sphere {
                     center,
@@ -263,6 +271,7 @@ impl Editor {
                 frozen: *frozen,
                 entity: e.index(),
                 carry: floptle_physics::WaterCarry::default(),
+                swell,
             });
         }
         field
@@ -2311,6 +2320,7 @@ mod water_streaming_tests {
                 tint: [0.1, 0.3, 0.4],
                 visibility: 20.0,
                 underwater: true,
+                waves: Vec::new(),
             },
         );
 
@@ -2387,6 +2397,7 @@ mod water_streaming_tests {
                 tint: [0.1, 0.3, 0.4],
                 visibility: 20.0,
                 underwater: true,
+                waves: Vec::new(),
             },
         );
         let driver = ed.world.spawn();
@@ -2464,6 +2475,7 @@ mod water_density_tests {
                 tint: [0.1, 0.3, 0.4],
                 visibility: 20.0,
                 underwater: true,
+                waves: Vec::new(),
             },
         );
         let ball = |ed: &mut Editor, name: &str, x: f64, mass: f32| {
@@ -2512,6 +2524,7 @@ mod water_density_tests {
                 tint: [0.1, 0.3, 0.4],
                 visibility: 20.0,
                 underwater: true,
+                waves: Vec::new(),
             },
         );
         let props = (0..20)

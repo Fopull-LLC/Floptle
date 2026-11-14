@@ -38,6 +38,7 @@ pub mod origin;
 pub mod profile;
 pub mod script;
 pub mod spatial;
+pub mod swell;
 pub mod tile;
 pub mod time;
 pub mod transform;

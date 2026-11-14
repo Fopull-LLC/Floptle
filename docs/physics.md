@@ -279,6 +279,23 @@ gravity volume is zero-g** — bodies float until you add one.
 Stack volumes for mixed worlds (a planet inside a region of down-gravity, etc.).
 Per-body, **affected by gravity** opts a single body out.
 
+### Water and its swell
+
+A **Water Volume** node, or water a script declares (`water.addVolume`), floats
+bodies by how much of each shape is under its surface and drags them against
+the water's own motion; the scripting reference (World, §22a) has the whole of
+it. When the water carries a **swell** (a list of Gerstner waves, in the
+Inspector or `water.setSwell`), that surface is the moving one: each shape is
+floated on the waves over it at the tick's own simulation time, a splash is
+reported where the wave was, and drag is against the circle the water turns
+as a wave passes, so a crate rises, falls and surges with the sea. A float's
+own bobbing is damped towards the surface's rise and fall (by the volume's
+`drag`), so waves near its bobbing rate do not set it ringing clear of the
+water. The surface is a pure function of the waves and the tick's time, with nothing
+carried from step to step, so a replayed tick floats a body exactly as the
+first run did. A shader draws the same waves with `waterSwell` (shader
+reference, §4.7).
+
 ## 4. Colliders: terrain & meshes
 
 The world you collide with is built from:

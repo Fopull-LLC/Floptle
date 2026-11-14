@@ -518,6 +518,7 @@ mod water_draw_tests {
             tint: [0.10, 0.32, 0.38],
             visibility: 28.0,
             underwater: true,
+            waves: Vec::new(),
         }
     }
 

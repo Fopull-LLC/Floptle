@@ -74,6 +74,9 @@ pub struct Sim {
     tick_vel_c: Vec<(Vec3, Vec3)>,
     /// Each body of water's slam, by the water's entity.
     water_slam: std::collections::HashMap<u32, f32>,
+    /// The simulation's clock a swell is read at, seconds: see
+    /// [`Self::set_water_time`].
+    water_t: f64,
     accum: f32,
     pub fixed_dt: f32,
     /// The project's resolved layer table (names → bit indices + collision
@@ -400,6 +403,7 @@ impl Sim {
             tick_vel: Vec::new(),
             tick_vel_c: Vec::new(),
             water_slam: Default::default(),
+            water_t: 0.0,
             accum: 0.0,
             fixed_dt: 1.0 / 120.0,
             layers,
@@ -1569,7 +1573,9 @@ impl Sim {
         self.accum += real_dt.clamp(0.0, 0.25);
         let mut iters = 0;
         while self.accum >= self.fixed_dt && iters < 8 {
+            self.swell_clock(self.water_t);
             self.world.step(self.fixed_dt);
+            self.water_t += self.fixed_dt as f64;
             self.accum -= self.fixed_dt;
             iters += 1;
         }
@@ -1624,7 +1630,10 @@ impl Sim {
         let mut tick_contacts: Vec<crate::body::Contact> = Vec::new();
         let mut tick_kin: Vec<(usize, u32, Vec3, Vec3)> = Vec::new();
         self.tick_cc.clear();
-        for _ in 0..n {
+        let tick_began = self.water_t;
+        for i in 0..n {
+            // Each substep floats things on the swell as it stands then.
+            self.swell_clock(tick_began + i as f64 * self.fixed_dt as f64);
             // Held forces (scripted thrust/RCS/aero on compounds) act through
             // every substep of this tick — the accumulators clear per step, so
             // re-arm them each substep. World→sim conversion happens here,
@@ -1655,7 +1664,32 @@ impl Sim {
         }
         self.held.clear();
         self.detect_touches(&tick_contacts, &tick_kin);
+        // What crossed the surface crossed it where the tick left it.
+        self.water_t = tick_began + tick_dt as f64;
+        self.swell_clock(self.water_t);
         self.water_crossings(tick_dt);
+    }
+
+    /// The simulation's clock, in seconds, that a swell is read at as the
+    /// next tick begins. A tick moves it on by its own length, so a sim left
+    /// alone keeps time; a host that counts ticks sets it before each one
+    /// (and before each body it replays), and then the same tick always
+    /// floats things on the same surface.
+    pub fn set_water_time(&mut self, t: f64) {
+        self.water_t = t;
+        self.swell_clock(t);
+    }
+
+    /// The clock [`Self::set_water_time`] set, moved on by the ticks since.
+    pub fn water_time(&self) -> f64 {
+        self.water_t
+    }
+
+    /// Read the water's swells at `t`. Still water has no clock to set.
+    fn swell_clock(&mut self, t: f64) {
+        if self.world.water.has_swell() {
+            self.world.water.set_time(t);
+        }
     }
 
     /// Ask every body and every part of an assembly about the water once
@@ -2751,9 +2785,12 @@ impl Sim {
             *tp = self.world.bodies[bi].pos;
         }
         let n = (tick_dt / self.fixed_dt).round().max(1.0) as u32;
-        for _ in 0..n {
+        for i in 0..n {
+            self.swell_clock(self.water_t + i as f64 * self.fixed_dt as f64);
             self.world.step_body(bi, self.fixed_dt);
         }
+        // The next body replayed in this tick begins where this one did.
+        self.swell_clock(self.water_t);
     }
 
     /// Hand these bodies (by entity index) over to an external per-tick driver:
