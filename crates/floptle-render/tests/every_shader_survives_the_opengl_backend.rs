@@ -54,7 +54,9 @@ fn modules() -> Vec<(&'static str, String)> {
         // the prelude declares the depth binding every post effect reads.
         ("post prelude + inkOutline.flsl", authored_post_module()),
         // A screen shader with texture slots and a uniform array: every slot
-        // has its own sampler, which is the pairing GLSL insists on.
+        // has its own sampler, which is the pairing GLSL insists on. It reads
+        // the see-through depth too, a second depth fetched through a float
+        // binding.
         ("post prelude + a textured screen shader", textured_post_module()),
         // A material shader that moves and lights a water surface by its
         // swell: the vertex and the pixel stage both loop over the waves in
@@ -77,7 +79,7 @@ fn textured_post_module() -> String {
         "shader caustics {\n  stage post\n  texture pattern\n  texture flow\n  uniform bodies: vec4[8]\n  \
          let world = cameraPosition() + sceneRay() * sceneDepth()\n  \
          let c = sample(pattern, uv + sample(flow, uv).xy) + sampleTriplanar(pattern, world, vec3(0, 1, 0))\n  \
-         output color = sceneColor().rgb + c.rgb * bodies[3].w * sceneWaterDepth() + skyRadiance(sceneRay(), 0.2)\n}\n",
+         output color = sceneColor().rgb + c.rgb * bodies[3].w * sceneWaterDepth() * step(sceneSurfaceDepth(), sceneDepth()) + scenePosition() * sceneDistance() * 0 + skyRadiance(sceneRay(), 0.2)\n}\n",
     )
     .expect("a textured screen shader compiles");
     format!(

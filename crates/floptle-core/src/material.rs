@@ -438,6 +438,7 @@ impl Material {
             "alphaCutoff" => self.alpha_cutoff = src.alpha_cutoff,
             "blend" => self.blend = src.blend,
             "doubleSided" => self.double_sided = src.double_sided,
+            "surfaceDepth" => self.surface_depth = src.surface_depth,
             "texture" => self.texture = src.texture.clone(),
             "cell" => self.cell = src.cell,
             "sheetCols" => self.sheet_cols = src.sheet_cols,
@@ -531,6 +532,14 @@ pub struct Material {
     /// what every surface has always done: nothing was culled. `false` hides a
     /// face seen from behind, as a model exported single-sided asks.
     pub double_sided: bool,
+    /// Does this surface count as something the scene is seen through? A
+    /// screen shader's `sceneSurfaceDepth` reads the nearest blended or
+    /// refractive surface over each pixel: water, glass, ice. `true` (the
+    /// default) is every material that is drawn see-through; a solid material
+    /// is never one, whatever this says. `false` leaves the surface out, for
+    /// what is drawn blended and is not a surface: a decal laid on the ground,
+    /// a glow, a light shaft, a soft shadow card.
+    pub surface_depth: bool,
 
     // --- The surface maps (v0.43). ------------------------------------------
     // Every one of these is `None`/neutral by default and its default binding is
@@ -735,6 +744,7 @@ impl Default for Material {
             faded_from: None,
             alpha_cutoff: 0.5,
             double_sided: true,
+            surface_depth: true,
             normal_map: None,
             normal_strength: 1.0,
             roughness_map: None,

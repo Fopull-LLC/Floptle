@@ -547,7 +547,7 @@ impl Parser<'_> {
         if taken {
             return Err(ParseError::new(format!("`{name}` is already defined"), span));
         }
-        if stdlib::op(name).is_some() || name.starts_with("vec") {
+        if stdlib::op_reserves(name) || name.starts_with("vec") {
             return Err(ParseError::new(format!("`{name}` is a stdlib op name"), span));
         }
         Ok(())

@@ -1419,7 +1419,7 @@ impl Editor {
                 &mut vfx_batches,
             );
             let vfx_mesh_draws = self.vfx.collect_mesh_draws(&self.world, cam, vfx_preview_on);
-            resolve_mesh_particles(&self.mesh_registry, &vfx_mesh_draws, &mut instances);
+            resolve_mesh_particles(&self.mesh_registry, &vfx_mesh_draws, self.raster.as_mut(), &mut instances);
         }
 
         if let (
@@ -1647,6 +1647,17 @@ impl Editor {
                     raster,
                     None,
                 );
+            }
+            // The see-through surfaces' depth, for `sceneSurfaceDepth`, on the
+            // window path's terms: only for a view whose post chain follows
+            // (it has a depth texture and is no stacked layer), and only when
+            // a screen shader in the list reads it.
+            if !opts.overlay
+                && let Some(dtex) = opts.depth_tex
+                && self.post_shaders.as_ref().is_some_and(|p| p.reads_surface_depth())
+            {
+                headless_mark!("see-through depth");
+                raster.surface_depth_pass(gpu, globals, &instances, &flsl_draws, &skin_draws, dtex.size());
             }
             if offscreen_timed && let Some(t) = self.gpu_timer.as_mut() {
                 t.mark_gap(gpu);

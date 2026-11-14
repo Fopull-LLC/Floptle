@@ -73,6 +73,7 @@ fn a_screen_shader_reads_the_sky_it_is_handed_and_black_without_one() {
             eye: [0.0; 3],
             water_depth: 0.0,
             sky,
+            surface_depth: None,
         };
         shaders.set_pass_list(&gpu, &[PostPass { shader: pass, params: params.to_vec(), textures: Vec::new() }]);
         post.run_with(&gpu, &PostSettings::default(), Some(&frame), &view, Some(&shaders));

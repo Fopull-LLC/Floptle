@@ -776,6 +776,12 @@ impl Editor {
                 eye: cam.world_position.as_vec3().to_array(),
                 water_depth,
                 sky: self.raymarch.as_ref().map(|r| r.env_view()),
+                // Drawn by `render_world_into` above, when a pass reads it.
+                surface_depth: self
+                    .raster
+                    .as_ref()
+                    .filter(|_| depth_tex.is_some() && post_shaders.is_some_and(|p| p.reads_surface_depth()))
+                    .and_then(|r| r.surface_depth_view()),
             };
             let out = if scaled_on {
                 retro_views.as_ref().map(|(c, _)| c.clone()).unwrap_or_else(|| cv.clone())

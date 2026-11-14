@@ -255,23 +255,36 @@ shader inkOutline {
 }
 ```
 
-Seven ops, `screen` category, available **only** in `stage post`:
+Eleven ops, `screen` category, read by a `stage post` shader:
 
 | Op | What it gives you |
 |---|---|
 | `sceneColor(uv?)` | the frame so far, in **real light** (upstream of the tonemap, so a bright light really does read above 1) |
-| `sceneDepth(uv?)` | distance from the camera in world units; the sky reads `1e6`, so a silhouette is the largest step in the frame |
+| `sceneDepth(uv?)` | **view depth**: how far away the pixel's surface is *along the camera's axis*, in world units, so a wall the camera faces is one number from edge to edge. Not the distance along the pixel's own ray, which is `sceneDistance`. The sky reads `1e6`, so a silhouette is the largest step in the frame |
+| `scenePosition(uv?)` | the **world point** the pixel shows, right at every pixel and for an orthographic camera too. 32-bit, like `cameraPosition`: far from the origin, subtract a nearby point before using it finely. On sky, a point `1e6` along the pixel's ray |
+| `sceneDistance(uv?)` | how far along the pixel's **ray** its surface is, in world units: `cameraPosition() + sceneRay() * sceneDistance()` is `scenePosition()` under a perspective camera. The sky reads `1e6` |
 | `sceneNormal(uv?)` | the surface normal in **view space**, reconstructed from depth — so meshes, terrain, SDF matter and tilemaps all have one, with nothing to author |
 | `sceneRay(uv?)` | the **world-space** direction the camera looks through at that pixel, unit length. Right for perspective and orthographic cameras alike |
 | `cameraPosition()` | where the camera is in the world. 32-bit, so coarse far from the origin: measure heights from a nearby point (a planet's centre), not from zero |
 | `screenTexel()` | one pixel, in uv. Follows the **retro** resolution, so an effect written in texels stays one pixel wide instead of being magnified by the upscale |
+| `sceneSurfaceDepth(uv?)` | view depth of the nearest **see-through surface** drawn over the pixel (a water sheet, glass, ice, any blended material), in `sceneDepth`'s units; `2e6` where there is none. See "What a pixel is seen through" below |
 | `sceneWaterDepth()` | how far under the water's surface the **camera** is, in world units; 0 in air. See "An underwater pass of your own" below |
 | `skyRadiance(dir, roughness?)` | the sky the frame captured, seen along a **world** direction, in real light: the same sky a surface reflects. `skyRadiance(sceneRay())` is the sky behind a pixel; roughness 0 is sharp, 1 a matte blur. Black when no sky was captured |
 
-`cameraPosition() + sceneRay() * sceneDepth()` is the world point a pixel
-shows, so a screen pass can paint a sky by direction, fog by height, or a grid on
-the ground. Terrain, meshes, SDF matter and tilemaps all write depth, so only
-true sky reads `1e6`.
+`scenePosition()` is the world point a pixel shows, so a screen pass can paint
+fog by height or a grid on the ground, and `sceneRay()` is the direction for a
+sky. Terrain, meshes, SDF matter and tilemaps all write depth, so only true sky
+reads `1e6`.
+
+**`sceneDepth` is not a distance along the ray.** In a screen shader it is the
+depth along the camera's axis, which is what an outline, a depth fog or a
+depth-of-field wants: flat across a wall seen square on. Multiplying the ray by
+it lands short of the surface everywhere but the centre line of the view, by
+more toward the edges, and a band painted by height from that point comes out
+as an arc round the screen. Use `scenePosition()` for the point, or
+`sceneDistance()` where the sum itself is wanted. (In a *surface* shader
+`sceneDepth` is the distance along the view ray, and reads `1e9` on sky: see
+[`./shaders.md`](./shaders.md).)
 
 The optional `uv` is the whole point. Defaulting to this pixel makes a colour
 grade a one-liner; passing another pixel's is what makes an edge detect, a blur
@@ -290,7 +303,7 @@ shader caustics {
   texture pattern = "textures/caustic.png"
   uniform strength: float = 0.4
 
-  let world = cameraPosition() + sceneRay() * sceneDepth()
+  let world = scenePosition()
   output color = sceneColor().rgb * (1 + sample(pattern, world.xz * 0.25 + time * 0.03).r * strength)
 }
 ```
@@ -363,6 +376,68 @@ shader underwater {
 
 Scenes saved before the switch existed load with the look on.
 
+### What a pixel is seen through
+
+A pass that paints on the solid scene from its depth (a wet film along a
+shoreline, rain splashes, puddles, snow cover, a screen-space decal) must not
+paint on ground that lies under water or behind glass. `sceneDepth` cannot say:
+it is the solid scene. `sceneSurfaceDepth([uv])` is the other half, the
+depth of the nearest see-through surface drawn over the pixel, measured as
+`sceneDepth` is (along the camera's axis), and `2e6`
+where the pixel is seen through nothing:
+
+```
+shader wetShore {
+  stage post
+  uniform waterline: float = 0
+  let film = 1 - saturate(abs(scenePosition().y - waterline) * 2)
+  let through = step(sceneSurfaceDepth(), sceneDepth())
+  output color = sceneColor().rgb * (1 - 0.4 * film * (1 - through))
+}
+```
+
+`film` darkens a band of ground at the waterline, and `through` is 1 on the
+ground under the water, where the film must not be drawn. `sceneSurfaceDepth`
+is never farther than `sceneDepth` at the same pixel, so that `step` is
+exactly "seen through something", and `sceneDepth() - sceneSurfaceDepth()` is
+how much water or glass the view crosses before the ground. A surface hidden
+behind a wall is not one the wall is seen through, and reads `2e6`. That
+number is past the sky's `1e6` on purpose: bare sky fails the `step` too.
+
+**What counts.** Everything the frame draws see-through:
+
+- a material whose **blend** is `blend`, whatever its opacity, where its
+  picture has any alpha at all (a blended picture's empty border is not a
+  surface);
+- a solid material while its node fades it (a Tint's alpha, a cross-fade);
+- **glass**: a Physical material with transmission;
+- a surface drawn by a `.flsl` shader that declares `blend alpha` or
+  `blend additive`, or that reads `sceneColor` (water that refracts what is
+  under it). A shader's surface counts whole, as it is drawn whole, and where
+  `output offset` moved it.
+
+**What does not.** Solid and cutout surfaces, a screen-door (dithered) fade,
+terrain, and everything that is not a surface in the scene at all: particles
+(billboards and mesh particles both), `draw.quad` and the other script
+shapes, lines, world-space UI.
+
+**Leaving a surface out.** An ordinary blended material counts by default: the
+engine cannot tell a pane of ice from a scorch mark, and water and glass are
+what the op is for. What is drawn blended and is not a window on the scene
+says so on its material: **seen through** off in the Inspector,
+`surface_depth: false` in a scene or material file, `surfaceDepth = false`
+in `node:setMaterial`. That is the setting for a decal laid on the ground, a
+glow shell, a light shaft or a soft shadow card.
+
+**Cost.** Nothing until a screen shader in the scene's list calls it. Then the
+frame draws those surfaces once more, depth only, into a depth target of its
+own the size of the frame's: no shading, and only the see-through surfaces'
+vertices. Measured at 2560×1440 on a desktop RTX 4060, with a water sheet over
+half the frame and a pane of glass: 0.22 ms for the pass, and 0.03 ms more in
+the screen shader that reads it. A frame with no see-through surface in view
+skips the pass. A scene whose passes stop reading the op gives
+the target back.
+
 **Where they run:** after depth of field and the denoise, **before** the colour
 grade, the lens and the grain. Each part is a decision. After DoF, because focus
 belongs to the scene and a pass should see the picture the camera actually took.
@@ -382,7 +457,10 @@ Three bind groups, all built from `post::layouts` so an authored pass and a
 built-in one cannot drift: group(0) is the chain's own `{ frame, sampler, params }`
 (which is why a custom pass ping-pongs between the chain's scratch targets with
 no bind group of its own), group(1) is the depth buffer plus the inverse
-projection, the camera's turn and its world position, group(2) is the shader's uniforms
+projection, the camera's turn and its world position, the captured sky, and
+the see-through surfaces' depth (`Raster::surface_depth_pass` draws it,
+`SsaoFrame::surface_depth` hands it over, and a 1×1 far texel stands in when
+no pass reads it), group(2) is the shader's uniforms
 followed by a texture and a sampler of its own for each slot it declares (one
 sampler a texture, never shared: the OpenGL backend pairs each image with exactly
 one). `PostShaders` holds one group(2) layout per slot count, and a pass's bind
