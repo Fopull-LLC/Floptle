@@ -30,7 +30,7 @@ each group, and meant to be searched.
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 37
 - [pathfinding — nav.*](#pathfinding--nav) — 26
-- [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 25
+- [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 29
 - [weather — wind](#weather--wind) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 12
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 38
@@ -3250,7 +3250,7 @@ Water volumes: how deep a point is (water.depthAt), what is in the water (water.
 
 ### `water.addVolume`
 
-water.addVolume{ shape = "lake" | "heightfield", parent = "Planet", ... } → an id. Water no node carries, in the frame of the node it lies on, so it turns with its planet. A lake takes `center` (a point on its surface) and `reach` (how far its farthest shore is), exactly as terrain.planetLakes gives them; a heightfield takes `origin`, `cell`, `columns`, `rows` and `levels` (false = dry), with an optional `flow`. It floats things, carries them on its `current`, and water.at answers for it. `depth` is how far down its bed lies (planetLakes gives it), so a cave under a lake is dry; from inside it looks like a Water Volume node, with `tint = {r,g,b}` and `visibility` (metres) to change that and `underwater = false` for no look. shape = "sim" is water the engine moves: `origin`, `cell`, `columns`, `rows` as a heightfield and `level` to fill it to; the engine finds the ground under it, then the water flows, drains into holes dug beside it and settles, and water.at, flowAt and floating follow it. A sim is a river with `springs = { { pos = vec3, rate = m³/s }, ... }` (each at the point nearest its pos), `roughness` (the bed's Manning roughness: 0 = still water's frictionless model, the default; 0.035 = a natural river bed, which runs the water at a real river's depth and speed) and `holdEdges = true` (edge points below `level` held at it: the sea beyond the patch, which fills a trench dug from its shore). Water off a drop passes what a weir does, so a river over a cliff is stable; water.falls says where it pours. A sim with `center` (a point on the ground in the parent's frame) instead of `origin` lies on a round world: each point's up is its own radial, `level` is a radius (false starts it dry; `depths` gives metres per point), its ground comes from the terrain's field along each radial and is read again where it is dug, and it is `size` metres across (or `columns` × `rows`), up to 4,096 points a side, stored in 32 × 32 tiles only where water is and stepped only where it moves. `held = { { pos = vec3 or cell = {i, j}, level =, group = } }` holds points at a level (water.hold, water.release, water.exchanged), `solver = "swe"` (the default, water with momentum) or `"pipes"` (calmer and cheaper), `budget` the most milliseconds a frame spends stepping it, `flat = true` for a flat world. `state` (what water.state gave) starts it from a save; `minDepth` (1 mm) is the least depth that moves and reads as water, and `soak` (m/s) soaks away films thinner than `soakBelow` (1 cm), so a drained channel dries.
+water.addVolume{ shape = "lake" | "heightfield", parent = "Planet", ... } → an id. Water no node carries, in the frame of the node it lies on, so it turns with its planet. A lake takes `center` (a point on its surface) and `reach` (how far its farthest shore is), exactly as terrain.planetLakes gives them; a heightfield takes `origin`, `cell`, `columns`, `rows` and `levels` (false = dry), with an optional `flow`. It floats things, carries them on its `current`, and water.at answers for it. `depth` is how far down its bed lies (planetLakes gives it), so a cave under a lake is dry; from inside it looks like a Water Volume node, with `tint = {r,g,b}` and `visibility` (metres) to change that and `underwater = false` for no look. shape = "sim" is water the engine moves: `origin`, `cell`, `columns`, `rows` as a heightfield and `level` to fill it to; the engine finds the ground under it, then the water flows, drains into holes dug beside it and settles, and water.at, flowAt and floating follow it. A sim is a river with `springs = { { pos = vec3, rate = m³/s }, ... }` (each at the point nearest its pos), `roughness` (the bed's Manning roughness: 0 = still water's frictionless model, the default; 0.035 = a natural river bed, which runs the water at a real river's depth and speed) and `holdEdges = true` (edge points below `level` held at it: the sea beyond the patch, which fills a trench dug from its shore). Water off a drop passes what a weir does, so a river over a cliff is stable; water.falls says where it pours. A sim with `center` (a point on the ground in the parent's frame) instead of `origin` lies on a round world: each point's up is its own radial, `level` is a radius (false starts it dry; `depths` gives metres per point), its ground comes from the terrain's field along each radial and is read again where it is dug, and it is `size` metres across (or `columns` × `rows`), up to 4,096 points a side, stored in 32 × 32 tiles only where water is and stepped only where it moves. `held = { { pos = vec3 or cell = {i, j}, level =, group = } }` holds points at a level (water.hold, water.release, water.exchanged), `solver = "swe"` (the default, water with momentum) or `"pipes"` (calmer and cheaper), `budget` the most milliseconds a frame spends stepping it, `flat = true` for a flat world. `state` (what water.state gave) starts it from a save; `minDepth` (1 mm) is the least depth that moves and reads as water, and `soak` (m/s) soaks away films thinner than `soakBelow` (1 cm), so a drained channel dries. `waves = { { amplitude, wavelength, direction, steepness, speed, phase }, ... }` gives it a swell, as water.setSwell does: the solver floats things on the moving surface and a shader reads the same waves with waterSwell.
 
 ### `water.addWater`
 
@@ -3258,7 +3258,11 @@ water.addWater(id, at, m3) → true if id is a sim laid with a `center`: add `m3
 
 ### `water.at`
 
-water.at(point) — nil in air, else { depth, density, frozen, node, up }. `up` is the way OUT of the water (radial on a sea, the pool's own +Y) — what a swim controller pushes along, and NOT the same as -gravity in a tilted tank. Innermost volume wins, so a tank inside an ocean answers as the tank.
+water.at(point) — nil in air, else { depth, density, frozen, node, up, flow, normal, wave }. `up` is the way OUT of the water (radial on a sea, the pool's own +Y) — what a swim controller pushes along, and NOT the same as -gravity in a tilted tank. Innermost volume wins, so a tank inside an ocean answers as the tank. On water with a swell (water.setSwell) depth is under the moving surface at simTime, `normal` is that surface's normal over the point (up on still water), `wave` how far it stands above its still level, and `flow` includes the water's own motion as the waves pass.
+
+### `water.bindSwell`
+
+water.bindSwell(node, water) — the shader on `node` reads `water`'s swell (waterSwell, waterSwellNormal): a Water Volume node or an addVolume id. Without it a node reads the Water Volume it is or is under, or the declared water lying on it or a node above it whose surface it is nearest, so a surface drawn where its water is needs no call. nil for `water` goes back to that.
 
 ### `water.depthAt`
 
@@ -3316,6 +3320,10 @@ water.setSlam(volume, k) — what something entering this water fast meets: an i
 
 water.setSpring(id, at, rate) → true if id is a sim laid with a `center`: a spring at a point giving `rate` m³/s, changed while it runs; 0 takes it away.
 
+### `water.setSwell`
+
+water.setSwell(water, waves) → true if there was such water. The swell on a body of water: Gerstner waves, replacing any it had; nil or {} for a still surface. `water` is a Water Volume node or an addVolume id (water.addVolume{ ..., waves = } declares it with them). Each wave is { amplitude = metres to the crest, wavelength = metres crest to crest, direction = {x, z} along the water or a vec3, steepness = 0 (a rolling sine) to 1 (a true deep-water wave: sharp crests, flat troughs), speed = m/s (omit and it travels as deep water carries a wave of its length), phase = radians }, at most 16. Bodies float on the moving surface, water.at / depthAt / isUnderwater and splashes answer at it, and a shader on the surface moves with the same waves: output offset = waterSwell(objectPos). Waves run on simTime, so a dropped tick and a rollback's replay see the same water. On a Sea or a lake the directions are on the tangent plane at its +Y (or the lake's centre) and the waves run round the sphere from there. Waves too steep to sum are eased back together so the surface never folds.
+
 ### `water.splashes`
 
 water.splashes() → everything that entered or left water since the last call, oldest first (the last 64 are kept): { node, volume (an addVolume id) or water (a Water Volume node), pos (where it crossed, on the surface), normal (the water's up), speed (m/s along -normal: + going in, - coming out), mass, area (the face it met the water with, m²), displaced (m³ under water after the step), entering }. Each body, and each part of an assembly, counts once per crossing; a crossing slower than 0.5 m/s is bobbing and is not reported. One list for splashes, sounds, ripples, wet looks and impact damage.
@@ -3331,6 +3339,14 @@ water.surface(id [, { cells = 48, colors = false, fixed = false, buffers = false
 ### `water.surfaceChanged`
 
 water.surfaceChanged(id) → true when that declared water's surface is not what water.surface(id) last returned: the engine's simulation moved it, or it was given a new level. True before the first water.surface call and for water that is not there; false over a lake that stands still, so a game updates a sheet only when there is something new: if water.surfaceChanged(id) then mesh.update(sheet, water.surface(id, { fixed = true, colors = true })) end.
+
+### `water.swell`
+
+water.swell(water) → the waves on a Water Volume node or declared water, as water.setSwell takes them, each with the `speed` it travels at (the deep-water speed where none was given); nil for a still surface.
+
+### `water.swellAt`
+
+water.swellAt(water, pos) → offset, normal: how far the swell has moved the point of the still surface under (or over) pos, and the surface's normal there, both vec3 in the world, at simTime. Exactly what a shader's waterSwell(objectPos) gives the vertex at that point: for foam, a buoy or a mesh a script places on the drawn surface. nil, nil without a swell. (The other way round, the surface over a world point, is water.at's depth, normal and wave.)
 
 ### `water.tiles`
 

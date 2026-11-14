@@ -663,6 +663,51 @@ mod offset_tests {
         assert!(off.contains("flsl_tiled_sample_level(flsl_tex0"), "the offset does not read the slot:\n{off}");
         assert!(c.chunk.contains("flsl_tiled_sample(flsl_tex0"), "the pixel stage lost its ordinary sample");
     }
+
+    /// **A water shader reads the water's own waves.** `waterSwell` moves
+    /// the surface in an offset and `waterSwellNormal` lights it in the
+    /// colour: the offset takes the normal in the node's space, the colour
+    /// in the lit one. A shader that calls either carries the swell's lanes
+    /// after its own parameters, which the engine fills from the water the
+    /// surface is on; one that calls neither is the size it always was.
+    #[test]
+    fn a_water_shader_reads_the_swell_and_others_do_not_pay_for_it() {
+        let lanes = crate::transpile::SWELL_LANES;
+        let src = "shader sea {\n  stage fragment\n  uniform tint: color = #204060\n  texture foam\n  \
+                   let n = waterSwellNormal(objectPos)\n  output color = vec4(litSurface(tint.rgb, n), 1)\n  \
+                   output offset = waterSwell(objectPos) + waterSwellNormal(objectPos) * 0.0\n}\n";
+        let c = crate::compile_fragment(src).expect("a water shader compiles");
+        // One uniform and one slot's two tiling lanes come first.
+        assert_eq!(c.swell_offset, Some(3 * 16));
+        assert_eq!(c.param_block_size(), ((3 + lanes) * 16) as u64);
+        assert!(c.chunk.contains(&format!("swell: array<vec4<f32>, {lanes}>")), "{}", c.chunk);
+        let at = c.chunk.find("fn flsl_offset(").expect("the offset function");
+        let off = &c.chunk[at..at + c.chunk[at..].find("\n}").expect("its end")];
+        assert!(off.contains("flsl_swell_offset(opos)") && off.contains("flsl_swell_normal_local(opos, onrm)"), "{off}");
+        assert!(c.chunk.contains("flsl_swell_normal(in.lpos, in.normal)"), "the colour lights the swell's normal in its own space:\n{}", c.chunk);
+        // The lanes land after the shader's own, and nowhere else.
+        let mut params = c.pack_params(&|_| None, &|_| None);
+        let before = params.clone();
+        let mut block = [[0.0f32; 4]; crate::transpile::SWELL_LANES];
+        block[0] = [8.0, 0.0, 0.0, 0.0];
+        block[lanes - 1] = [1.0, 2.0, 3.0, 4.0];
+        c.write_swell(&mut params, &block);
+        assert_eq!(params[..48], before[..48]);
+        assert_eq!(params[48..52], 8.0f32.to_le_bytes());
+        assert_eq!(params[params.len() - 4..], 4.0f32.to_le_bytes());
+
+        // No swell op, no lanes: the block an older shader always had.
+        let plain = crate::compile_fragment("shader s {\n  stage fragment\n  uniform tint: color = #204060\n  output color = tint\n}\n").unwrap();
+        assert_eq!((plain.swell_offset, plain.param_block_size()), (None, 16));
+        assert!(!plain.chunk.contains("swell"));
+        let mut untouched = plain.pack_params(&|_| None, &|_| None);
+        plain.write_swell(&mut untouched, &block);
+        assert_eq!(untouched, plain.pack_params(&|_| None, &|_| None));
+
+        // A sky has no water under it.
+        let err = crate::compile_sky("shader s {\n  stage sky\n  output color = waterSwell(vec3(1, 2, 3))\n}\n").expect_err("a sky shader");
+        assert!(err.contains("waterSwell"), "{err}");
+    }
 }
 
 #[cfg(test)]

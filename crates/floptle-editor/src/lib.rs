@@ -192,6 +192,8 @@ mod underwater_look_tests;
 #[cfg(test)]
 mod water_sheet_tests;
 #[cfg(test)]
+mod water_swell_tests;
+#[cfg(test)]
 mod tile_physics_tests;
 #[cfg(test)]
 mod water_tick_tests;
@@ -296,6 +298,7 @@ mod rig_overrides;
 mod scatter_draw;
 mod weather;
 mod water_pose;
+mod water_swell;
 mod water_tiled;
 mod scene_ops;
 mod space;

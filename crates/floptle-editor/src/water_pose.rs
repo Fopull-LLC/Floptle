@@ -90,8 +90,11 @@ impl crate::Editor {
                 kind,
             });
         }
+        let now = self.sim_now();
         if let Some(sim) = self.sim.as_mut() {
             sim.world.water = water;
+            // The water was built anew: its swells read the clock again.
+            sim.set_water_time(now);
             let slam = self.script_host.water_slam();
             if !slam.is_empty() || sim.has_water_slam() {
                 sim.set_water_slam(slam);
@@ -131,6 +134,7 @@ impl crate::Editor {
                 let water = std::sync::Arc::make_mut(water);
                 water.surface = w.surface.clone();
                 water.simulated.clone_from(&w.simulated);
+                water.swell.clone_from(&w.swell);
             }
         }
     }
@@ -160,6 +164,13 @@ impl crate::Editor {
             self.vfx.wind = (self.script_host.wind_field().clone(), self.script_host.weather_time());
         }
         self.take_new_water_levels();
+        // A swell runs on the simulation's clock: this tick floats things on
+        // the surface as it stands at the tick's own time, whichever frame
+        // runs it and however many ticks were dropped before it.
+        let now = self.sim_now();
+        if let Some(sim) = self.sim.as_mut() {
+            sim.set_water_time(now);
+        }
         if self.water_sims.posers.is_empty() {
             return;
         }
@@ -200,6 +211,11 @@ impl crate::Editor {
                     *r = radius * wt.scale.max_element().max(1e-4);
                     let r = *r as f64;
                     self.script_host.pose_water_volume(v.entity, wt.translation, Quat::IDENTITY, r, DVec3::ZERO);
+                    // A sea's waves turn with its world.
+                    if let Some(s) = &mut v.swell {
+                        s.rot = wt.rotation;
+                        self.script_host.pose_water_swell(v.entity, wt.rotation);
+                    }
                 }
                 (PoseKind::Pool { half }, floptle_physics::WaterShape::Box { center: c, half: h, rot }) => {
                     *c = center;
@@ -207,6 +223,10 @@ impl crate::Editor {
                     *rot = wt.rotation;
                     let h = h.as_dvec3();
                     self.script_host.pose_water_volume(v.entity, wt.translation, wt.rotation, 0.0, h);
+                    if let Some(s) = &mut v.swell {
+                        s.rot = wt.rotation;
+                        self.script_host.pose_water_swell(v.entity, wt.rotation);
+                    }
                 }
                 (PoseKind::Declared { id }, floptle_physics::WaterShape::Declared { water, origin: o }) => {
                     let frame = floptle_core::scatter::Frame { origin: wt.translation, rot: wt.rotation.normalize() };

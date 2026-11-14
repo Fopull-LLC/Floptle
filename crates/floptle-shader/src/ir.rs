@@ -632,6 +632,10 @@ pub const OFFSET_CATEGORIES: &[&str] = &["math", "noise", "color", "sdf"];
 /// one with. That is what a height map displacing a surface needs.
 pub const OFFSET_TEXTURE_OPS: &[&str] = &["sample"];
 
+/// Engine ops `output offset` can call: the water's swell is a rule over the
+/// vertex's own position, and moving a water surface by it is what it is for.
+pub const OFFSET_ENGINE_OPS: &[&str] = &["waterSwell", "waterSwellNormal"];
+
 /// `output offset` runs in the vertex shader, once per vertex, so it may only
 /// reach what a vertex has: see [`OFFSET_INPUTS`] and [`OFFSET_CATEGORIES`].
 /// Walks the expression and every `let` it reads.
@@ -666,13 +670,14 @@ fn check_per_vertex(ir: &ShaderIr, root: ExprId, errors: &mut Vec<IrError>) {
                 if let Some(spec) = crate::stdlib::op(op)
                     && !OFFSET_CATEGORIES.contains(&spec.category)
                     && !OFFSET_TEXTURE_OPS.contains(&op.as_str())
+                    && !OFFSET_ENGINE_OPS.contains(&op.as_str())
                     && !matches!(op.as_str(), "vec2" | "vec3" | "vec4")
                 {
                     errors.push(IrError::new(
                         format!(
                             "`output offset` cannot call `{op}` ({} ops run per pixel). Math, noise, \
-                             colour and sdf functions work per vertex, and `sample` reads a texture's \
-                             largest level",
+                             colour and sdf functions work per vertex, `sample` reads a texture's \
+                             largest level, and `waterSwell` is the water's waves",
                             spec.category
                         ),
                         e.span,

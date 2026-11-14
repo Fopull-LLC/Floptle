@@ -850,6 +850,23 @@ pub(crate) fn underwater_at_open(
     water_at_open(world, declared, p, roofed).look
 }
 
+thread_local! {
+    /// The simulation time the frame is drawn at, for the swells on Water
+    /// Volume nodes: [`set_swell_clock`].
+    static SWELL_CLOCK: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// Say what simulation time this frame is drawn at (`Editor::swell_draw_time`),
+/// once a frame before anything asks whether the camera is under water: a
+/// node's waves stand where they are drawn.
+pub(crate) fn set_swell_clock(t: f64) {
+    SWELL_CLOCK.set(t);
+}
+
+fn swell_clock() -> f64 {
+    SWELL_CLOCK.get()
+}
+
 /// Everything the draw asks about the water at `p`, from one walk of the
 /// scene: the depth a screen shader reads, and the look the fog takes.
 ///
@@ -869,11 +886,15 @@ pub(crate) fn water_at_open(
     let mut best: Option<(f64, [f32; 3], f32, DVec3)> = None;
     for (e, m) in world.query::<Matter>() {
         let Matter::WaterVolume {
-            kind, radius, half_extents, frozen, tint, visibility, underwater, ..
+            kind, radius, half_extents, frozen, tint, visibility, underwater, waves, ..
         } = m
         else {
             continue;
         };
+        // A node with waves is under water where its moving surface is, as
+        // the frame draws it.
+        let swell = floptle_core::water::Swell::new(waves, DVec3::Y);
+        let over = |local: DVec3, lay: floptle_core::water::Lay| swell.as_ref().map(|s| -s.over(local, lay, swell_clock()).above);
         // A frozen sea has no inside to be in, and a switched-off node is off
         // for the look as well as for the physics.
         if *frozen || floptle_core::is_disabled(world, e) {
@@ -883,7 +904,9 @@ pub(crate) fn water_at_open(
         let (depth, up) = match kind {
             WaterKind::Sea => {
                 let r = (*radius * wt.scale.max_element().max(1e-4)) as f64;
-                (r - (p - wt.translation).length(), (p - wt.translation).normalize_or_zero())
+                let local = wt.rotation.inverse().as_dquat() * (p - wt.translation);
+                let depth = over(local, floptle_core::water::Lay::Round { radius: r }).unwrap_or(r - (p - wt.translation).length());
+                (depth, (p - wt.translation).normalize_or_zero())
             }
             WaterKind::Pool => {
                 let half = floptle_core::math::Vec3::new(
@@ -897,7 +920,8 @@ pub(crate) fn water_at_open(
                 if local.x.abs() > half.x || local.z.abs() > half.z || local.y < -half.y {
                     continue;
                 }
-                (half.y - local.y, wt.rotation.as_dquat() * DVec3::Y)
+                let depth = over(local, floptle_core::water::Lay::Flat { level: half.y }).unwrap_or(half.y - local.y);
+                (depth, wt.rotation.as_dquat() * DVec3::Y)
             }
         };
         if depth <= 0.0 {
@@ -987,6 +1011,25 @@ pub(crate) fn water_infos(
             density: *density,
             frozen: *frozen,
         });
+    }
+    out
+}
+
+/// The swell on each Water Volume node that has waves, with the node's
+/// rotation: what `water.at` reads the moving surface from.
+pub(crate) fn water_swells(
+    world: &floptle_core::World,
+) -> std::collections::HashMap<u32, floptle_script::water_api::NodeSwell> {
+    let mut out = std::collections::HashMap::new();
+    for (e, m) in world.query::<floptle_core::Matter>() {
+        let floptle_core::Matter::WaterVolume { waves, .. } = m else { continue };
+        if waves.is_empty() || floptle_core::is_disabled(world, e) {
+            continue;
+        }
+        if let Some(swell) = floptle_core::water::Swell::new(waves, floptle_core::math::DVec3::Y) {
+            let rot = floptle_core::world_transform(world, e).rotation.as_dquat();
+            out.insert(e.index(), floptle_script::water_api::NodeSwell { swell: std::sync::Arc::new(swell), rot });
+        }
     }
     out
 }

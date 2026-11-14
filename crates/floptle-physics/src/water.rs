@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use floptle_core::math::{DVec3, Quat, Vec3};
-use floptle_core::water::DeclaredWater;
+use floptle_core::water::{DeclaredWater, Lay, Swell};
 
 /// The shape of a body of water.
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +67,19 @@ impl WaterCarry {
     }
 }
 
+/// The waves on a sea or a pool, and what places them: the swell is laid in
+/// the node's own frame, so it turns with a planet and tilts with a tank.
+/// (Declared water carries its swell itself.)
+#[derive(Clone, Debug, PartialEq)]
+pub struct VolumeSwell {
+    pub swell: Arc<Swell>,
+    /// The node's rotation: a sea's sphere has none of its own.
+    pub rot: Quat,
+    /// The simulation's clock the swell is read at, seconds:
+    /// [`WaterField::set_time`].
+    pub time: f64,
+}
+
 /// One body of water in the sim.
 #[derive(Clone, Debug)]
 pub struct WaterVolume {
@@ -92,9 +105,28 @@ pub struct WaterVolume {
     pub entity: u32,
     /// The motion of the body it rides, added to its own flow.
     pub carry: WaterCarry,
+    /// The waves on a sea or a pool; `None` for a still surface. Depth, the
+    /// height above the surface and the flow are then the moving surface's.
+    pub swell: Option<VolumeSwell>,
 }
 
 impl WaterVolume {
+    /// The swell over sim-frame point `p` of a sea or a pool that has one.
+    fn swell_over(&self, p: Vec3) -> Option<floptle_core::swell::Over> {
+        let s = self.swell.as_ref()?;
+        match &self.shape {
+            WaterShape::Sphere { center, radius } => {
+                let local = (s.rot.inverse() * (p - *center)).as_dvec3();
+                Some(s.swell.over(local, Lay::Round { radius: *radius as f64 }, s.time))
+            }
+            WaterShape::Box { center, half, rot } => {
+                let local = (rot.inverse() * (p - *center)).as_dvec3();
+                Some(s.swell.over(local, Lay::Flat { level: half.y as f64 }, s.time))
+            }
+            WaterShape::Declared { .. } => None,
+        }
+    }
+
     /// Metres below this volume's surface at sim-frame point `p`; `0.0`
     /// anywhere outside it. Never negative — "how far above the water am I" is
     /// a different question, and a signed answer here would silently make
@@ -104,7 +136,10 @@ impl WaterVolume {
             return 0.0;
         }
         match &self.shape {
-            WaterShape::Sphere { center, radius } => (radius - (p - *center).length()).max(0.0),
+            WaterShape::Sphere { center, radius } => match self.swell_over(p) {
+                Some(o) => (-o.above).max(0.0) as f32,
+                None => (radius - (p - *center).length()).max(0.0),
+            },
             WaterShape::Box { center, half, rot } => {
                 let local = rot.inverse() * (p - *center);
                 // Outside the footprint at all → not in this lake, whatever the
@@ -112,7 +147,10 @@ impl WaterVolume {
                 if local.x.abs() > half.x || local.z.abs() > half.z || local.y < -half.y {
                     return 0.0;
                 }
-                (half.y - local.y).max(0.0)
+                match self.swell_over(p) {
+                    Some(o) => (-o.above).max(0.0) as f32,
+                    None => (half.y - local.y).max(0.0),
+                }
             }
             WaterShape::Declared { water, origin } => water.at(*origin + p.as_dvec3()).depth as f32,
         }
@@ -127,7 +165,17 @@ impl WaterVolume {
         }
         let own = match &self.shape {
             WaterShape::Declared { water, origin } => water.at(*origin + p.as_dvec3()).flow.as_vec3(),
-            _ => Vec3::ZERO,
+            // The circle the water turns as a wave passes, in the node's frame.
+            WaterShape::Sphere { .. } | WaterShape::Box { .. } => match (&self.swell, self.swell_over(p)) {
+                (Some(s), Some(o)) if self.depth_at(p) > 0.0 => {
+                    let rot = match &self.shape {
+                        WaterShape::Box { rot, .. } => *rot,
+                        _ => s.rot,
+                    };
+                    rot * o.flow.as_vec3()
+                }
+                _ => Vec3::ZERO,
+            },
         };
         if self.carry == WaterCarry::default() { own } else { own + self.carry.at(p) }
     }
@@ -146,6 +194,21 @@ impl WaterVolume {
     /// has no surface over `p`).
     fn height_above(&self, p: Vec3) -> f32 {
         match &self.shape {
+            WaterShape::Declared { water, origin } => water.at(*origin + p.as_dvec3()).above as f32,
+            _ => {
+                let still = self.still_above(p);
+                match self.swell_over(p) {
+                    Some(o) if still.is_finite() => o.above as f32,
+                    _ => still,
+                }
+            }
+        }
+    }
+
+    /// Signed metres above this volume's still surface at `p`, its waves
+    /// left out (infinite where it has no surface over `p`).
+    fn still_above(&self, p: Vec3) -> f32 {
+        match &self.shape {
             WaterShape::Sphere { center, radius } => (p - *center).length() - radius,
             WaterShape::Box { center, half, rot } => {
                 let local = rot.inverse() * (p - *center);
@@ -155,8 +218,36 @@ impl WaterVolume {
                     local.y - half.y
                 }
             }
-            WaterShape::Declared { water, origin } => water.at(*origin + p.as_dvec3()).above as f32,
+            WaterShape::Declared { water, origin } => water.still_above(*origin + p.as_dvec3()) as f32,
         }
+    }
+
+    /// The most this volume's swell lifts its surface above the still one,
+    /// metres: 0 for still water.
+    fn swell_reach(&self) -> f32 {
+        match (&self.swell, &self.shape) {
+            (Some(s), _) => s.swell.reach() as f32,
+            (None, WaterShape::Declared { water, .. }) => water.swell.as_ref().map_or(0.0, |s| s.reach() as f32),
+            (None, _) => 0.0,
+        }
+    }
+
+    /// The water's velocity just under the surface at `p`, for a shape of
+    /// `radius` whose centre is in the air and whose lower edge is wet. On
+    /// still water that is the flow a radius below the centre; on a swell
+    /// it is the surface's own motion under the centre, which the ask about
+    /// the centre has already found.
+    fn flow_under(&self, p: Vec3, radius: f32) -> Vec3 {
+        if self.frozen || self.swell_reach() == 0.0 {
+            return self.flow_at(p - self.up_at(p) * radius.max(1e-4));
+        }
+        let own = match (&self.shape, &self.swell, self.swell_over(p)) {
+            (WaterShape::Declared { water, origin }, ..) => water.flow_under(*origin + p.as_dvec3()).as_vec3(),
+            (WaterShape::Box { rot, .. }, _, Some(o)) => *rot * o.flow.as_vec3(),
+            (_, Some(s), Some(o)) => s.rot * o.flow.as_vec3(),
+            _ => Vec3::ZERO,
+        };
+        if self.carry == WaterCarry::default() { own } else { own + self.carry.at(p) }
     }
 }
 
@@ -213,6 +304,30 @@ impl WaterField {
         self.volumes.is_empty()
     }
 
+    /// Does any of the water carry a swell?
+    pub fn has_swell(&self) -> bool {
+        self.volumes.iter().any(|v| {
+            v.swell.is_some() || matches!(&v.shape, WaterShape::Declared { water, .. } if water.swell.is_some())
+        })
+    }
+
+    /// Read every swell at simulation time `t`, seconds. The solver sets
+    /// this as it steps, so a tick replayed at the same time floats things on
+    /// the same surface. Still water is not touched.
+    pub fn set_time(&mut self, t: f64) {
+        for v in &mut self.volumes {
+            if let Some(s) = &mut v.swell {
+                s.time = t;
+            }
+            if let WaterShape::Declared { water, .. } = &mut v.shape
+                && water.swell.is_some()
+                && water.time != t
+            {
+                Arc::make_mut(water).time = t;
+            }
+        }
+    }
+
     /// The volume a point is in, or the one whose surface it is nearest
     /// above: what a shape crossing a surface crossed.
     pub fn nearest(&self, p: Vec3) -> Option<&WaterVolume> {
@@ -233,6 +348,13 @@ impl WaterField {
     /// settles at the depth where buoyancy equals weight and stays there.
     pub fn submersion(&self, p: Vec3, radius: f32) -> f32 {
         let r = radius.max(1e-4);
+        // A swell is only worth asking about near its surface. A sphere
+        // clear of the highest any wave can stand is dry, and saying so
+        // from the still surface costs no pass over the waves: on a world
+        // with a wavy sea, everything ashore is over that sea.
+        if self.has_swell() && self.volumes.iter().filter(|v| !v.frozen).all(|v| v.still_above(p) - v.swell_reach() >= r) {
+            return 0.0;
+        }
         let d = self.depth_at(p);
         // Fully dry: the centre is above water and the sphere's top half can't
         // reach down to it.
@@ -324,16 +446,17 @@ pub fn buoyancy_accel(
     // A shape whose centre is above water still has a wet cap, and `sample`
     // reports dry there — take the nearest volume's properties instead of
     // giving a half-submerged hull no push at all.
-    let (density, drag, ang, up, flow) = match s.entity {
+    // `heave`: on a swell, how far the centre is above the moving surface.
+    let (density, drag, ang, up, flow, heave) = match s.entity {
         Some(_) => {
             let v = field.volumes.iter().find(|v| Some(v.entity) == s.entity).unwrap_or(&field.volumes[0]);
-            (v.density, v.drag, v.angular_drag, s.up, s.flow)
+            (v.density, v.drag, v.angular_drag, s.up, s.flow, (v.swell_reach() > 0.0).then_some(-s.depth))
         }
         None => {
             let v = nearest_volume(field, p)?;
             // A wet cap above the surface rides the current just under it.
-            let below = p - v.up_at(p) * radius.max(1e-4);
-            (v.density, v.drag, v.angular_drag, v.up_at(p), v.flow_at(below))
+            let heave = (v.swell_reach() > 0.0).then(|| v.height_above(p));
+            (v.density, v.drag, v.angular_drag, v.up_at(p), v.flow_under(p, radius), heave)
         }
     };
     let _ = ang;
@@ -359,7 +482,25 @@ pub fn buoyancy_accel(
     } else {
         Vec3::ZERO
     };
-    Some(buoyant + drag_acc)
+    // On a swell the water carries what floats in it up and down. A float
+    // is a weight on a spring, the spring being the slice of it at the
+    // waterline, and quadratic drag alone leaves that spring ringing: a
+    // crate on a short chop bounces a metre clear of water drawn right
+    // under it. So its rise and fall is damped towards the surface's own,
+    // `drag` times what would stop the ringing dead (1 by default), and
+    // never by more than brings it to the water's speed this step. Nothing
+    // wholly under water has a waterline, and still water is left as it was.
+    let heave_acc = match heave {
+        Some(above) if drag > 0.0 && above.abs() < r => {
+            let waterline = core::f32::consts::PI * (r * r - above * above);
+            let stiffness = density * g.length() * waterline / mass;
+            let rising = rel.dot(up) + drag_acc.dot(up) * dt;
+            let stop = rising / dt.max(1e-5);
+            -up * (2.0 * drag * stiffness.sqrt() * rising).clamp(-stop.abs(), stop.abs())
+        }
+        _ => Vec3::ZERO,
+    };
+    Some(buoyant + drag_acc + heave_acc)
 }
 
 fn nearest_volume(field: &WaterField, p: Vec3) -> Option<&WaterVolume> {
@@ -385,6 +526,7 @@ mod tests {
                 frozen: false,
                 entity: 7,
                 carry: WaterCarry::default(),
+                swell: None,
             }],
         }
     }
@@ -403,6 +545,7 @@ mod tests {
                 frozen: false,
                 entity: 3,
                 carry: WaterCarry::default(),
+                swell: None,
             }],
         }
     }
@@ -498,6 +641,8 @@ mod tests {
             floor: f64::INFINITY,
             look: None,
             simulated: None,
+            swell: None,
+            time: 0.0,
         };
         WaterField {
             volumes: vec![WaterVolume {
@@ -508,6 +653,7 @@ mod tests {
                 frozen: false,
                 entity: 9,
                 carry: WaterCarry::default(),
+                swell: None,
             }],
         }
     }
@@ -630,6 +776,7 @@ mod tests {
             frozen: false,
             entity: 42,
             carry: WaterCarry::default(),
+            swell: None,
         };
         let ocean = WaterVolume {
             shape: WaterShape::Sphere { center: Vec3::ZERO, radius: 3.0 },
@@ -639,6 +786,7 @@ mod tests {
             frozen: false,
             entity: 9,
             carry: WaterCarry::default(),
+            swell: None,
         };
         let p = Vec3::new(0.0, -1.0, 0.0);
         let a = WaterField { volumes: vec![tank.clone(), ocean.clone()] };

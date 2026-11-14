@@ -13,6 +13,7 @@ use std::sync::Arc;
 use glam::{DVec3, Vec3};
 
 use crate::scatter::Frame;
+pub use crate::swell::{Lay, Swell, Wave};
 
 /// The surface of a declared body of water, in its anchor's frame.
 #[derive(Clone, Debug, PartialEq)]
@@ -346,6 +347,12 @@ pub struct DeclaredWater {
     /// holes dug beside it and settles, the grid's levels and flow following.
     /// `None` for water that stands where it was declared.
     pub simulated: Option<SimSpec>,
+    /// The waves on it, or `None` for a still surface. Its surface, its
+    /// depth and its flow are then the moving ones, at `time`.
+    pub swell: Option<Arc<Swell>>,
+    /// The simulation's clock the swell is read at, seconds, refreshed by
+    /// the host as `frame` is.
+    pub time: f64,
 }
 
 /// How a script asked the engine to move a body of water, and what the
@@ -471,48 +478,137 @@ pub struct WaterAt {
     pub up: DVec3,
     /// The water's velocity, world space, m/s.
     pub flow: DVec3,
+    /// Out of the surface over the point, in world space: `up`, leant with
+    /// the face of a wave.
+    pub normal: DVec3,
+    /// Metres the surface over the point stands above its still level: 0
+    /// without a swell.
+    pub wave: f64,
 }
 
 impl DeclaredWater {
-    /// Where world point `p` is in this water.
-    pub fn at(&self, p: DVec3) -> WaterAt {
-        let local = self.frame.to_local(p);
+    /// The still surface under local point `local`: how far the point is
+    /// above it, the up there, the water's own flow, and what a swell is
+    /// laid on. `Err` carries the up where this water has no surface over
+    /// the point.
+    fn still(&self, local: DVec3) -> Result<(f64, DVec3, DVec3, Lay), DVec3> {
         let current = self.current.as_dvec3();
-        let (above, up_local, flow_local) = match &self.surface {
+        match &self.surface {
             Surface::Lake { radius, axis, reach } => {
                 let r = local.length();
                 let up = local.try_normalize().unwrap_or(DVec3::Y);
                 // Along the surface from the lake's centre, as an angle.
                 let angle = up.dot(axis.try_normalize().unwrap_or(DVec3::Y)).clamp(-1.0, 1.0).acos();
                 if angle * radius > *reach {
-                    return WaterAt { above: f64::INFINITY, up: self.frame.to_world(up) - self.frame.origin, ..Default::default() };
+                    return Err(up);
                 }
-                (r - radius, up, current)
+                Ok((r - radius, up, current, Lay::Round { radius: *radius }))
             }
             Surface::Grid(g) => match g.sample(local.x, local.z) {
-                Some((level, f)) => (local.y - level, DVec3::Y, current + DVec3::new(f[0], 0.0, f[1])),
-                None => return WaterAt { above: f64::INFINITY, up: self.frame.to_world(DVec3::Y) - self.frame.origin, ..Default::default() },
+                Some((level, f)) => Ok((local.y - level, DVec3::Y, current + DVec3::new(f[0], 0.0, f[1]), Lay::Flat { level })),
+                None => Err(DVec3::Y),
             },
             Surface::Tiles(t) => {
-                let dry = |up: DVec3| WaterAt { above: f64::INFINITY, up: self.frame.to_world(up) - self.frame.origin, ..Default::default() };
-                let Some((gx, gz, height, up)) = t.patch.locate(local) else { return dry(t.patch.up) };
+                let Some((gx, gz, height, up)) = t.patch.locate(local) else { return Err(t.patch.up) };
                 match t.sample(gx, gz) {
                     // Below the water's bed is the ground, or a cave in it.
-                    Some((level, depth, _)) if level - height > depth + 0.5 => return dry(up),
+                    Some((level, depth, _)) if level - height > depth + 0.5 => Err(up),
                     Some((level, _, f)) => {
                         let (a, b) = t.patch.along(up);
-                        (height - level, up, current + a * f[0] + b * f[1])
+                        let lay = match t.patch.radius {
+                            Some(r) => Lay::Round { radius: r + level },
+                            None => Lay::Flat { level: t.patch.centre.dot(t.patch.up) + level },
+                        };
+                        Ok((height - level, up, current + a * f[0] + b * f[1], lay))
                     }
-                    None => return dry(up),
+                    None => Err(up),
                 }
             }
-        };
+        }
+    }
+
+    /// Where world point `p` is in this water, and the water's flow there
+    /// whether or not `p` is under it: in the air, the flow of the surface
+    /// below. `None` flow where this water is not.
+    fn probe(&self, p: DVec3) -> (WaterAt, Option<DVec3>) {
+        let local = self.frame.to_local(p);
         let dir = |v: DVec3| self.frame.to_world(v) - self.frame.origin;
+        let dry = |up: DVec3| (WaterAt { above: f64::INFINITY, up: dir(up), normal: dir(up), ..Default::default() }, None);
+        let (above, up_local, flow_local, lay) = match self.still(local) {
+            Ok(still) => still,
+            Err(up) => return dry(up),
+        };
+        // The waves on it move the surface, lean it and stir the water.
+        let (above, normal_local, flow_local, wave) = match &self.swell {
+            Some(swell) => {
+                let o = swell.over(local, lay, self.time);
+                (o.above, o.normal, flow_local + o.flow, o.height)
+            }
+            None => (above, up_local, flow_local, 0.0),
+        };
         // Below the bed is rock, or a cave in it: not this water.
         if -above > self.floor {
-            return WaterAt { above: f64::INFINITY, up: dir(up_local), ..Default::default() };
+            return dry(up_local);
         }
-        WaterAt { depth: (-above).max(0.0), above, up: dir(up_local), flow: if above <= 0.0 { dir(flow_local) } else { DVec3::ZERO } }
+        let flow = dir(flow_local);
+        let at = WaterAt {
+            depth: (-above).max(0.0),
+            above,
+            up: dir(up_local),
+            flow: if above <= 0.0 { flow } else { DVec3::ZERO },
+            normal: dir(normal_local),
+            wave,
+        };
+        (at, Some(flow))
+    }
+
+    /// Where world point `p` is in this water.
+    pub fn at(&self, p: DVec3) -> WaterAt {
+        self.probe(p).0
+    }
+
+    /// The water's velocity at the surface over (or under) world point `p`,
+    /// m/s: what a hull's wet edge rides when its middle is in the air.
+    /// Zero where this water is not.
+    pub fn flow_under(&self, p: DVec3) -> DVec3 {
+        self.probe(p).1.unwrap_or(DVec3::ZERO)
+    }
+
+    /// How far world point `p` is above this water's still surface, its
+    /// waves left out; infinite where it has no surface over `p`. With
+    /// [`Swell::reach`] it bounds where the moving surface can be, for
+    /// whoever would rather not ask about every wave.
+    pub fn still_above(&self, p: DVec3) -> f64 {
+        self.still(self.frame.to_local(p)).map_or(f64::INFINITY, |(above, ..)| above)
+    }
+
+    /// The waves `waves` make on this water's surface: laid about a lake's
+    /// own middle, a round patch's, or +Y on a flat one.
+    pub fn swell_of(&self, waves: &[Wave]) -> Option<Arc<Swell>> {
+        let axis = match &self.surface {
+            Surface::Lake { axis, .. } => *axis,
+            Surface::Grid(_) => DVec3::Y,
+            Surface::Tiles(t) => t.patch.up,
+        };
+        Swell::new(waves, axis).map(Arc::new)
+    }
+
+    /// What this water's swell is laid on at world point `p`: the still
+    /// surface there. `None` where it has no surface over `p`.
+    pub fn lay_at(&self, p: DVec3) -> Option<Lay> {
+        let local = self.frame.to_local(p);
+        match &self.surface {
+            Surface::Lake { radius, .. } => Some(Lay::Round { radius: *radius }),
+            Surface::Grid(g) => g.sample(local.x, local.z).map(|(level, _)| Lay::Flat { level }),
+            Surface::Tiles(t) => {
+                let (gx, gz, ..) = t.patch.locate(local)?;
+                let (level, ..) = t.sample(gx, gz)?;
+                Some(match t.patch.radius {
+                    Some(r) => Lay::Round { radius: r + level },
+                    None => Lay::Flat { level: t.patch.centre.dot(t.patch.up) + level },
+                })
+            }
+        }
     }
 }
 
@@ -533,6 +629,8 @@ mod tests {
             floor: f64::INFINITY,
             look: Some(UnderwaterLook::default()),
             simulated: None,
+            swell: None,
+            time: 0.0,
         }
     }
 
@@ -595,6 +693,61 @@ mod tests {
         assert!((at.depth - 1.0).abs() < 1e-4, "{}", at.depth);
         assert!((at.up - DVec3::NEG_X).length() < 1e-6);
         assert_eq!(w.at(DVec3::new(1000.0, 804.0, 0.0)).depth, 0.0);
+    }
+
+    /// **A lake with a swell is as deep as the wave over you.** Its surface
+    /// is the sphere moved by its waves, at the time the host set; its flow
+    /// is the water turning under the wave; and the normal leans with the
+    /// wave's face. With no swell it is the still sphere, as before.
+    #[test]
+    fn a_lake_with_a_swell_is_as_deep_as_the_wave_over_it() {
+        let wave = Wave { amplitude: 0.8, wavelength: 30.0, direction: [1.0, 0.0], steepness: 0.0, speed: None, phase: 0.0 };
+        let mut w = lake();
+        w.swell = w.swell_of(&[wave]);
+        w.time = 2.5;
+        let k = std::f64::consts::TAU / 30.0;
+        let omega = (9.81 * k).sqrt();
+        // 12 m along the wave from the lake's middle, a metre under the
+        // still surface.
+        let a: f64 = 12.0 / 805.0;
+        let p = DVec3::new(a.sin(), a.cos(), 0.0) * 804.0;
+        let theta = k * 12.0 - omega * 2.5;
+        let at = w.at(p);
+        assert!((at.depth - (1.0 + 0.8 * theta.sin())).abs() < 1e-6, "{} against {}", at.depth, 1.0 + 0.8 * theta.sin());
+        assert!((at.wave - 0.8 * theta.sin()).abs() < 1e-6);
+        assert!((at.up - p.normalize()).length() < 1e-12, "up stays the planet's");
+        // The face of the wave leans against its slope along +x here.
+        let slope = 0.8 * k * theta.cos();
+        let tangent = DVec3::new(a.cos(), -a.sin(), 0.0);
+        assert!((at.normal.dot(tangent) + slope / (1.0 + slope * slope).sqrt()).abs() < 1e-3, "{:?}", at.normal);
+        assert!(at.flow.length() > 0.1, "the water under a wave moves: {:?}", at.flow);
+        // The clock moves it, and the same clock is the same water.
+        let again = w.at(p);
+        assert_eq!(at, again);
+        w.time = 3.0;
+        assert!((w.at(p).depth - at.depth).abs() > 0.05);
+        // Without waves: the still lake, and no new answers.
+        let still = lake().at(p);
+        assert!((still.depth - 1.0).abs() < 1e-9);
+        assert_eq!((still.wave, still.normal, still.flow), (0.0, still.up, DVec3::ZERO));
+        assert!(lake().swell_of(&[]).is_none());
+    }
+
+    /// **A heightfield's swell stands on its levels.**
+    #[test]
+    fn a_grids_swell_stands_on_its_levels() {
+        let g = HeightGrid { x0: -50.0, z0: -50.0, cell: 100.0, columns: 2, rows: 2, levels: vec![3.0; 4], flow: Vec::new() };
+        let mut w = DeclaredWater { surface: Surface::Grid(Arc::new(g)), ..lake() };
+        w.swell = w.swell_of(&[Wave { amplitude: 0.5, wavelength: 20.0, direction: [0.0, 1.0], steepness: 0.0, speed: Some(2.0), phase: 0.0 }]);
+        w.time = 1.0;
+        let k = std::f64::consts::TAU / 20.0;
+        // The crest that began at z = 5 has travelled 2 m.
+        let at = w.at(DVec3::new(4.0, 2.0, 7.0));
+        assert!((at.depth - 1.5).abs() < 1e-9, "{}", at.depth);
+        let off = w.at(DVec3::new(4.0, 3.2, 1.0));
+        assert!((off.above - (0.2 - 0.5 * (k * (1.0 - 2.0)).sin())).abs() < 1e-9, "{}", off.above);
+        assert_eq!(w.lay_at(DVec3::new(4.0, 0.0, 7.0)), Some(Lay::Flat { level: 3.0 }));
+        assert_eq!(w.lay_at(DVec3::new(400.0, 0.0, 7.0)), None, "off the grid there is no surface to lay waves on");
     }
 
     /// **A grid's surface is its levels, blended, and dry where it says

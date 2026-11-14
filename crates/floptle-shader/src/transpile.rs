@@ -57,6 +57,20 @@ pub struct CompiledFragment {
     /// The shader declares `output offset`: the chunk carries the `vs_flsl`
     /// and `vs_flsl_skin` vertex entry points that move each vertex.
     pub displaced: bool,
+    /// The shader reads the water's swell (`waterSwell`, `waterSwellNormal`):
+    /// the byte offset in the param block of its [`SWELL_LANES`] `vec4`s,
+    /// which the renderer's host fills from the water the surface is on
+    /// (`floptle_core::swell::Swell::pack`). Zeros are no swell.
+    pub swell_offset: Option<usize>,
+}
+
+/// `vec4`s in a param block's swell section: a header, two frames and two
+/// lanes a wave. The layout is `floptle_core::swell::Swell::pack`'s.
+pub const SWELL_LANES: usize = 39;
+
+/// Does the shader read the water's swell?
+fn reads_swell(ir: &ShaderIr) -> bool {
+    ir.exprs.iter().any(|e| matches!(&e.kind, ExprKind::Call { op, .. } if op == "waterSwell" || op == "waterSwellNormal"))
 }
 
 /// A texture slot's tiling packed into its two param-block lanes (mirrors the
@@ -73,7 +87,23 @@ impl CompiledFragment {
     /// two per texture slot's tiling (never zero — an empty block still binds
     /// a 16-byte buffer).
     pub fn param_block_size(&self) -> u64 {
-        ((self.uniforms.len() + 2 * self.textures.len()).max(1) * 16) as u64
+        let swell = if self.swell_offset.is_some() { SWELL_LANES } else { 0 };
+        (((self.uniforms.len() + 2 * self.textures.len()).max(1) + swell) * 16) as u64
+    }
+
+    /// Write the water's swell into packed param-block bytes: `lanes` is
+    /// what `Swell::pack` gave, or all zeros for a surface on still water.
+    /// Nothing to do for a shader that does not read one.
+    pub fn write_swell(&self, params: &mut [u8], lanes: &[[f32; 4]; SWELL_LANES]) {
+        let Some(at) = self.swell_offset else { return };
+        for (i, lane) in lanes.iter().enumerate() {
+            for (l, v) in lane.iter().enumerate() {
+                let o = at + i * 16 + l * 4;
+                if let Some(dst) = params.get_mut(o..o + 4) {
+                    dst.copy_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
     }
 
     /// Pack this shader's uniform values (material overrides where given,
@@ -143,6 +173,10 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
         w.line(format!("    t{i}a: vec4<f32>, // {name} tiling: count.xy, offset.xy"), None);
         w.line(format!("    t{i}b: vec4<f32>, // {name} tiling: mode, rot, scale, blend"), None);
     }
+    let swell = reads_swell(ir);
+    if swell {
+        w.line(format!("    swell: array<vec4<f32>, {SWELL_LANES}>, // the water's waves"), None);
+    }
     w.line("};".into(), None);
     w.line("@group(3) @binding(0) var<uniform> P: FlslParams;".into(), None);
     for (i, name) in ir.textures.iter().enumerate() {
@@ -154,6 +188,9 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
     // The engine-lighting helper is per-chunk (it reads VsOut + the raster
     // globals `g`, which only exist in the raster module).
     w.raw(FRAGMENT_LIT_WGSL);
+    if swell {
+        w.raw(SWELL_WGSL);
+    }
 
     w.line("fn flsl_surface(in: VsOut, front: bool) -> vec4<f32> {".into(), None);
     for (i, (name, root)) in ir.lets.iter().enumerate() {
@@ -205,8 +242,116 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
         texture_data: ir.textures.iter().map(|t| ir.texture_data.contains(t)).collect(),
         line_map: w.line_map,
         displaced,
+        swell_offset: swell.then(|| (ir.uniforms.len() + 2 * ir.textures.len()).max(1) * 16),
     })
 }
+
+/// The water's swell, read from the param block's `swell` lanes: the same
+/// sum `floptle_core::swell::Swell::offset` makes, wave for wave, so the
+/// surface a shader draws is the one the solver floats things on.
+///
+/// `flsl_swell_at` works in the water's own frame; the three wrappers turn
+/// its answer into the space the caller is in.
+pub(crate) const SWELL_WGSL: &str = r#"struct FlslSwell {
+    off: vec3<f32>,
+    n: vec3<f32>,
+    waves: u32,
+}
+fn flsl_swell_at(p: vec3<f32>) -> FlslSwell {
+    var out: FlslSwell;
+    let head = P.swell[0];
+    out.waves = u32(head.x);
+    out.off = vec3<f32>(0.0);
+    out.n = vec3<f32>(0.0, 1.0, 0.0);
+    if (out.waves == 0u) {
+        return out;
+    }
+    // The vertex in the water's frame.
+    let r0 = P.swell[1];
+    let r1 = P.swell[2];
+    let r2 = P.swell[3];
+    let q = vec3<f32>(dot(r0.xyz, p) + r0.w, dot(r1.xyz, p) + r1.w, dot(r2.xyz, p) + r2.w);
+    let round = head.y > 0.0;
+    var up = vec3<f32>(0.0, 1.0, 0.0);
+    if (round) {
+        up = normalize(q);
+    }
+    var horiz = vec3<f32>(0.0);
+    var height = 0.0;
+    var jx = vec3<f32>(1.0, 0.0, 0.0);
+    var jy = vec3<f32>(0.0, 1.0, 0.0);
+    var jz = vec3<f32>(0.0, 0.0, 1.0);
+    var slope = vec3<f32>(0.0);
+    for (var i = 0u; i < out.waves; i++) {
+        let a = P.swell[7u + 2u * i];
+        let b = P.swell[8u + 2u * i];
+        var along = dot(q, a.xyz);
+        var way = a.xyz;
+        var len = 1.0;
+        if (round) {
+            let c = clamp(dot(up, a.xyz), -1.0, 1.0);
+            along = head.y * asin(c);
+            way = a.xyz - up * c;
+            len = sqrt(max(1.0 - c * c, 0.0));
+        }
+        let th = a.w * along + b.z;
+        let sn = sin(th);
+        let cs = cos(th);
+        horiz += way * (b.y * cs);
+        height += b.x * sn;
+        if (len > 1e-6) {
+            let squeeze = a.w * b.y * sn / len;
+            jx -= way * (squeeze * way.x);
+            jy -= way * (squeeze * way.y);
+            jz -= way * (squeeze * way.z);
+            slope += way * (a.w * b.x * cs / len);
+        }
+    }
+    out.off = horiz + up * height;
+    // Across the two ways the moved surface runs from the rest place.
+    let zz = vec3<f32>(0.0, 0.0, 1.0) - up * up.z;
+    var e2 = normalize(vec3<f32>(1.0, 0.0, 0.0) - up * up.x);
+    if (dot(zz, zz) > 1e-6) {
+        e2 = normalize(zz);
+    }
+    let e1 = normalize(cross(up, e2));
+    let ta = jx * e1.x + jy * e1.y + jz * e1.z + up * dot(slope, e1);
+    let tb = jx * e2.x + jy * e2.y + jz * e2.z + up * dot(slope, e2);
+    var n = normalize(cross(ta, tb));
+    if (dot(n, up) < 0.0) {
+        n = -n;
+    }
+    out.n = n;
+    return out;
+}
+// Back from the water's frame to the node's.
+fn flsl_swell_to_node(v: vec3<f32>) -> vec3<f32> {
+    return P.swell[1].xyz * v.x + P.swell[2].xyz * v.y + P.swell[3].xyz * v.z;
+}
+fn flsl_swell_offset(p: vec3<f32>) -> vec3<f32> {
+    let s = flsl_swell_at(p);
+    if (s.waves == 0u) {
+        return vec3<f32>(0.0);
+    }
+    return flsl_swell_to_node(s.off);
+}
+// The normal in the node's space, for a vertex; `still` where there is no swell.
+fn flsl_swell_normal_local(p: vec3<f32>, still: vec3<f32>) -> vec3<f32> {
+    let s = flsl_swell_at(p);
+    if (s.waves == 0u) {
+        return still;
+    }
+    return flsl_swell_to_node(s.n);
+}
+// The normal in the space a pixel is lit in; `still` where there is no swell.
+fn flsl_swell_normal(p: vec3<f32>, still: vec3<f32>) -> vec3<f32> {
+    let s = flsl_swell_at(p);
+    if (s.waves == 0u) {
+        return still;
+    }
+    return vec3<f32>(dot(P.swell[4].xyz, s.n), dot(P.swell[5].xyz, s.n), dot(P.swell[6].xyz, s.n));
+}
+"#;
 
 /// `output offset`: the vertex half of a surface shader.
 ///
@@ -656,6 +801,19 @@ impl<'a> Writer<'a> {
                         _ => "flsl_post_normal",
                     };
                     Ok(format!("{f}({uv})"))
+                }
+                "waterSwell" => {
+                    let p = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;
+                    Ok(format!("flsl_swell_offset({p})"))
+                }
+                // A vertex has its normal in the node's space, a pixel in
+                // the space it is lit in.
+                "waterSwellNormal" => {
+                    let p = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;
+                    Ok(match self.ctx {
+                        EmitCtx::Vertex => format!("flsl_swell_normal_local({p}, onrm)"),
+                        _ => format!("flsl_swell_normal({p}, in.normal)"),
+                    })
                 }
                 "litSurface" => {
                     let albedo = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;

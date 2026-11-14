@@ -3012,6 +3012,10 @@ impl ScriptHost {
         let water_splashes: Rc<RefCell<std::collections::VecDeque<floptle_physics::splash::Splash>>> = Rc::default();
         let water_wet: Rc<RefCell<(f64, HashMap<u32, f64>)>> = Rc::default();
         let water_slam: Rc<RefCell<HashMap<u32, f32>>> = Rc::default();
+        let water_swells: Rc<RefCell<HashMap<u32, crate::water_api::NodeSwell>>> = Rc::default();
+        let water_clock: Rc<std::cell::Cell<f64>> = Rc::default();
+        let water_swell_writes: Rc<RefCell<crate::water_api::SwellWrites>> = Rc::default();
+        let water_swell_binds: Rc<RefCell<HashMap<u32, crate::water_api::SwellSource>>> = Rc::default();
         crate::water_api::install_water_api(
             &lua,
             crate::water_api::WaterShared {
@@ -3028,6 +3032,10 @@ impl ScriptHost {
                 colliders: colliders.clone(),
                 sim_origin: sim_origin.clone(),
                 surfaces: water_surfaces.clone(),
+                swells: water_swells.clone(),
+                clock: water_clock.clone(),
+                swell_writes: water_swell_writes.clone(),
+                swell_binds: water_swell_binds.clone(),
             },
         );
 
@@ -3646,6 +3654,10 @@ impl ScriptHost {
             water_splashes,
             water_wet,
             water_slam,
+            water_swells,
+            water_clock,
+            water_swell_writes,
+            water_swell_binds,
             scatter_sources,
             scatter_owners,
             scatter_settled,
@@ -4254,6 +4266,46 @@ impl ScriptHost {
         }
     }
 
+    /// The waves on each Water Volume node that has any, by entity, with the
+    /// node's rotation: published with [`Self::set_water_volumes`], so
+    /// `water.at` answers for the moving surface.
+    pub fn set_water_swells(&self, swells: HashMap<u32, crate::water_api::NodeSwell>) {
+        *self.water_swells.borrow_mut() = swells;
+    }
+
+    /// Turn a Water Volume node's swell with its node, tick by tick.
+    pub fn pose_water_swell(&self, entity: u32, rot: glam::Quat) {
+        if let Some(s) = self.water_swells.borrow_mut().get_mut(&entity) {
+            s.rot = rot.as_dquat();
+        }
+    }
+
+    /// The simulation time, seconds, that scripts read every swell at: set
+    /// with `simTime` by [`Self::set_sim_clock`].
+    pub fn set_water_clock(&self, t: f64) {
+        self.water_clock.set(t);
+        for w in self.water_declared.borrow_mut().iter_mut().filter(|w| w.swell.is_some()) {
+            w.time = t;
+        }
+    }
+
+    /// The clock [`Self::set_water_clock`] last set.
+    pub fn water_clock(&self) -> f64 {
+        self.water_clock.get()
+    }
+
+    /// `water.setSwell(node, waves)` calls since the last ask: the waves to
+    /// write to each Water Volume node, by entity.
+    pub fn take_water_swell_writes(&self) -> crate::water_api::SwellWrites {
+        std::mem::take(&mut *self.water_swell_writes.borrow_mut())
+    }
+
+    /// The water a script bound a node's shader to (`water.bindSwell`), by
+    /// the node's entity.
+    pub fn water_swell_bind(&self, node: u32) -> Option<crate::water_api::SwellSource> {
+        self.water_swell_binds.borrow().get(&node).copied()
+    }
+
     /// The water scripts declared with `water.addVolume`, frames as of the
     /// last [`Self::set_water_frame`].
     pub fn declared_water(&self) -> std::cell::Ref<'_, Vec<floptle_core::water::DeclaredWater>> {
@@ -4356,6 +4408,7 @@ impl ScriptHost {
     pub fn clear_declared_water(&mut self) {
         self.water_declared.borrow_mut().clear();
         self.water_surfaces.retain(&|_| false);
+        self.water_swell_binds.borrow_mut().clear();
     }
 
     /// Drain `water.setFrozen(node, on)` calls made this frame.
@@ -7099,6 +7152,9 @@ impl ScriptHost {
         let g = self.lua.globals();
         let _ = g.raw_set("simTime", sim_time);
         let _ = g.raw_set("simDt", sim_dt);
+        // A swell runs on this clock: `water.at` in a pass answers for the
+        // surface as it stands at that pass's `simTime`.
+        self.set_water_clock(sim_time);
     }
 
     /// Run every script's `fixedUpdate(node, dt)` for one gameplay tick (the netcode-era

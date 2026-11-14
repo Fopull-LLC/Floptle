@@ -21,6 +21,7 @@ fn tinted(underwater: bool, tint: [f32; 3]) -> Matter {
         tint,
         visibility: 4.0,
         underwater,
+        waves: Vec::new(),
     }
 }
 

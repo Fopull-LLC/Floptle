@@ -4,7 +4,7 @@
 //! and everything uploaded to the GPU are `f32` (GPUs are `f32`-native).
 
 pub use glam::{
-    Affine3A, DMat4, DQuat, DVec2, DVec3, DVec4, EulerRot, Mat3, Mat4, Quat, Vec2, Vec3, Vec3A,
+    Affine3A, DMat3, DMat4, DQuat, DVec2, DVec3, DVec4, EulerRot, Mat3, Mat4, Quat, Vec2, Vec3, Vec3A,
     Vec4,
 };
 

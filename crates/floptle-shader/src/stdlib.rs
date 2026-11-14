@@ -196,6 +196,10 @@ pub static OPS: &[OpSpec] = &[
     OpSpec { name: "applyFog", inputs: &[req("c", V3), req("p", V3)], output: V3, stages: FRAG, emit: Emit::Special, doc: "The scene's distance fog applied to a color.", category: "engine" },
     OpSpec { name: "fieldDistance", inputs: &[req("p", V3)], output: F, stages: FRAG, emit: Emit::Fn("map_d"), doc: "Distance from a point to the scene's SDF field (terrain + blobs) — glow near walls, darken in crevices…", category: "engine" },
     OpSpec { name: "surfaceGap", inputs: &[req("p", V3)], output: F, stages: FRAG, emit: Emit::Fn("flsl_surface_gap"), doc: "How much room there is between this surface and the SOLID one drawn behind it, in world units. Unlike fieldDistance this sees ordinary MESH geometry, so it is what edge foam, soft particles and contact glow are made of. Huge where nothing is behind (the sky).", category: "engine" },
+    // The swell of the water a surface is drawn on: the same waves the solver
+    // floats things on, read from the volume instead of typed again.
+    OpSpec { name: "waterSwell", inputs: &[req("p", V3)], output: V3, stages: FRAG, emit: Emit::Special, doc: "How far the water's swell has moved the point of its still surface at p (give objectPos), in the space output offset takes: output offset = waterSwell(objectPos) heaves a water surface with the very waves the solver floats things on. The waves are the ones on the Water Volume the node is or is under, or on the declared water it lies on (water.bindSwell names another). Zero where there is no swell.", category: "engine" },
+    OpSpec { name: "waterSwellNormal", inputs: &[req("p", V3)], output: V3, stages: FRAG, emit: Emit::Special, doc: "The swell's surface normal at the point of the still surface at p (give objectPos), in the same space as `normal`: litSurface(albedo, waterSwellNormal(objectPos)) lights the waves. The mesh's own normal where there is no swell.", category: "engine" },
 
     // ---- screen (post shaders: the finished frame, readable anywhere) --------
     //

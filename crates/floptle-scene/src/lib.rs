@@ -1204,6 +1204,52 @@ impl TerrainCollisionDoc {
     }
 }
 
+/// One wave of a Water Volume's swell (`floptle_core::water::Wave`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct WaveDoc {
+    /// Metres from the still surface to the crest.
+    pub amplitude: f32,
+    /// Metres from crest to crest.
+    pub wavelength: f32,
+    /// The way it travels along the water's x and z.
+    pub direction: (f32, f32),
+    /// 0 a rolling sine, 1 a true deep-water wave.
+    #[serde(default = "one_f32", skip_serializing_if = "is_one")]
+    pub steepness: f32,
+    /// m/s; absent travels as deep water carries a wave of its length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f32>,
+    /// Where in its cycle it starts, radians.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub phase: f32,
+}
+
+impl From<&floptle_core::water::Wave> for WaveDoc {
+    fn from(w: &floptle_core::water::Wave) -> Self {
+        Self {
+            amplitude: w.amplitude,
+            wavelength: w.wavelength,
+            direction: (w.direction[0], w.direction[1]),
+            steepness: w.steepness,
+            speed: w.speed,
+            phase: w.phase,
+        }
+    }
+}
+
+impl From<&WaveDoc> for floptle_core::water::Wave {
+    fn from(w: &WaveDoc) -> Self {
+        Self {
+            amplitude: w.amplitude,
+            wavelength: w.wavelength,
+            direction: [w.direction.0, w.direction.1],
+            steepness: w.steepness,
+            speed: w.speed,
+            phase: w.phase,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub enum MatterDoc {
     Primitive { shape: ShapeDoc, color: [f32; 3] },
@@ -1348,6 +1394,11 @@ pub enum MatterDoc {
         /// every scene saved before there was a choice had it.
         #[serde(default = "on", skip_serializing_if = "is_on")]
         underwater: bool,
+        /// The swell on it: Gerstner waves the solver floats things on and
+        /// a shader reads back (`waterSwell`). Absent is a still surface,
+        /// as every scene saved before there were waves has.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        waves: Vec<WaveDoc>,
     },
     /// An authored SDF shape — its Material's sdf-stage `.flsl` is the geometry.
     FieldShape {
@@ -2313,6 +2364,7 @@ impl From<&Matter> for MatterDoc {
                 tint,
                 visibility,
                 underwater,
+                waves,
             } => MatterDoc::WaterVolume {
                 pool: *kind == floptle_core::WaterKind::Pool,
                 radius: *radius,
@@ -2324,6 +2376,7 @@ impl From<&Matter> for MatterDoc {
                 tint: *tint,
                 visibility: *visibility,
                 underwater: *underwater,
+                waves: waves.iter().map(WaveDoc::from).collect(),
             },
             Matter::LightProbes {
                 half_extents,
@@ -2594,6 +2647,7 @@ impl MatterDoc {
                 tint,
                 visibility,
                 underwater,
+                waves,
             } => Matter::WaterVolume {
                 kind: if *pool {
                     floptle_core::WaterKind::Pool
@@ -2609,6 +2663,7 @@ impl MatterDoc {
                 tint: *tint,
                 visibility: *visibility,
                 underwater: *underwater,
+                waves: waves.iter().map(floptle_core::water::Wave::from).collect(),
             },
             MatterDoc::LightProbes {
                 half_extents,
@@ -7230,6 +7285,54 @@ mod tests {
         let mut again = World::new();
         spawn_into(&from_ron(&text).unwrap(), &mut again);
         assert!(!look(&again), "a look switched off came back on");
+    }
+
+    /// **A scene saved before water had waves has a still sea, and stays the
+    /// file it was.** No waves writes no key, so an older engine still opens
+    /// it; waves a game adds come back as they were given, a wave's own
+    /// defaults unwritten.
+    #[test]
+    fn a_water_volume_has_no_swell_until_given_one() {
+        const OLD: &str = r#"(
+    name: "sea",
+    nodes: [
+        (
+            name: "Sea",
+            transform: (translation: (0, 0, 0), rotation: (0, 0, 0, 1), scale: (1, 1, 1)),
+            matter: WaterVolume(radius: 40),
+        ),
+    ],
+)"#;
+        let waves_of = |world: &World| {
+            world
+                .query::<Matter>()
+                .find_map(|(_, m)| match m {
+                    Matter::WaterVolume { waves, .. } => Some(waves.clone()),
+                    _ => None,
+                })
+                .expect("the sea")
+        };
+        let mut world = World::new();
+        spawn_into(&from_ron(OLD).expect("an older scene loads"), &mut world);
+        assert!(waves_of(&world).is_empty(), "an older scene's sea grew waves");
+        let text = to_ron(&to_doc("sea", &world)).unwrap();
+        assert!(!text.contains("waves"), "a still sea wrote the new field:\n{text}");
+
+        let given = vec![
+            floptle_core::water::Wave { amplitude: 1.2, wavelength: 40.0, direction: [0.6, 0.8], steepness: 1.0, speed: None, phase: 0.0 },
+            floptle_core::water::Wave { amplitude: 0.3, wavelength: 9.0, direction: [-1.0, 0.0], steepness: 0.5, speed: Some(3.5), phase: 1.25 },
+        ];
+        let sea = world.query::<Matter>().find(|(_, m)| matches!(m, Matter::WaterVolume { .. })).map(|(e, _)| e).unwrap();
+        if let Some(Matter::WaterVolume { waves, .. }) = world.get_mut::<Matter>(sea) {
+            waves.clone_from(&given);
+        }
+        let text = to_ron(&to_doc("sea", &world)).unwrap();
+        assert!(text.contains("waves: ["), "{text}");
+        assert_eq!(text.matches("steepness").count(), 1, "a wave's default steepness was written:\n{text}");
+        assert_eq!(text.matches("phase").count(), 1, "{text}");
+        let mut again = World::new();
+        spawn_into(&from_ron(&text).unwrap(), &mut again);
+        assert_eq!(waves_of(&again), given, "the waves did not come back as given");
     }
 
     #[test]

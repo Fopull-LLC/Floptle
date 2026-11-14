@@ -340,6 +340,8 @@ impl crate::Editor {
                 frozen: false,
                 entity: u32::MAX - w.id,
                 carry: floptle_physics::WaterCarry::default(),
+                // Declared water carries its own swell, in its own frame.
+                swell: None,
             })
             .collect()
     }
@@ -520,6 +522,8 @@ mod tests {
             floor: 6.0,
             look: Some(look),
             simulated: None,
+            swell: None,
+            time: 0.0,
         };
         let under = |w: &DeclaredWater, y: f64| crate::shading::underwater_at(&world, std::slice::from_ref(w), DVec3::new(0.0, y, 0.0));
         assert_eq!(under(&lake, 802.0), Some((look.tint, look.visibility)));

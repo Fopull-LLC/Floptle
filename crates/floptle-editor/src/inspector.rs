@@ -2428,6 +2428,7 @@ fn water_volume_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
         tint,
         visibility,
         underwater,
+        waves,
     } = m else { return };
     let cmd = &mut *ctx.cmd;
     use floptle_core::WaterKind;
@@ -2516,6 +2517,74 @@ fn water_volume_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
              becomes walkable ground. A script can thaw it.",
         )
         .changed();
+    ui.separator();
+    cmd.inspector_changed |= water_swell_ui(ui, waves);
+}
+
+/// The waves on a Water Volume: one block of sliders a wave, and a button
+/// for another. Returns whether anything changed.
+fn water_swell_ui(ui: &mut egui::Ui, waves: &mut Vec<floptle_core::water::Wave>) -> bool {
+    use crate::responsive::slider;
+    let mut changed = false;
+    ui.label("swell");
+    ui.small(
+        "Waves on the surface. Bodies float on them, water.at and splashes          answer at them, and a shader on the surface moves with the same          waves: output offset = waterSwell(objectPos). Directions run along          the node's own x and z; on a Sea, round the sphere from its +Y.",
+    );
+    let mut remove = None;
+    for (i, w) in waves.iter_mut().enumerate() {
+        ui.push_id(("wave", i), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("wave {}", i + 1));
+                if ui.small_button("remove").clicked() {
+                    remove = Some(i);
+                }
+            });
+            changed |= slider(ui, egui::Slider::new(&mut w.amplitude, 0.0..=20.0).logarithmic(true), "amplitude m")
+                .on_hover_text("From the still surface up to the crest.")
+                .changed();
+            changed |= slider(ui, egui::Slider::new(&mut w.wavelength, 0.5..=2000.0).logarithmic(true), "wavelength m")
+                .on_hover_text("From crest to crest.")
+                .changed();
+            let mut heading = w.direction[1].atan2(w.direction[0]).to_degrees();
+            if slider(ui, egui::Slider::new(&mut heading, -180.0..=180.0), "heading (degrees)")
+                .on_hover_text("The way it travels: 0 along +x, 90 along +z.")
+                .changed()
+            {
+                let (sin, cos) = heading.to_radians().sin_cos();
+                w.direction = [cos, sin];
+                changed = true;
+            }
+            changed |= slider(ui, egui::Slider::new(&mut w.steepness, 0.0..=1.0), "steepness")
+                .on_hover_text(
+                    "0 is a rolling sine. 1 is a true deep-water wave, whose crests                      sharpen and troughs flatten. Waves too steep to sum are eased                      back together so the surface never folds over.",
+                )
+                .changed();
+            let mut own = w.speed.is_some();
+            if crate::responsive::check(ui, &mut own, "its own speed")
+                .on_hover_text("Off, it travels as deep water carries a wave of its length: long waves outrun short ones.")
+                .changed()
+            {
+                let k = std::f32::consts::TAU / w.wavelength.max(0.01);
+                w.speed = own.then(|| (floptle_core::swell::SWELL_GRAVITY as f32 / k).sqrt());
+                changed = true;
+            }
+            if let Some(speed) = &mut w.speed {
+                changed |= slider(ui, egui::Slider::new(speed, -60.0..=60.0), "speed m/s").changed();
+            }
+            changed |= slider(ui, egui::Slider::new(&mut w.phase, 0.0..=std::f32::consts::TAU), "phase")
+                .on_hover_text("Where in its cycle it starts, in radians.")
+                .changed();
+        });
+    }
+    if let Some(i) = remove {
+        waves.remove(i);
+        changed = true;
+    }
+    if waves.len() < floptle_core::swell::MAX_WAVES && ui.button("add wave").clicked() {
+        waves.push(floptle_core::water::Wave::default());
+        changed = true;
+    }
+    changed
 }
 
 /// Skybox: a Sky-stage shader with its uniforms, or a solid colour and a texture.

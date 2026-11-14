@@ -1832,6 +1832,12 @@ pub enum Matter {
         /// `sceneWaterDepth` in a screen shader) and leaves the view alone,
         /// for a game that draws its own underwater look.
         underwater: bool,
+        /// The swell on it: Gerstner waves, laid along the node's own x and
+        /// z (on a sea, the tangent plane at its +Y, and round the sphere
+        /// from there). The solver floats things on the moving surface,
+        /// `water.at` answers for it, and a shader on the surface reads the
+        /// same waves (`waterSwell`). Empty is a still surface.
+        waves: Vec<crate::water::Wave>,
     },
     /// An authored SDF shape: its Material's `.flsl`
     /// shader is the geometry, raymarched as part of the scene field (up to 4
@@ -2579,6 +2585,7 @@ impl Matter {
             tint: [0.10, 0.32, 0.38],
             visibility: 28.0,
             underwater: true,
+            waves: Vec::new(),
         }
     }
 

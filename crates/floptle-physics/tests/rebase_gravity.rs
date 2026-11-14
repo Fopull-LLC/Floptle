@@ -57,6 +57,7 @@ fn a_recentre_leaves_a_sea_where_it_was() {
         frozen: false,
         entity: 0,
         carry: Default::default(),
+        swell: None,
     });
     sim.set_origin_threshold(50.0);
     for k in 0..10 {

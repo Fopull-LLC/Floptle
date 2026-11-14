@@ -496,6 +496,46 @@ function update(node, dt)
 end
 ```
 
+### 4.7 The water's own waves: `waterSwell`
+
+A body of water can carry a swell: a list of Gerstner waves the solver floats
+things on (`water.setSwell`, or a Water Volume's swell in the Inspector; see
+the scripting reference, §22a). A shader on that water's surface reads the
+same waves from the volume, rather than typing them again and hoping the two
+stay in step:
+
+```
+shader sea {
+  stage fragment
+  let n = waterSwellNormal(objectPos)
+  output color = vec4(litSurface(vec3(0.05, 0.25, 0.35), n), 1)
+  output offset = waterSwell(objectPos)
+}
+```
+
+- **`waterSwell(p)`** is how far the swell has moved the point of the still
+  surface at `p`, a `vec3` in the space `output offset` takes. Give it
+  `objectPos`. It is the full Gerstner motion, up and along the wave, so
+  crests sharpen as the solver's do.
+- **`waterSwellNormal(p)`** is the surface's normal there, in the same space
+  as `normal`: the node's in an offset, the lit one in the colour. It is exact
+  per pixel, however coarse the mesh.
+- **Which water.** The Water Volume the node is or is under; else the
+  declared water lying on the node or one above it, whichever's surface the
+  node is nearest; or the one `water.bindSwell(node, water)` names. On no
+  water, or still water, `waterSwell` is zero and `waterSwellNormal` is the
+  mesh's normal, so the shader draws a flat sea rather than failing.
+- **The same clock as the physics.** The waves run on the simulation's time,
+  not `time`, and are drawn at the moment the frame's bodies are drawn at.
+  Paused, they hold.
+- **What it costs.** A loop over the volume's waves (16 at most) per vertex
+  for the offset, and per pixel for the normal. A shader that calls neither
+  pays nothing; one that does adds 624 bytes to its material's parameters,
+  rewritten each frame while the game plays.
+- Both are fragment-stage ops, and the two engine ops an `output offset` may
+  call. They are functions rather than raw uniforms because a shader has no
+  loops to sum a wave list with.
+
 ## 5. Materials reference a compiled shader
 
 A **material** binds a compiled shader plus its **param block** (uniform values,
