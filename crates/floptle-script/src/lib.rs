@@ -1018,6 +1018,10 @@ pub struct ScriptHost {
     /// Declared water whose surface a script moved (`water.setLevel`) since
     /// the driver last asked.
     water_changed: Rc<RefCell<Vec<u32>>>,
+    /// `water.hold` / `release` and the rest, for tiled sims.
+    water_sim_cmds: Rc<RefCell<Vec<floptle_core::water::SimCmd>>>,
+    /// What tiled sims' held groups gave, waiting for `water.exchanged`.
+    water_exchanged: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>>,
     /// Scatter sources scripts declared — resolved into
     /// drawable instances by the driver, never into scene nodes.
     scatter_sources: scatter_api::Sources,

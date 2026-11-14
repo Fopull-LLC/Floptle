@@ -29,6 +29,8 @@ pub mod mesh2sdf;
 pub mod mesher;
 pub mod procgen;
 pub mod water;
+pub mod water_tiles;
+pub mod surface;
 pub mod relief;
 pub mod terrain;
 

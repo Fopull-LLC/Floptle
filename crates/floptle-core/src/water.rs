@@ -24,6 +24,10 @@ pub enum Surface {
     Lake { radius: f64, axis: DVec3, reach: f64 },
     /// A grid of surface heights over the frame's x–z plane, its +Y up.
     Grid(Arc<HeightGrid>),
+    /// Simulated water stored only where it is: square tiles of cells laid
+    /// on a patch of a round world or of a plane, each tile's levels shared
+    /// until it changes. What a `sim` declared with `center` reads from.
+    Tiles(Arc<TiledSurface>),
 }
 
 /// Surface heights on a regular grid, and optionally the water's velocity at
@@ -82,6 +86,208 @@ impl HeightGrid {
     }
 }
 
+/// Cells a side of one tile of a [`TiledSurface`].
+pub const TILE: usize = 32;
+
+/// How the cells of a tiled water patch lie in its anchor's frame.
+///
+/// Cell `(i, j)` has its centre at grid coordinates `(i, j)`; the patch's
+/// middle, `centre`, is at `((columns - 1) / 2, (rows - 1) / 2)`, and a
+/// point's height is measured along its own up.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Patch {
+    /// On a round world, the radius heights are measured from: a height is
+    /// the distance from the frame's origin (the world's centre) less this.
+    /// `None` for a flat patch, whose heights are along `up` from `centre`'s
+    /// plane through the frame's origin.
+    pub radius: Option<f64>,
+    /// Out of the ground at the patch's middle, and the two directions its
+    /// columns and rows run along, all unit and at right angles.
+    pub up: DVec3,
+    pub e1: DVec3,
+    pub e2: DVec3,
+    /// The middle of the patch, on the reference surface: on a round world
+    /// `up * radius`.
+    pub centre: DVec3,
+    /// Metres between cell centres at the middle.
+    pub cell: f64,
+    pub columns: usize,
+    pub rows: usize,
+}
+
+impl Patch {
+    /// A patch on a round world, about the point `on` of its surface (in the
+    /// world's frame, whose origin is its centre).
+    pub fn sphere(on: DVec3, cell: f64, columns: usize, rows: usize) -> Self {
+        let up = on.try_normalize().unwrap_or(DVec3::Y);
+        let (e1, e2) = Self::axes(up);
+        Self { radius: Some(on.length().max(1e-6)), up, e1, e2, centre: up * on.length().max(1e-6), cell, columns, rows }
+    }
+
+    /// A patch on a plane, about `centre`, its up the frame's +Y.
+    pub fn flat(centre: DVec3, cell: f64, columns: usize, rows: usize) -> Self {
+        let centre = DVec3::new(centre.x, 0.0, centre.z);
+        Self { radius: None, up: DVec3::Y, e1: DVec3::X, e2: DVec3::Z, centre, cell, columns, rows }
+    }
+
+    /// Columns along the frame's x and rows along its z wherever that is
+    /// possible, so a patch at a pole lies as a flat grid would.
+    fn axes(up: DVec3) -> (DVec3, DVec3) {
+        let z = DVec3::Z - up * up.z;
+        let e2 = if z.length_squared() > 1e-6 { z.normalize() } else { (DVec3::X - up * up.x).normalize() };
+        // So that e1 × e2 points down, as +X × +Z does against +Y: a patch
+        // at the +Y pole runs its columns along +X.
+        let e1 = up.cross(e2).normalize();
+        (e1, e2)
+    }
+
+    /// Metres along the patch's tangent plane of grid point `(gx, gz)`.
+    fn tangent(&self, gx: f64, gz: f64) -> (f64, f64) {
+        let mid = |n: usize| (n.max(1) - 1) as f64 * 0.5;
+        ((gx - mid(self.columns)) * self.cell, (gz - mid(self.rows)) * self.cell)
+    }
+
+    /// The reference height a level is measured from, as the level a
+    /// script reads: a radius on a round world, 0 on a plane.
+    pub fn base(&self) -> f64 {
+        self.radius.unwrap_or(0.0)
+    }
+
+    /// Up at grid point `(gx, gz)`.
+    pub fn up_at(&self, gx: f64, gz: f64) -> DVec3 {
+        let (x, z) = self.tangent(gx, gz);
+        match self.radius {
+            Some(_) => (self.centre + self.e1 * x + self.e2 * z).normalize(),
+            None => self.up,
+        }
+    }
+
+    /// The point at grid point `(gx, gz)`, `height` above the reference.
+    pub fn point(&self, gx: f64, gz: f64, height: f64) -> DVec3 {
+        let (x, z) = self.tangent(gx, gz);
+        match self.radius {
+            Some(r) => (self.centre + self.e1 * x + self.e2 * z).normalize() * (r + height),
+            None => self.centre + self.e1 * x + self.e2 * z + self.up * height,
+        }
+    }
+
+    /// Where frame point `p` is on the patch: its grid coordinates, its
+    /// height above the reference and the up there. `None` on the far side
+    /// of a round world.
+    pub fn locate(&self, p: DVec3) -> Option<(f64, f64, f64, DVec3)> {
+        let mid = |n: usize| (n.max(1) - 1) as f64 * 0.5;
+        match self.radius {
+            Some(r) => {
+                let len = p.length();
+                let dir = p.try_normalize()?;
+                let c = dir.dot(self.up);
+                if c < 1e-3 {
+                    return None;
+                }
+                // Onto the tangent plane along the radial.
+                let t = dir * (r / c) - self.centre;
+                Some((t.dot(self.e1) / self.cell + mid(self.columns), t.dot(self.e2) / self.cell + mid(self.rows), len - r, dir))
+            }
+            None => {
+                let t = p - self.centre;
+                Some((t.dot(self.e1) / self.cell + mid(self.columns), t.dot(self.e2) / self.cell + mid(self.rows), t.dot(self.up), self.up))
+            }
+        }
+    }
+
+    /// The directions the grid's columns and rows run at `up`, along the
+    /// ground there: what a cell's flow is measured along.
+    pub fn along(&self, up: DVec3) -> (DVec3, DVec3) {
+        let flat = |e: DVec3| (e - up * e.dot(up)).try_normalize().unwrap_or(e);
+        (flat(self.e1), flat(self.e2))
+    }
+
+    /// Tiles across and down.
+    pub fn tiles(&self) -> (usize, usize) {
+        (self.columns.div_ceil(TILE), self.rows.div_ceil(TILE))
+    }
+}
+
+/// One tile's water, as the simulation last left it: `TILE × TILE` cells, a
+/// row of columns at a time.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TileLevels {
+    /// The surface's height above the patch's reference; not finite where
+    /// the cell is dry.
+    pub level: Vec<f32>,
+    /// Metres of water standing in each cell.
+    pub depth: Vec<f32>,
+    /// The water's velocity along the patch's columns and rows, m/s.
+    pub flow: Vec<[f32; 2]>,
+    /// Bumped every time this tile's water changes, so a reader can skip a
+    /// tile it has already drawn.
+    pub serial: u64,
+}
+
+/// Tiled water's surface: the tiles that hold any, by key.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TiledSurface {
+    pub patch: Patch,
+    /// Keyed by [`tile_key`]; a tile not here is dry.
+    pub tiles: std::collections::HashMap<u32, Arc<TileLevels>>,
+}
+
+/// The key of the tile `(ti, tj)` tiles in from the patch's corner.
+pub fn tile_key(ti: usize, tj: usize) -> u32 {
+    ((tj as u32) << 16) | ti as u32
+}
+
+impl TiledSurface {
+    /// The cell `(i, j)`'s level, depth and flow, when it is wet.
+    pub fn cell(&self, i: i64, j: i64) -> Option<(f32, f32, [f32; 2])> {
+        if i < 0 || j < 0 || i as usize >= self.patch.columns || j as usize >= self.patch.rows {
+            return None;
+        }
+        let (i, j) = (i as usize, j as usize);
+        let t = self.tiles.get(&tile_key(i / TILE, j / TILE))?;
+        let c = (j % TILE) * TILE + i % TILE;
+        let l = *t.level.get(c)?;
+        l.is_finite().then(|| (l, t.depth.get(c).copied().unwrap_or(0.0), t.flow.get(c).copied().unwrap_or_default()))
+    }
+
+    /// The surface height, the depth and the flow at grid point `(gx, gz)`,
+    /// blended from the wet cells round it, as [`HeightGrid::sample`] blends
+    /// its points. A point in the half of a wet cell next to a dry one is
+    /// the wet cell's water, out to the face between them.
+    pub fn sample(&self, gx: f64, gz: f64) -> Option<(f64, f64, [f64; 2])> {
+        let (ix, iz) = (gx.floor(), gz.floor());
+        let (fx, fz) = (gx - ix, gz - iz);
+        let (ix, iz) = (ix as i64, iz as i64);
+        let (mut level, mut depth, mut flow, mut weight) = (0.0, 0.0, [0.0; 2], 0.0);
+        for (dx, dz, w) in [(0, 0, (1.0 - fx) * (1.0 - fz)), (1, 0, fx * (1.0 - fz)), (0, 1, (1.0 - fx) * fz), (1, 1, fx * fz)] {
+            if w <= 0.0 {
+                continue;
+            }
+            let Some((l, d, f)) = self.cell(ix + dx, iz + dz) else { continue };
+            level += l as f64 * w;
+            depth += d as f64 * w;
+            flow[0] += f[0] as f64 * w;
+            flow[1] += f[1] as f64 * w;
+            weight += w;
+        }
+        (weight > 0.0 && self.cell(gx.round() as i64, gz.round() as i64).is_some())
+            .then(|| (level / weight, depth / weight, [flow[0] / weight, flow[1] / weight]))
+    }
+
+    /// The mean level of the wet cells, as a script reads a level (a radius
+    /// on a round world), or `None` when it is all dry.
+    pub fn mean_level(&self) -> Option<f64> {
+        let (mut sum, mut n) = (0.0, 0usize);
+        for t in self.tiles.values() {
+            for l in t.level.iter().filter(|l| l.is_finite()) {
+                sum += *l as f64;
+                n += 1;
+            }
+        }
+        (n > 0).then(|| self.patch.base() + sum / n as f64)
+    }
+}
+
 /// One body of water a script declared.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeclaredWater {
@@ -129,6 +335,56 @@ pub struct SimSpec {
     /// Where its water pours over a drop of more than 1.5 m, refreshed by
     /// the engine as it flows.
     pub falls: Vec<WaterFall>,
+    /// Water stored in tiles, only where it is, on a patch of a round world
+    /// or a plane (declared with `center`); `None` for a dense grid.
+    pub tiled: Option<TiledSpec>,
+}
+
+/// How a tiled sim starts, and how it moves.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TiledSpec {
+    pub patch: Patch,
+    /// Filled to [`SimSpec::level`] wherever the ground is below it at the
+    /// start; false starts dry, or from `depths`.
+    pub fill: bool,
+    /// Metres of water per cell at the start, a row at a time.
+    pub depths: Option<Arc<Vec<f32>>>,
+    /// Cells held at a level from the start.
+    pub held: Vec<HeldCell>,
+    /// The cheaper model, without momentum.
+    pub pipes: bool,
+    /// The most a frame spends stepping it, ms: past this the water slows.
+    pub budget_ms: f32,
+    /// Hold the patch's edge cells whose ground is below the level.
+    pub hold_edges: bool,
+}
+
+/// A cell held at a level, and the group what it gives is counted in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeldCell {
+    pub i: u32,
+    pub j: u32,
+    /// As a script gives a level: a radius on a round world.
+    pub level: f32,
+    pub group: u16,
+}
+
+/// A change a script asked of a tiled sim, for the engine to make before
+/// its next step.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SimCmd {
+    Hold { id: u32, cells: Vec<[u32; 2]>, level: f32, group: u16 },
+    Release { id: u32, cells: Vec<[u32; 2]> },
+    AddWater { id: u32, cell: [u32; 2], volume: f64 },
+}
+
+impl SimCmd {
+    /// The volume it is for.
+    pub fn id(&self) -> u32 {
+        match self {
+            SimCmd::Hold { id, .. } | SimCmd::Release { id, .. } | SimCmd::AddWater { id, .. } => *id,
+        }
+    }
 }
 
 /// Water pouring off a drop: where a waterfall goes.
@@ -196,6 +452,19 @@ impl DeclaredWater {
                 Some((level, f)) => (local.y - level, DVec3::Y, current + DVec3::new(f[0], 0.0, f[1])),
                 None => return WaterAt { above: f64::INFINITY, up: self.frame.to_world(DVec3::Y) - self.frame.origin, ..Default::default() },
             },
+            Surface::Tiles(t) => {
+                let dry = |up: DVec3| WaterAt { above: f64::INFINITY, up: self.frame.to_world(up) - self.frame.origin, ..Default::default() };
+                let Some((gx, gz, height, up)) = t.patch.locate(local) else { return dry(t.patch.up) };
+                match t.sample(gx, gz) {
+                    // Below the water's bed is the ground, or a cave in it.
+                    Some((level, depth, _)) if level - height > depth + 0.5 => return dry(up),
+                    Some((level, _, f)) => {
+                        let (a, b) = t.patch.along(up);
+                        (height - level, up, current + a * f[0] + b * f[1])
+                    }
+                    None => return dry(up),
+                }
+            }
         };
         let dir = |v: DVec3| self.frame.to_world(v) - self.frame.origin;
         // Below the bed is rock, or a cave in it: not this water.

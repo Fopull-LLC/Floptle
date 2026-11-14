@@ -2995,6 +2995,8 @@ impl ScriptHost {
         let water_freeze: Rc<RefCell<Vec<(u32, bool)>>> = Rc::new(RefCell::new(Vec::new()));
         let water_declared: Rc<RefCell<Vec<floptle_core::water::DeclaredWater>>> = Rc::default();
         let water_changed: Rc<RefCell<Vec<u32>>> = Rc::default();
+        let water_sim_cmds: Rc<RefCell<Vec<floptle_core::water::SimCmd>>> = Rc::default();
+        let water_exchanged: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>> = Rc::default();
         crate::water_api::install_water_api(
             &lua,
             crate::water_api::WaterShared {
@@ -3002,6 +3004,8 @@ impl ScriptHost {
                 freeze: water_freeze.clone(),
                 declared: water_declared.clone(),
                 changed: water_changed.clone(),
+                sim_cmds: water_sim_cmds.clone(),
+                exchanged: water_exchanged.clone(),
                 next_id: Rc::default(),
                 colliders: colliders.clone(),
                 sim_origin: sim_origin.clone(),
@@ -3615,6 +3619,8 @@ impl ScriptHost {
             water_freeze,
             water_declared,
             water_changed,
+            water_sim_cmds,
+            water_exchanged,
             scatter_sources,
             scatter_owners,
             scatter_settled,
@@ -4266,6 +4272,21 @@ impl ScriptHost {
         ids.sort_unstable();
         ids.dedup();
         ids
+    }
+
+    /// The holds, releases and water added to tiled sims since the last ask.
+    pub fn take_water_sim_cmds(&self) -> Vec<floptle_core::water::SimCmd> {
+        std::mem::take(&mut *self.water_sim_cmds.borrow_mut())
+    }
+
+    /// Add what a tiled sim's held groups gave to what `water.exchanged`
+    /// hands back, m³ by group.
+    pub fn add_water_exchanged(&self, id: u32, groups: &[(u16, f64)]) {
+        let mut all = self.water_exchanged.borrow_mut();
+        let e = all.entry(id).or_default();
+        for &(g, v) in groups {
+            *e.entry(g).or_insert(0.0) += v;
+        }
     }
 
     /// Drop every declared water — a scene switch, like [`Self::clear_weather`].

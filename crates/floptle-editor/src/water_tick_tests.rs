@@ -283,3 +283,122 @@ end
     assert_eq!(ids.len(), 1, "the lake's id or the count of volumes changed: {ids:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A round world of radius 100 (a static sphere for ground, a celestial for
+/// its pull) with a camera at its equator, and a driver running `script`.
+fn round_world(tag: &str, script: &str) -> (crate::Editor, std::path::PathBuf, floptle_core::Entity) {
+    let (mut ed, dir) = project(tag, script);
+    let planet = node(&mut ed, "Planet", DVec3::ZERO);
+    ed.world.insert(planet, CelestialBody { mu: 9.8e4, body_radius: 100.0, soi: 2000.0, ..Default::default() });
+    ed.world.insert(
+        planet,
+        RigidBody { kind: floptle_core::BodyKind::Sphere, radius: 100.0, mode: floptle_core::BodyMode::Static, ..Default::default() },
+    );
+    camera(&mut ed, DVec3::new(130.0, 0.0, 0.0));
+    (ed, dir, planet)
+}
+
+/// **A sim laid at a round world's equator stands level with the world.**
+/// Filled to 1 m over ground found along each cell's own radial, across a
+/// patch 100 m wide (nine tiles), the water's surface is 101 m from the
+/// centre everywhere, it stays there for 60 s within a centimetre, it
+/// sleeps, and a ball floats on it, where water.at says the surface is.
+#[test]
+fn a_sim_at_a_worlds_equator_stands_level_and_floats_a_ball() {
+    let (mut ed, dir, _) = round_world(
+        "tiled_equator",
+        r#"
+local id, n = nil, 0
+function update(node, dt)
+  n = n + 1
+  if not id then
+    id = water.addVolume{ shape = "sim", parent = "Planet", center = vec3(100, 0, 0), cell = 1.25, size = 100, level = 101 }
+  end
+  local c = perf.counts()
+  log(string.format("W %d %.4f %.4f %d %d %s", n, water.levelOf(id) or 0, water.depthAt(vec3(94.54, 28.36, 18.91)),
+    c.waterAwake or -1, c.waterSolved or -1, tostring(#(water.tiles(id) or {}))))
+end
+"#,
+    );
+    let ball = node(&mut ed, "Ball", DVec3::new(101.6, 10.0, 0.0));
+    ed.world.insert(ball, RigidBody { radius: 0.5, mass: 100.0, ..Default::default() });
+    ed.toggle_play();
+    for _ in 0..1800 {
+        ed.play_step(2.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    }
+    ed.drain_script_logs();
+    let rows: Vec<Vec<String>> = ed
+        .console
+        .entries
+        .iter()
+        .filter_map(|e| e.msg.strip_prefix("W ").map(|l| l.split(' ').skip(1).map(str::to_string).collect()))
+        .collect();
+    let level = |r: &Vec<String>| r[0].parse::<f64>().unwrap();
+    let settled: Vec<f64> = rows.iter().skip(60).map(level).collect();
+    assert!(!settled.is_empty() && settled.iter().all(|l| (l - 101.0).abs() < 0.01), "the water's level wandered: {:?}", &settled[..settled.len().min(20)]);
+    let last = rows.last().unwrap();
+    // 30 m along the ground from the middle, the depth along the radial:
+    // a flat sheet would be 4.5 m out of true there.
+    let p = DVec3::new(94.54, 28.36, 18.91);
+    let want = 101.0 - p.length();
+    let got: f64 = last[1].parse().unwrap();
+    assert!((got - want).abs() < 0.02, "depth {got} at {p}, the surface 101 m out puts it at {want}");
+    assert_eq!(last[2], "0", "level water is still being solved: {last:?}");
+    assert_eq!(last[4], "9", "the patch's nine tiles hold water: {last:?}");
+    let r = floptle_core::world_transform(&ed.world, ball).translation.length();
+    assert!(r > 101.0 && r < 101.5, "the ball is {r} m from the centre, on water whose surface is at 101");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A sim can start dry and be fed from held cells.** Dry at the start,
+/// one row of cells held 0.5 m above the ground: water runs out from them,
+/// the tiles it reaches are made as it reaches them, and water.exchanged
+/// says how much the held row gave, which is the water on the patch.
+#[test]
+fn a_dry_sim_fills_from_held_cells_and_counts_what_they_gave() {
+    let (mut ed, dir, _) = round_world(
+        "tiled_held",
+        r#"
+local id, given, n = nil, 0, 0
+function update(node, dt)
+  n = n + 1
+  if not id then
+    id = water.addVolume{ shape = "sim", parent = "Planet", center = vec3(100, 0, 0), cell = 1, size = 120, level = false }
+    local row = {}
+    for k = -5, 5 do row[#row + 1] = vec3(100, k, 0) end
+    assert(water.hold(id, row, 100.5, 3))
+  end
+  for g, v in pairs(water.exchanged(id)) do
+    assert(g == 3, "a group nobody held gave water")
+    given = given + v
+  end
+  if n % 30 == 0 then
+    log(string.format("X %.4f %d", given, #(water.tiles(id) or {})))
+  end
+end
+"#,
+    );
+    ed.toggle_play();
+    for _ in 0..600 {
+        ed.play_step(1.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    }
+    ed.drain_script_logs();
+    let rows: Vec<(f64, usize)> = ed
+        .console
+        .entries
+        .iter()
+        .filter_map(|e| e.msg.strip_prefix("X ").map(|l| {
+            let mut it = l.split(' ');
+            (it.next().unwrap().parse().unwrap(), it.next().unwrap().parse().unwrap())
+        }))
+        .collect();
+    let (given, tiles) = *rows.last().unwrap();
+    let id = ed.script_host.declared_water()[0].id;
+    let volume = ed.water_sims.tiled[&id].water.volume();
+    assert!(given > 10.0, "the held row gave {given} m³");
+    assert!((given - volume).abs() < 0.01 * volume.max(1.0), "the held row gave {given} m³ for {volume} m³ on the patch");
+    assert!(tiles > 1, "the water never reached past its first tile: {rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

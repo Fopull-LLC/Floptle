@@ -1904,13 +1904,16 @@ function water.flowAt(x, y, z) end
 ---point), or water the engine moves (`shape = "sim"`: the same grid keys and
 ---`level`, the height it is filled to over the ground found under it; it then
 ---flows, drains into holes dug beside it and settles; `springs`, `roughness`
----and `holdEdges` make it a river). It floats things, slows
+---and `holdEdges` make it a river; with `center` instead of `origin` it lies on
+---a round world, each point's up its own radial, `level` a radius or `false`
+---to start dry, ground read from the terrain's field, `size` metres across,
+---stored in tiles only where water is). It floats things, slows
 ---them and carries them on its `current`, and
 ---`water.at` answers for it. `depth` is how far below the surface its bed lies,
 ---so a cave under a lake is dry. From inside it looks like a Water Volume node
 ---(`tint`, `visibility` to change that, `underwater = false` for none). Returns
 ---an id.
----@param opts { shape?: "lake"|"heightfield"|"sim", level?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
+---@param opts { shape?: "lake"|"heightfield"|"sim", level?: number|false, size?: number, depths?: number[], held?: { pos?: Vec3, cell?: integer[], level?: number, group?: integer }[], solver?: "swe"|"pipes", budget?: number, flat?: boolean, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
 ---@return integer
 function water.addVolume(opts) end
 ---Every place simulated water pours off a drop of more than 1.5 m, in the
@@ -1925,9 +1928,37 @@ function water.falls(id) end
 ---what its centre reaches without crossing the ground, out to a ring under the
 ---shore. `uvs` are metres across the surface. nil for no such water.
 ---@param id integer
----@param opts? { cells?: integer }
+---A sim laid with a `center` is its wet points only; `tile` (a key from
+---`water.tiles`) is one tile of it.
+---@param opts? { cells?: integer, tile?: integer }
 ---@return { positions: number[], normals: number[], uvs: number[], indices: integer[] }|nil
 function water.surface(id, opts) end
+---Hold points of a sim laid with a `center` at `level` (a radius on a round
+---world): the sea at a coast, a lake at its live level. What they give or take
+---is counted in `group` (1 by default) for `water.exchanged`. `cells` is a list
+---of points in the parent's frame, or `{i, j}` columns and rows from the
+---patch's corner counted from 0, or one point.
+---@param id integer
+---@param cells Vec3|Vec3[]|integer[][]
+---@param level number
+---@param group? integer
+---@return boolean
+function water.hold(id, cells, level, group) end
+---Let held points of a sim go: the water there flows again.
+---@param id integer
+---@param cells Vec3|Vec3[]|integer[][]
+---@return boolean
+function water.release(id, cells) end
+---What each group of held points gave the water since the last ask, m³
+---(negative: what it took).
+---@param id integer
+---@return table<integer, number>
+function water.exchanged(id) end
+---The tiles of a sim laid with a `center` that hold water, 32 × 32 points
+---each; a tile's `serial` changes only when its water does.
+---@param id integer
+---@return { key: integer, serial: integer, i: integer, j: integer }[]|nil
+function water.tiles(id) end
 ---Move the surface of water `water.addVolume` declared, in place: its id,
 ---look, density, drag, current and depth stay, and the physics floats things on
 ---the new level from the next tick. A lake's `level` is its surface's radius

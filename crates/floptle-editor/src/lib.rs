@@ -292,6 +292,7 @@ mod rig_overrides;
 mod scatter_draw;
 mod weather;
 mod water_pose;
+mod water_tiled;
 mod scene_ops;
 mod space;
 mod script_actions;

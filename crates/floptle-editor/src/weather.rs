@@ -53,6 +53,8 @@ pub(crate) struct WaterSims {
     /// Where each body of water the solver holds gets its pose from, read
     /// every tick: see `water_pose.rs`.
     pub(crate) posers: Vec<crate::water_pose::WaterPoser>,
+    /// Tiled sims (declared with a `center`), by volume id.
+    pub(crate) tiled: std::collections::HashMap<u32, crate::water_tiled::TiledSim>,
 }
 
 struct WaterSim {
@@ -237,6 +239,10 @@ impl crate::Editor {
                 Surface::Grid(std::sync::Arc::new(HeightGrid { levels, flow, ..(**g).clone() })),
             );
         }
+        drop(lent);
+        let (awake, solved, tiles) = self.step_tiled_sims(dt);
+        let simple: (usize, usize) = self.water_sims.sims.values().fold((0, 0), |(a, s), w| (a + w.water.awake_count(), s + w.water.solved_count()));
+        self.script_host.profile().borrow_mut().set_water_counts(awake * floptle_core::water::TILE * floptle_core::water::TILE + simple.0, solved + simple.1, tiles);
     }
 }
 
