@@ -353,8 +353,9 @@ end
 
 /// **A sim can start dry and be fed from held cells.** Dry at the start,
 /// one row of cells held 0.5 m above the ground: water runs out from them,
-/// the tiles it reaches are made as it reaches them, and water.exchanged
-/// says how much the held row gave, which is the water on the patch.
+/// the tiles it reaches are made as it reaches them, and water.filled says
+/// how much the held row gave, which is the water on the patch. None of it
+/// is an exchange: the row is still filling the ground it was held over.
 #[test]
 fn a_dry_sim_fills_from_held_cells_and_counts_what_they_gave() {
     let (mut ed, dir, _) = round_world(
@@ -369,10 +370,11 @@ function update(node, dt)
     for k = -5, 5 do row[#row + 1] = vec3(100, k, 0) end
     assert(water.hold(id, row, 100.5, 3))
   end
-  for g, v in pairs(water.exchanged(id)) do
+  for g, v in pairs(water.filled(id)) do
     assert(g == 3, "a group nobody held gave water")
     given = given + v
   end
+  assert(next(water.exchanged(id)) == nil, "filling dry ground from newly held points was counted as an exchange")
   if n % 30 == 0 then
     log(string.format("X %.4f %d", given, #(water.tiles(id) or {})))
   end

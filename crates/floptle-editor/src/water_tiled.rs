@@ -174,6 +174,7 @@ impl crate::Editor {
                 water.min_depth = t.min_depth;
                 water.soak = t.soak;
                 water.soak_below = t.soak_below;
+                water.still_depth = t.still_depth;
                 for &(cell, q) in &spec.springs {
                     water.set_spring(cell % p.columns, cell / p.columns, q);
                 }
@@ -338,6 +339,7 @@ impl crate::Editor {
             counts.2 += s.water.tile_count();
             let surface = s.water.surface();
             let exchanged = s.water.take_exchanged();
+            let filled = s.water.take_filled();
             let falls: Vec<floptle_core::water::WaterFall> = s
                 .water
                 .falls(1.5)
@@ -362,6 +364,9 @@ impl crate::Editor {
             }
             if !exchanged.is_empty() {
                 self.script_host.add_water_exchanged(w.id, &exchanged);
+            }
+            if !filled.is_empty() {
+                self.script_host.add_water_filled(w.id, &filled);
             }
             self.script_host.set_water_surface(w.id, Surface::Tiles(std::sync::Arc::new(surface)));
         }

@@ -3009,6 +3009,7 @@ impl ScriptHost {
         let water_changed: Rc<RefCell<Vec<u32>>> = Rc::default();
         let water_sim_cmds: Rc<RefCell<Vec<floptle_core::water::SimCmd>>> = Rc::default();
         let water_exchanged: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>> = Rc::default();
+        let water_filled: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>> = Rc::default();
         let water_splashes: Rc<RefCell<std::collections::VecDeque<floptle_physics::splash::Splash>>> = Rc::default();
         let water_wet: Rc<RefCell<(f64, HashMap<u32, f64>)>> = Rc::default();
         let water_slam: Rc<RefCell<HashMap<u32, f32>>> = Rc::default();
@@ -3021,6 +3022,7 @@ impl ScriptHost {
                 changed: water_changed.clone(),
                 sim_cmds: water_sim_cmds.clone(),
                 exchanged: water_exchanged.clone(),
+                filled: water_filled.clone(),
                 splashes: water_splashes.clone(),
                 wet: water_wet.clone(),
                 slam: water_slam.clone(),
@@ -3645,6 +3647,7 @@ impl ScriptHost {
             water_changed,
             water_sim_cmds,
             water_exchanged,
+            water_filled,
             water_splashes,
             water_wet,
             water_slam,
@@ -4330,6 +4333,16 @@ impl ScriptHost {
     /// hands back, m³ by group.
     pub fn add_water_exchanged(&self, id: u32, groups: &[(u16, f64)]) {
         let mut all = self.water_exchanged.borrow_mut();
+        let e = all.entry(id).or_default();
+        for &(g, v) in groups {
+            *e.entry(g).or_insert(0.0) += v;
+        }
+    }
+
+    /// Add what a tiled sim's held groups gave to fill the ground under
+    /// newly held points to what `water.filled` hands back, m³ by group.
+    pub fn add_water_filled(&self, id: u32, groups: &[(u16, f64)]) {
+        let mut all = self.water_filled.borrow_mut();
         let e = all.entry(id).or_default();
         for &(g, v) in groups {
             *e.entry(g).or_insert(0.0) += v;

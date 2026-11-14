@@ -77,6 +77,9 @@ pub(crate) struct WaterShared {
     /// What each tiled sim's held groups have given since `water.exchanged`
     /// last asked, m³, by volume and group.
     pub exchanged: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>>,
+    /// What they gave to fill the ground under newly held points since
+    /// `water.filled` last asked, the same way.
+    pub filled: Rc<RefCell<std::collections::HashMap<u32, std::collections::BTreeMap<u16, f64>>>>,
     /// Water entries and exits since `water.splashes` last asked, oldest
     /// first, at most 64.
     pub splashes: Rc<RefCell<std::collections::VecDeque<floptle_physics::splash::Splash>>>,
@@ -144,7 +147,8 @@ fn surface_stamp(surface: &Surface) -> u64 {
                 h.write_u32(f[1].to_bits());
             }
         }
-        // A tile's serial moves whenever its water does.
+        // A tile's serial moves when its surface has, by more than the sim's
+        // `stillDepth`.
         Surface::Tiles(t) => {
             let mut tiles: Vec<(u32, u64)> = t.tiles.iter().map(|(k, l)| (*k, l.serial)).collect();
             tiles.sort_unstable();
@@ -510,7 +514,7 @@ fn push_quads(out: &mut Vec<u32>, index: &[u32], columns: usize, rows: usize) {
 pub(crate) const VOLUME_KEYS: &[&str] = &[
     "shape", "parent", "center", "radius", "reach", "origin", "cell", "columns", "rows", "levels", "flow",
     "density", "drag", "angularDrag", "current", "depth", "tint", "visibility", "underwater", "level",
-    "roughness", "springs", "holdEdges", "size", "depths", "held", "solver", "flat", "budget", "state", "minDepth", "soak", "soakBelow",
+    "roughness", "springs", "holdEdges", "size", "depths", "held", "solver", "flat", "budget", "state", "minDepth", "soak", "soakBelow", "stillDepth",
 ];
 
 /// The most cells a tiled sim may span, held or not: 4,096 a side.
@@ -792,6 +796,10 @@ fn tiled_from(opts: &Table, call: &str) -> mlua::Result<(Surface, floptle_core::
     let min_depth = num("minDepth").unwrap_or(1e-3).max(1e-5) as f32;
     let soak = num("soak").unwrap_or(0.0).max(0.0) as f32;
     let soak_below = num("soakBelow").unwrap_or(0.01).max(0.0) as f32;
+    let still_depth = num("stillDepth").unwrap_or(5e-4);
+    if !(0.0..=0.1).contains(&still_depth) {
+        return Err(err("`stillDepth` is the surface change that counts, in metres: 0 to 0.1 (0.0005 by default)"));
+    }
     let spec = SimSpec {
         level: level as f32,
         roughness: roughness as f32,
@@ -810,6 +818,7 @@ fn tiled_from(opts: &Table, call: &str) -> mlua::Result<(Surface, floptle_core::
             min_depth,
             soak,
             soak_below,
+            still_depth: still_depth as f32,
         }),
     };
     let surface = Surface::Tiles(std::sync::Arc::new(TiledSurface { patch, tiles: Default::default() }));
@@ -1326,8 +1335,29 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
         }
     }
 
+    // water.filled(id) → { [group] = m³ }: what each group gave to fill the
+    // ground under newly held cells, from when they were first held until
+    // the group came to rest, since the last ask. Counted apart from
+    // water.exchanged, so a lake started dry from held points does not read
+    // as a lake draining.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |lua, id: u32| {
+            let out = lua.create_table()?;
+            if let Some(groups) = s.filled.borrow_mut().remove(&id) {
+                for (g, v) in groups {
+                    out.raw_set(g, v)?;
+                }
+            }
+            Ok(out)
+        }) {
+            let _ = t.set("filled", f);
+        }
+    }
+
     // water.tiles(id) → { { key, serial, i, j }, ... }: a tiled sim's tiles
-    // holding water, each with a serial that changes when its water does.
+    // holding water, each with a serial that moves when its surface has
+    // moved by more than `stillDepth`.
     {
         let s = shared.clone();
         if let Ok(f) = lua.create_function(move |lua, id: u32| {
@@ -1601,6 +1631,7 @@ mod tests {
             changed: Rc::default(),
             sim_cmds: Rc::default(),
             exchanged: Rc::default(),
+            filled: Rc::default(),
             splashes: Rc::default(),
             wet: Rc::default(),
             slam: Rc::default(),
@@ -2040,6 +2071,7 @@ mod tests {
             let sim = d[0].simulated.as_ref().unwrap();
             let t = sim.tiled.as_ref().expect("a tiled sim");
             assert!(!t.fill && !t.pipes);
+            assert_eq!(t.still_depth, 5e-4, "the surface change that counts is half a millimetre unless `stillDepth` says");
             assert_eq!((t.patch.columns, t.patch.rows), (513, 513));
             assert_eq!(t.patch.radius, Some(800.0));
             assert_eq!(t.held, vec![floptle_core::water::HeldCell { i: 256, j: 256, level: 801.0, group: 4 }]);
@@ -2063,6 +2095,13 @@ mod tests {
         let (given, again): (f64, bool) =
             lua.load(format!("local e = water.exchanged({id}) return e[4], next(water.exchanged({id})) == nil")).eval().unwrap();
         assert!(given == -2.5 && again, "{given} {again}");
+        // What filled the ground under newly held points is counted apart.
+        shared.filled.borrow_mut().entry(id).or_default().insert(4, 40.0);
+        let (fill, exchanged, again): (f64, bool, bool) = lua
+            .load(format!("local e = next(water.exchanged({id})) == nil local f = water.filled({id}) return f[4], e, next(water.filled({id})) == nil"))
+            .eval()
+            .unwrap();
+        assert!(fill == 40.0 && exchanged && again, "{fill} {exchanged} {again}");
         // A tile of water as the engine hands it back.
         let mut level = vec![f32::NAN; floptle_core::water::TILE * floptle_core::water::TILE];
         for c in [0, 1, floptle_core::water::TILE, floptle_core::water::TILE + 1] {
