@@ -186,6 +186,8 @@ mod assembly_script_tests;
 #[cfg(test)]
 mod arrival_tests;
 #[cfg(test)]
+mod quality_change_tests;
+#[cfg(test)]
 mod tick_overload_tests;
 #[cfg(test)]
 mod underwater_look_tests;

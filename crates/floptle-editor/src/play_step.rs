@@ -1739,21 +1739,25 @@ impl Editor {
         // Prefab spawns + node destroys scripts queued this frame — applied
         // before attachments/particles so a spawned node is complete (body,
         // meshes, callback-configured) within this same frame.
-        self.apply_script_spawns();
+        //
+        // Each piece of the settle is named inside `untimed` for what no
+        // bucket measured of it, so a slow settle says which piece it was;
+        // `frameSettle` keeps only what none of them names.
+        self.timed_wait("scriptSpawns", |ed| ed.apply_script_spawns());
         // A celestial a script made this frame is listed in `space.*` before the
         // next frame's scripts run, whether or not that frame runs a tick. Its
         // terrain can land and answer a raycast on a frame with no tick, and a
         // game that sites something off that raycast found no body under it.
-        self.refresh_space_listing();
+        self.timed_wait("spaceListing", |ed| ed.refresh_space_listing());
         // Scatter prototypes: resolved here, before the frame's GPU borrow,
         // because baking a prefab imports models and that needs `&mut self`.
-        self.bake_scatter_prototypes();
+        self.timed_wait("scatterBake", |ed| ed.bake_scatter_prototypes());
         // Bone attachments resolve after physics: physics moves the mesh root (a
         // character body), while animation only bent the bones — so a weapon on a
         // bone must read the post-physics mesh world or it swims a frame behind.
         // Spring bones swing on the post-physics root too, and before the
         // attachments read the bones, so a clip on a braid rides the braid.
-        self.publish_query_meshing();
+        self.timed_wait("queryMeshing", |ed| ed.publish_query_meshing());
         // Some of the script collector's work, between frames, rather than
         // all of it inside whichever hook allocates when it falls due.
         self.timed_into(floptle_core::profile::Bucket::Scripts, |ed| ed.script_host.step_gc(GC_BUDGET_MS));
@@ -1766,7 +1770,7 @@ impl Editor {
             p.record(floptle_core::profile::Bucket::Animation, ms);
             p.record_part("springBones", ms);
         }
-        anim::resolve_attachments(&self.anim, &mut self.world, &self.mesh_registry);
+        self.timed_wait("attachments", |ed| anim::resolve_attachments(&ed.anim, &mut ed.world, &ed.mesh_registry));
         // 2D cameras follow after all of that, for the same reason bone
         // attachments do: a camera chasing a player has to read where the
         // player ended up this frame, not where they started it.
@@ -1780,7 +1784,9 @@ impl Editor {
         } else {
             self.gpu.as_ref().map(|g| g.config.height as f32)
         };
-        floptle_core::camera2d::step_all_screen(&mut self.world, sdt, self.play_t as f64, Some(aspect), screen_px);
+        self.timed_wait("cameras2d", |ed| {
+            floptle_core::camera2d::step_all_screen(&mut ed.world, sdt, ed.play_t as f64, Some(aspect), screen_px)
+        });
         // Particles tick last: emitter node transforms are final for the frame
         // (scripts → animation → physics → attachments → particles). Apply any
         // play/stop/restart a script queued this frame first, so it lands now.
@@ -1897,7 +1903,7 @@ impl Editor {
         // the click reads as one that did not work. `app.quit()` lands here
         // too, which is why it is after everything else this step wanted to
         // do rather than in the middle of it.
-        self.apply_app_requests();
+        self.timed_wait("appSettings", |ed| ed.apply_app_requests());
     }
 
     /// GPU-load models a script swapped via `node.model` so they render this
@@ -2292,6 +2298,30 @@ const GC_BUDGET_MS: f32 = 0.5;
 
 #[cfg(test)]
 mod frame_phase_tests {
+    /// The pieces of a frame's settle that are named on their own.
+    const SETTLE_PIECES: [&str; 7] =
+        ["scriptSpawns", "spaceListing", "scatterBake", "queryMeshing", "attachments", "cameras2d", "appSettings"];
+
+    /// **A named piece inside a phase is not counted into the phase as
+    /// well.** A wait timed inside another takes its time out of the outer
+    /// one, so `frameSettle` is what none of its pieces named and the parts
+    /// inside `untimed` still add up to it.
+    #[test]
+    fn a_piece_named_inside_a_phase_is_taken_out_of_the_phase() {
+        let mut ed = crate::Editor::default();
+        ed.script_host.profile().borrow_mut().enable(true);
+        ed.script_host.profile().borrow_mut().begin_frame();
+        ed.timed_wait("frameSettle", |ed| {
+            ed.timed_wait("appSettings", |_| std::thread::sleep(std::time::Duration::from_millis(30)));
+        });
+        ed.end_profile_frame();
+        let p = ed.script_host.profile().borrow();
+        let r = p.recent_frames(1).next().expect("a frame");
+        let part = |name: &str| r.parts.iter().find(|(n, _)| *n == name).map(|(_, ms)| *ms).unwrap_or(-1.0);
+        assert!(part("appSettings") >= 29.0, "the piece was not timed: {:?}", r.parts);
+        assert!((0.0..10.0).contains(&part("frameSettle")), "the phase counted its piece again: {:?}", r.parts);
+    }
+
     /// **Every phase of a play frame is named inside `untimed`** (card
     /// 0696): whatever of the frame feed, the scripts, the ticks, the late
     /// pass and the settle no bucket measured is a part of its own, so a slow
@@ -2312,6 +2342,11 @@ mod frame_phase_tests {
         // …and the spring bones' pass, named whether or not anything swung.
         for phase in ["frameFeed", "frameScripts", "frameTicks", "frameLate", "frameSettle", "springBones"] {
             assert!(r.parts.iter().any(|(n, _)| *n == phase), "{phase} is not named: {:?}", r.parts);
+        }
+        // …and the pieces of the settle, each by its own name, so a settle
+        // that stops a frame says which of them it was.
+        for piece in SETTLE_PIECES {
+            assert!(r.parts.iter().any(|(n, _)| *n == piece), "{piece} is not named: {:?}", r.parts);
         }
     }
 }

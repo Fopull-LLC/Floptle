@@ -718,6 +718,8 @@ pub(crate) fn render_frame_pixels(
     // frames `--after` played were never drawn, and drawing is when props
     // settle, so the field is settled whole for this one.
     ed.scatter_cache.settle_all = true;
+    // …and none for a texture-quality change to finish over either.
+    ed.finish_texture_requality();
     let color = crate::capture::render_frame_texture(ed, cam, stack_of, w, h, cull_mask, ui, true);
     ed.scatter_cache.settle_all = false;
     let color = color?;

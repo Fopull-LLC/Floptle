@@ -4554,6 +4554,26 @@ impl Raster {
         self.repool_replaced(gpu, id, data);
     }
 
+    /// [`Self::replace_texture`] with the picture's levels worked out ahead
+    /// ([`PreparedTexture`]), so the frame only hands bytes to the GPU: the
+    /// way to bring many pictures to a new texture quality without stopping
+    /// a frame to filter each one. The same bytes land as `replace_texture`
+    /// writes. `false`, and nothing changed, when the levels were prepared
+    /// for another quality or another sampling than the texture has now.
+    pub fn replace_texture_prepared(&mut self, gpu: &Gpu, id: TexId, prepared: &PreparedTexture) -> bool {
+        let Some(sampling) = self.textures.get(id.0 as usize).map(|t| t.sampling) else { return false };
+        let mips = matches!(sampling.filter, TexFilter::SmoothMipmaps);
+        if mips != prepared.mips || (mips && (prepared.drop != self.texture_drop || prepared.coverage != sampling.coverage)) {
+            return false;
+        }
+        let Some(&(w0, h0, _)) = prepared.levels.first() else { return false };
+        let texture = picture_texture(gpu, w0, h0, prepared.levels.len() as u32);
+        write_levels(gpu, &texture, 0, &prepared.levels);
+        self.textures[id.0 as usize] = self.tex_bind_from(gpu, texture, sampling);
+        self.repool_replaced_levels(gpu, id, &prepared.levels);
+        true
+    }
+
     /// The bytes every picture on the GPU holds, mip chains included, each
     /// counted once however many materials share it: material textures,
     /// model pictures and render targets.
@@ -6083,8 +6103,21 @@ fn upload_texture_mips(gpu: &Gpu, t: &TextureData, gen_mips: bool, drop: u32, co
     let t = smaller.as_ref().unwrap_or(t);
     let w0 = t.width.max(1);
     let h0 = t.height.max(1);
-    let mip_count = if gen_mips { 1 + (w0.max(h0) as f32).log2().floor() as u32 } else { 1 };
-    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+    let mip_count = if gen_mips { full_mip_count(w0, h0) } else { 1 };
+    let texture = picture_texture(gpu, w0, h0, mip_count);
+    write_mip_chain(gpu, &texture, 0, t, mip_count, coverage);
+    texture
+}
+
+/// How many levels a full mip chain under a `w0` by `h0` picture has,
+/// level 0 counted.
+fn full_mip_count(w0: u32, h0: u32) -> u32 {
+    1 + (w0.max(h0) as f32).log2().floor() as u32
+}
+
+/// An empty sRGB picture on the GPU, `mip_count` levels deep.
+fn picture_texture(gpu: &Gpu, w0: u32, h0: u32, mip_count: u32) -> wgpu::Texture {
+    gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("raster-basecolor"),
         size: wgpu::Extent3d { width: w0, height: h0, depth_or_array_layers: 1 },
         mip_level_count: mip_count.max(1),
@@ -6097,9 +6130,61 @@ fn upload_texture_mips(gpu: &Gpu, t: &TextureData, gen_mips: bool, drop: u32, co
         // So the same pixels can also be read raw, for the surface maps that are
         // data rather than colour. See `TexBind::linear_view`.
         view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
-    });
-    write_mip_chain(gpu, &texture, 0, t, mip_count, coverage);
-    texture
+    })
+}
+
+/// A picture's levels as the GPU will hold them, worked out ahead of the
+/// upload: the top levels a lower texture quality leaves out already cut,
+/// and the mip chain already filtered. Needs no GPU, so a worker thread can
+/// build one, and the frame that uploads it ([`Raster::replace_texture_prepared`])
+/// only copies bytes. Filtering a 2048-texel picture's chain is tens of
+/// milliseconds; done on the frame for every picture a game has loaded, a
+/// texture-quality change stopped it for seconds.
+pub struct PreparedTexture {
+    /// Level 0 and, for a mipmapped picture, every level under it: width,
+    /// height, RGBA8 pixels.
+    levels: Vec<(u32, u32, Vec<u8>)>,
+    /// What the levels were prepared for: an upload at anything else would
+    /// not be the picture [`Raster::replace_texture`] makes.
+    drop: u32,
+    mips: bool,
+    coverage: AlphaCoverage,
+}
+
+impl PreparedTexture {
+    /// The levels of `data` for a texture sampled as `sampling` says, at
+    /// texture quality `drop` (see [`Raster::set_texture_quality`]).
+    pub fn new(data: TextureData, sampling: TexSampling, drop: u32) -> Self {
+        let drop = drop.min(2);
+        let mips = matches!(sampling.filter, TexFilter::SmoothMipmaps);
+        let coverage = sampling.coverage;
+        let t = if mips && drop > 0 { drop_top_mips(&data, drop) } else { None }.unwrap_or(data);
+        let (w0, h0) = (t.width.max(1), t.height.max(1));
+        let mip_count = if mips { full_mip_count(w0, h0) } else { 1 };
+        let under = if mip_count > 1 { mip_levels(&t, mip_count, coverage) } else { Vec::new() };
+        let mut levels = Vec::with_capacity(mip_count as usize);
+        levels.push((w0, h0, t.pixels));
+        levels.extend(under);
+        Self { levels, drop, mips, coverage }
+    }
+}
+
+/// Write ready-made `levels` (width, height, RGBA8 pixels, level 0 first)
+/// into layer `layer` of `texture`.
+pub(crate) fn write_levels(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, levels: &[(u32, u32, Vec<u8>)]) {
+    for (level, (w, h, pixels)) in levels.iter().enumerate() {
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: level as u32,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(*h) },
+            wgpu::Extent3d { width: *w, height: *h, depth_or_array_layers: 1 },
+        );
+    }
 }
 
 /// Write `t` and, past level 0, its box-filtered mips into layer `layer` of
@@ -6665,6 +6750,35 @@ mod texture_quality_tests {
         let four = drop_top_mips(&pic(2048, 2048), 2).unwrap();
         assert_eq!((four.width, four.height), (512, 512));
         assert!(drop_top_mips(&pic(300, 300), 2).is_none(), "a small picture was cut");
+    }
+
+    /// **Levels prepared ahead are the levels an upload makes.** A picture
+    /// prepared for a quality holds what [`upload_texture_mips`] writes at
+    /// that quality: the cut picture as level 0 and its filtered chain under
+    /// it. A pixel-art picture is one level, whole, whatever the quality.
+    #[test]
+    fn levels_prepared_ahead_are_the_levels_an_upload_writes() {
+        let mut seed = 7u32;
+        let pixels: Vec<u8> = (0..1024 * 512 * 4)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 24) as u8
+            })
+            .collect();
+        let pic = TextureData { pixels, width: 1024, height: 512 };
+        let smooth = TexSampling { filter: TexFilter::SmoothMipmaps, ..Default::default() };
+        for drop in 0..3 {
+            let p = PreparedTexture::new(pic.clone(), smooth, drop);
+            let cut = drop_top_mips(&pic, drop).unwrap_or_else(|| pic.clone());
+            let count = full_mip_count(cut.width, cut.height);
+            let mut want = vec![(cut.width, cut.height, cut.pixels.clone())];
+            want.extend(mip_levels(&cut, count, smooth.coverage));
+            assert_eq!(p.levels.len() as u32, count, "quality {drop}: the chain is not whole");
+            assert!(p.levels == want, "quality {drop}: the prepared levels are not the uploaded ones");
+        }
+        assert_eq!(PreparedTexture::new(pic.clone(), smooth, 1).levels[0].0, 512, "Medium did not halve the picture");
+        let pixel = PreparedTexture::new(pic.clone(), TexSampling::default(), 2);
+        assert!(pixel.levels.len() == 1 && pixel.levels[0].2 == pic.pixels, "a pixel-art picture was cut or filtered");
     }
 }
 
