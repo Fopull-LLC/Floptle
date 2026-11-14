@@ -4272,6 +4272,11 @@ pub struct MaterialDoc {
     /// Absent is both sides, as always.
     #[serde(default = "true_bool", skip_serializing_if = "is_true")]
     pub double_sided: bool,
+    /// Counts as a surface the scene is seen through (see
+    /// [`floptle_core::Material::surface_depth`]). Absent is yes, so a scene
+    /// that never set it keeps its bytes.
+    #[serde(default = "true_bool", skip_serializing_if = "is_true")]
+    pub surface_depth: bool,
     /// Opaque, cutout or blended (see [`floptle_core::BlendMode`]). Always
     /// written. Absent in a scene from before the setting, where it reads as
     /// what the material meant then: blended below full opacity, otherwise
@@ -4620,6 +4625,7 @@ impl MaterialDoc {
             source: self.source.clone(),
             alpha_cutoff: self.alpha_cutoff.clamp(0.0, 1.0),
             double_sided: self.double_sided,
+            surface_depth: self.surface_depth,
             blend: self.blend_resolved(),
             faded_from: None,
         }
@@ -4675,6 +4681,7 @@ impl MaterialDoc {
             source: m.source.clone(),
             alpha_cutoff: m.alpha_cutoff,
             double_sided: m.double_sided,
+            surface_depth: m.surface_depth,
             blend: Some(BlendDoc::from_mode(m.blend)),
         }
     }
@@ -7608,5 +7615,30 @@ mod audio_source_format_tests {
         set.params.listener_space = true;
         let back: floptle_audio::AudioSource = ron::from_str(&ron::to_string(&set).unwrap()).unwrap();
         assert_eq!(back, set, "the options do not survive a save");
+    }
+}
+
+#[cfg(test)]
+mod surface_depth_doc_tests {
+    use super::MaterialDoc;
+
+    /// **A material saved before `surface_depth` loads as it drew, and one
+    /// that never set it writes nothing new.** Every blended surface counted
+    /// as something the scene is seen through; the setting only takes one
+    /// out, so an old file reads as on and saving it again grows no key. A
+    /// material that turns it off keeps that through a save and a load.
+    #[test]
+    fn an_old_material_counts_as_a_surface_and_keeps_its_file() {
+        let old: MaterialDoc = ron::from_str("(color: (0.1, 0.3, 0.9), alpha: 0.5)").expect("an old material parses");
+        assert!(old.surface_depth, "an old file's material lost its place among the see-through surfaces");
+        assert!(old.to_material().surface_depth);
+        let text = ron::to_string(&MaterialDoc::from_material(&old.to_material())).unwrap();
+        assert!(!text.contains("surface_depth"), "a material that never set it grew a key: {text}");
+
+        let off = floptle_core::Material { surface_depth: false, ..old.to_material() };
+        let text = ron::to_string(&MaterialDoc::from_material(&off)).unwrap();
+        assert!(text.contains("surface_depth:false"), "the setting was not written: {text}");
+        let back: MaterialDoc = ron::from_str(&text).unwrap();
+        assert!(!back.to_material().surface_depth, "the setting did not survive a save and a load");
     }
 }

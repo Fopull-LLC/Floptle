@@ -80,6 +80,7 @@ fn main() {
         eye: [0.0; 3],
         water_depth: 0.0,
         sky: None,
+        surface_depth: None,
     };
     let base = PostSettings {
         bloom: false,

@@ -204,13 +204,16 @@ pub static OPS: &[OpSpec] = &[
     // an edge detect, a blur and a warp possible at all, and no varying could
     // offer it.
     OpSpec { name: "sceneColor", inputs: &[opt("uv", V2, f64::NAN)], output: V4, stages: FRAGPOST, emit: Emit::Special, doc: "The frame so far, in real light (a bright light really is brighter than 1). Omit uv for this pixel. On a surface it is the scene BEHIND the surface (the surface is drawn after the rest is captured, as glass is), and uv is a screen position: screenUv(worldPos) plus a bend is refraction.", category: "screen" },
-    OpSpec { name: "sceneDepth", inputs: &[opt("uv", V2, f64::NAN)], output: F, stages: FRAGPOST, emit: Emit::Special, doc: "How far the camera is from what it sees, in world units. Sky reads a very large number, so a silhouette is an edge. On a surface it is the solid scene behind it (water and glass are not in it), so sceneDepth() - length(worldPos) (worldPos is measured from the camera) is how much water the view ray crosses.", category: "screen" },
+    OpSpec { name: "sceneDepth", inputs: &[opt("uv", V2, f64::NAN)], output: F, stages: FRAGPOST, emit: Emit::Special, doc: "How far away what the camera sees is, in world units. In a screen shader it is measured along the camera's axis (view depth), the same for every pixel of a wall the camera faces: use scenePosition for the world point and sceneDistance for the distance along the pixel's ray. Sky reads a very large number (1e6 in a screen shader, 1e9 on a surface), so a silhouette is an edge. On a surface it is the distance along the view ray to the solid scene behind it (water and glass are not in it), so sceneDepth() - length(worldPos) (worldPos is measured from the camera) is how much water the view ray crosses.", category: "screen" },
     OpSpec { name: "skyRadiance", inputs: &[req("dir", V3), opt("roughness", F, 0.0)], output: V3, stages: FRAGPOST, emit: Emit::Fn("env_radiance"), doc: "The sky as the engine captured it this frame, seen along dir (a world direction), in real light: what a surface reflects. roughness 0 is a mirror's sharp sky, 1 a matte blur of it. Black where nothing is captured. Water reflects skyRadiance(reflect(-viewDir, n)). In a screen shader too: skyRadiance(sceneRay()) is the sky behind the pixel, for a wet sheen or the view up through a water surface.", category: "screen" },
     OpSpec { name: "screenUv", inputs: &[req("p", V3)], output: V2, stages: FRAG, emit: Emit::Fn("flsl_frag_uv_of"), doc: "Where world point p lands on the screen, 0..1 with y down: the uv sceneColor and sceneDepth take. screenUv(worldPos) is this pixel.", category: "screen" },
     OpSpec { name: "sceneNormal", inputs: &[opt("uv", V2, f64::NAN)], output: V3, stages: POSTONLY, emit: Emit::Special, doc: "Which way the surface faces, in view space (+z toward the camera) — worked out from depth, so every kind of geometry has one.", category: "screen" },
-    OpSpec { name: "sceneRay", inputs: &[opt("uv", V2, f64::NAN)], output: V3, stages: POSTONLY, emit: Emit::Special, doc: "The world-space direction the camera looks through at this pixel, unit length. With cameraPosition and sceneDepth it places a pixel in the world: a sky or atmosphere pass, height fog, a world-space grid.", category: "screen" },
+    OpSpec { name: "sceneRay", inputs: &[opt("uv", V2, f64::NAN)], output: V3, stages: POSTONLY, emit: Emit::Special, doc: "The world-space direction the camera looks through at this pixel, unit length: a sky or atmosphere pass by direction. With cameraPosition and sceneDistance it places a pixel in the world (scenePosition is that point, ready made).", category: "screen" },
     OpSpec { name: "cameraPosition", inputs: &[], output: V3, stages: POSTONLY, emit: Emit::Fn("flsl_post_camera"), doc: "Where the camera is in the world. Far from the origin this is coarse (it is 32-bit); measure heights from a nearby point, not from zero.", category: "screen" },
     OpSpec { name: "sceneWaterDepth", inputs: &[], output: F, stages: POSTONLY, emit: Emit::Fn("flsl_post_water_depth"), doc: "How far under the water's surface the camera is, in world units; 0 in air. It reads every Water Volume and all water a script declared, whether or not that water draws the engine's own underwater look, so an underwater pass needs no uniform to know it is under.", category: "screen" },
+    OpSpec { name: "scenePosition", inputs: &[opt("uv", V2, f64::NAN)], output: V3, stages: POSTONLY, emit: Emit::Special, doc: "The world point a pixel shows, worked out from depth: right at every pixel, for perspective and orthographic cameras alike. 32-bit like cameraPosition, so far from the origin subtract a nearby point (cameraPosition, a planet's centre) before using it finely. On sky it is a point a very long way along the pixel's ray.", category: "screen" },
+    OpSpec { name: "sceneDistance", inputs: &[opt("uv", V2, f64::NAN)], output: F, stages: POSTONLY, emit: Emit::Special, doc: "How far along the pixel's ray what it shows is, in world units: cameraPosition() + sceneRay() * sceneDistance() is the point. sceneDepth in a screen shader is measured along the camera's axis instead, so the two agree only at the centre of the view. Sky reads a very large number.", category: "screen" },
+    OpSpec { name: "sceneSurfaceDepth", inputs: &[opt("uv", V2, f64::NAN)], output: F, stages: POSTONLY, emit: Emit::Special, doc: "The depth of the nearest see-through surface drawn over the pixel (a water sheet, glass, ice, any blended material), measured as sceneDepth is in a screen shader: along the camera's axis. Where the pixel is seen through nothing it reads 2e6, past the sky's 1e6, so step(sceneSurfaceDepth(), sceneDepth()) is 1 on ground seen through water and 0 on bare ground and bare sky. Particles never count, and a material leaves itself out with surfaceDepth = false.", category: "screen" },
     OpSpec { name: "screenTexel", inputs: &[], output: V2, stages: POSTONLY, emit: Emit::Fn("flsl_post_texel"), doc: "The size of one pixel in uv. Step by this to reach a neighbour — and it follows the retro resolution, so an effect stays one pixel wide.", category: "screen" },
 ];
 
@@ -225,6 +228,22 @@ pub const CATEGORIES: &[&str] = &["math", "noise", "color", "texture", "sdf", "e
 /// Look up an op by its `.flsl` name.
 pub fn op(name: &str) -> Option<&'static OpSpec> {
     OPS.iter().find(|o| o.name == name)
+}
+
+/// Ops whose name a shader's own value (a `let`, a uniform, a texture slot)
+/// may also carry.
+///
+/// A value may not take an op's name, which keeps `noise` from meaning two
+/// things in one file. But an op added to the language later would turn that
+/// rule against shaders written before it: one with `let scenePosition =
+/// ...` would stop compiling the day the engine updated. A call is always
+/// `name(`, and a value never is, so the two cannot be mistaken for each
+/// other; an op that arrives after the fact is listed here and both stand.
+pub const LATE_OPS: &[&str] = &["sceneSurfaceDepth", "scenePosition", "sceneDistance"];
+
+/// Is `name` an op's name that a value may not take?
+pub fn op_reserves(name: &str) -> bool {
+    op(name).is_some() && !LATE_OPS.contains(&name)
 }
 
 /// The pseudo-specs behind `vec2/3/4(…)` constructors (shape-checked
@@ -651,4 +670,22 @@ mod tests {
         assert!(op("saturate").unwrap().stages.contains(&Stage::Post), "math reaches post");
         assert!(op("posterize").unwrap().stages.contains(&Stage::Post), "colour reaches post");
     }
+    /// **The screen shader guide names every screen op, and gives no recipe
+    /// that is wrong off the centre of the view.** `sceneDepth` in a screen
+    /// shader is depth along the camera's axis; the guide once built the
+    /// world point as the camera's position plus the ray times it, which a
+    /// game followed into a band that bent round the screen.
+    #[test]
+    fn the_screen_shader_guide_names_every_screen_op_and_no_bent_recipe() {
+        let guide = include_str!("../../../docs/subsystems/post-processing.md");
+        for op in OPS.iter().filter(|o| o.category == "screen" && o.stages.contains(&Stage::Post)) {
+            assert!(guide.contains(&format!("`{}(", op.name)), "docs/subsystems/post-processing.md has no `{}(…)`", op.name);
+        }
+        let flat: String = guide.split_whitespace().collect();
+        assert!(
+            !flat.contains("sceneRay()*sceneDepth("),
+            "the guide multiplies the ray by sceneDepth, which is view depth: use scenePosition() or sceneDistance()"
+        );
+    }
+
 }

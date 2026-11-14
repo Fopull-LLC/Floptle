@@ -644,7 +644,8 @@ impl<'a> Writer<'a> {
                     let f = if op.name == "sceneColor" { "flsl_frag_scene_color" } else { "flsl_frag_scene_depth" };
                     Ok(format!("{f}({uv})"))
                 }
-                "sceneColor" | "sceneDepth" | "sceneNormal" | "sceneRay" => {
+                "sceneColor" | "sceneDepth" | "sceneNormal" | "sceneRay" | "sceneSurfaceDepth" | "scenePosition"
+                | "sceneDistance" => {
                     let uv = match &call.args[0] {
                         ResolvedArg::Default(_) => "in.uv".to_string(),
                         a => self.emit_resolved(a, Some(Ty::Vec2))?,
@@ -652,6 +653,9 @@ impl<'a> Writer<'a> {
                     let f = match op.name {
                         "sceneColor" => "flsl_post_color",
                         "sceneDepth" => "flsl_post_depth",
+                        "sceneSurfaceDepth" => "flsl_post_surface_depth",
+                        "scenePosition" => "flsl_post_position",
+                        "sceneDistance" => "flsl_post_distance",
                         "sceneRay" => "flsl_post_ray",
                         _ => "flsl_post_normal",
                     };

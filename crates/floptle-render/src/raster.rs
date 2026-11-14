@@ -623,6 +623,10 @@ pub struct SurfaceExtras {
     /// gone nearer than `[0]` metres, whole beyond `[1]`. Off when `[1]` is
     /// not past `[0]`.
     pub near_fade: [f32; 2],
+    /// Counts as a surface the scene is seen through
+    /// ([`floptle_core::Material::surface_depth`]). Only a see-through
+    /// surface is ever asked.
+    pub surface_depth: bool,
 }
 
 impl Default for SurfaceExtras {
@@ -647,6 +651,7 @@ impl Default for SurfaceExtras {
             blend: false,
             shaded: false,
             near_fade: [0.0, 0.0],
+            surface_depth: true,
         }
     }
 }
@@ -706,6 +711,11 @@ pub(crate) const EXT_SHAPED: u32 = 1 << 19;
 /// Cast no sun shadow: left out of the sun's shadow map, drawn everywhere
 /// else. Read on the CPU only ([`Raster::shadowless_extras`]).
 pub(crate) const EXT_NO_CAST: u32 = 1 << 20;
+/// Not a surface the scene is seen through: left out of the see-through depth
+/// a screen shader reads ([`Raster::surface_depth_pass`]), drawn everywhere
+/// else. Stored as "no" so the neutral entry stays all-zero. Read on the CPU
+/// only.
+pub(crate) const EXT_NO_SURFACE_DEPTH: u32 = 1 << 21;
 
 impl SurfaceExtras {
     /// Read a material's extras. `Classic` still carries the normal and
@@ -739,6 +749,7 @@ impl SurfaceExtras {
             blend: m.blend == floptle_core::BlendMode::Blend,
             shaded: m.shader.is_some(),
             near_fade: m.near_fade,
+            surface_depth: m.surface_depth,
         }
     }
 
@@ -780,6 +791,9 @@ impl SurfaceExtras {
         }
         if self.shaded {
             f |= EXT_SHADED;
+        }
+        if !self.surface_depth {
+            f |= EXT_NO_SURFACE_DEPTH;
         }
         // `Project` is resolved before interning (`push_surface_extras`); one
         // that reaches here unresolved is a solid, glass's old behaviour.
@@ -1023,6 +1037,24 @@ pub struct Raster {
     /// (Self::depth_prepass_with) wrote, so `prepass_view` answers about that
     /// one rather than about whichever happened to be created last.
     prepass_active: Option<usize>,
+    /// The module the core pipelines were built from, kept for the ones that
+    /// wait for first use ([`Self::surface_pipelines`]).
+    core_module: wgpu::ShaderModule,
+    /// The see-through depth pass's pipelines (plain, skinned), built the
+    /// first time [`Self::surface_depth_pass`] draws: a project whose screen
+    /// shaders never read `sceneSurfaceDepth` builds none of them.
+    surface_pipelines: std::sync::OnceLock<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
+    /// The same for buckets bound to a texture-array set.
+    surface_array_pipeline: std::sync::OnceLock<wgpu::RenderPipeline>,
+    /// That pass's depth targets, one per target size, as [`Self::prepass`]
+    /// keeps its own; empty until the pass first has something to draw.
+    surface: Vec<PrepassSlot>,
+    /// The target the last see-through depth pass wrote, if it drew anything.
+    surface_active: Option<usize>,
+    /// How many see-through depth targets were ever allocated, and how many
+    /// times the pass drew (for tests and the "costs nothing unused" promise).
+    surface_targets_made: u64,
+    surface_passes: u64,
     /// The depth prepass copied its result over the frame's depth buffer, and
     /// the next colour pass has not run yet: that pass keeps the depth it
     /// finds (`LoadOp::Load`) even when it clears the colour, so early-z kills
@@ -1380,6 +1412,11 @@ struct FlslShader {
     /// behind its own unmoved silhouette. `None` for a shader that moves
     /// nothing, which the built-in ones draw correctly.
     displaced_depth: Option<(wgpu::RenderPipeline, std::sync::OnceLock<Option<wgpu::RenderPipeline>>)>,
+    /// The same two for the see-through depth pass
+    /// ([`Raster::surface_depth_pass`]), each built the first time that pass
+    /// draws the shader: a project whose screen shaders never read
+    /// `sceneSurfaceDepth` builds neither.
+    displaced_surface: [std::sync::OnceLock<Option<wgpu::RenderPipeline>>; 2],
     group3_layout: wgpu::BindGroupLayout,
     tex_slots: usize,
     /// Opaque-phase shaders draw with the opaque bucket (depth write on);
@@ -1500,6 +1537,12 @@ impl FlslRecipe {
     /// The depth-only pipeline for a shader that moves its vertices. Only
     /// called on a recipe that has a depth layout.
     fn depth(&self, vs_entry: &str) -> Option<wgpu::RenderPipeline> {
+        self.depth_with(vs_entry, "fs_depth")
+    }
+
+    /// [`Self::depth`] through fragment entry `fs_entry`: `fs_depth` for the
+    /// solid scene, `fs_surface_depth` for the see-through one.
+    fn depth_with(&self, vs_entry: &str, fs_entry: &str) -> Option<wgpu::RenderPipeline> {
         let layout = self.depth_layout.as_ref()?;
         self.built.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1522,7 +1565,7 @@ impl FlslRecipe {
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &self.module,
-                entry_point: Some("fs_depth"),
+                entry_point: Some(fs_entry),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[],
             }),
@@ -1546,6 +1589,13 @@ impl FlslShader {
             return Some(plain);
         }
         skin.get_or_init(|| self.recipe.depth(self.recipe.vs_skinned)).as_ref()
+    }
+
+    /// The see-through depth pipelines (plain, skinned) of a shader that
+    /// moves its vertices, each built the first time it is asked for.
+    fn displaced_surface(&self, skinned: bool) -> Option<&wgpu::RenderPipeline> {
+        let vs = if skinned { self.recipe.vs_skinned } else { "vs_flsl" };
+        self.displaced_surface[usize::from(skinned)].get_or_init(|| self.recipe.depth_with(vs, "fs_surface_depth")).as_ref()
     }
 }
 
@@ -1659,6 +1709,7 @@ impl FlslBuilder {
             pipeline,
             skin_pipeline: std::sync::OnceLock::new(),
             displaced_depth,
+            displaced_surface: Default::default(),
             group3_layout,
             tex_slots,
             opaque,
@@ -2178,6 +2229,13 @@ impl Raster {
             prepass: Vec::new(),
             prepass_seq: 0,
             prepass_active: None,
+            core_module: module,
+            surface_pipelines: Default::default(),
+            surface_array_pipeline: Default::default(),
+            surface: Vec::new(),
+            surface_active: None,
+            surface_targets_made: 0,
+            surface_passes: 0,
             depth_primed: false,
             last_pass_kept_primed_depth: false,
             last_pass_equal_buckets: 0,
@@ -2689,6 +2747,9 @@ impl Raster {
         self.skin_prepass_pipeline = core.skin_prepass_pipeline;
         self.primed_pipeline = core.primed_pipeline;
         self.skin_primed_pipeline = core.skin_primed_pipeline;
+        self.core_module = module;
+        self.surface_pipelines = Default::default();
+        self.surface_array_pipeline = Default::default();
         // Built from the same source, so made again (a worker still building
         // the old ones fills a slot nobody reads any more).
         self.array_passes = Default::default();
@@ -4139,19 +4200,31 @@ impl Raster {
         raws: &mut Vec<InstanceRaw>,
         keep: impl Fn(&FlslShader) -> bool,
     ) -> Vec<FlslBucket> {
-        let wanted = |bind: &FlslBindingId| {
+        self.bucket_flsl_where(flsl, skins, raws, |sh, _| keep(sh))
+    }
+
+    /// [`Self::bucket_flsl`], with the draw's own instance in the question.
+    fn bucket_flsl_where(
+        &self,
+        flsl: &[FlslDraw],
+        skins: &[SkinDraw],
+        raws: &mut Vec<InstanceRaw>,
+        keep: impl Fn(&FlslShader, &InstanceRaw) -> bool,
+    ) -> Vec<FlslBucket> {
+        let wanted = |bind: &FlslBindingId, raw: &InstanceRaw| {
             self.flsl_bindings
                 .get(bind.0 as usize)
                 .and_then(|b| self.flsl_shaders.get(b.shader.0 as usize))
-                .is_some_and(&keep)
+                .is_some_and(|sh| keep(sh, raw))
         };
         let groups = group_by_key(
             flsl.iter()
-                .filter(|(_, _, bind, _)| wanted(bind))
+                .filter(|(_, _, bind, raw)| wanted(bind, raw))
                 .map(|(id, tex, bind, raw)| ((id.0 as usize, tex.map(|t| t.0), bind.0, false), *raw))
                 .chain(skins.iter().filter_map(|d| {
                     let bind = d.flsl?;
-                    wanted(&bind).then(|| ((d.mesh.0 as usize, d.tex.map(|t| t.0), bind.0, true), Self::skin_instance(d)))
+                    wanted(&bind, &d.instance)
+                        .then(|| ((d.mesh.0 as usize, d.tex.map(|t| t.0), bind.0, true), Self::skin_instance(d)))
                 })),
         );
         let mut buckets = Vec::with_capacity(groups.len());
@@ -5314,47 +5387,9 @@ impl Raster {
     /// sizes a frame asks for is small and stable — the window, a docked panel,
     /// a render target or two — and each entry is a full-frame depth texture.
     fn claim_prepass(&mut self, gpu: &Gpu, size: wgpu::Extent3d) -> bool {
-        /// Enough for the window, a docked Game panel and a couple of render
-        /// targets. Past that the least-used goes, which costs one reallocation
-        /// on the frame a view comes back — far better than holding depth
-        /// buffers for every panel size a window was ever dragged through.
-        const MAX_SLOTS: usize = 4;
-        self.prepass_seq += 1;
-        if let Some(i) = self.prepass.iter().position(|s| s.size == size) {
-            self.prepass[i].used = self.prepass_seq;
-            self.prepass_active = Some(i);
-            return false;
-        }
-        let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("raster-prepass-depth"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: Gpu::DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let slot = PrepassSlot { size, tex, view, token: self.prepass_seq, used: self.prepass_seq };
-        let i = if self.prepass.len() < MAX_SLOTS {
-            self.prepass.push(slot);
-            self.prepass.len() - 1
-        } else {
-            let lru = self
-                .prepass
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, s)| s.used)
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            self.prepass[lru] = slot;
-            lru
-        };
+        let (i, made) = claim_depth_slot(&mut self.prepass, &mut self.prepass_seq, gpu, size, "raster-prepass-depth");
         self.prepass_active = Some(i);
-        true
+        made
     }
 
     /// A token identifying the target [`prepass_view`](Self::prepass_view) is
@@ -5922,6 +5957,203 @@ impl Raster {
         self.depth_primed = true;
     }
 
+    /// The see-through depth pass's pipelines (plain, skinned), built on
+    /// first use: the prepass's layout and state, through `fs_surface_depth`.
+    fn surface_pipelines(&self, gpu: &Gpu) -> &(wgpu::RenderPipeline, wgpu::RenderPipeline) {
+        self.surface_pipelines.get_or_init(|| {
+            let target = (&gpu.device, gpu.pipeline_cache.as_ref());
+            (
+                surface_depth_pipeline(target, &self.core_module, &self.globals_layout, &self.tex_layout, "vs", ""),
+                surface_depth_pipeline(target, &self.core_module, &self.globals_layout, &self.tex_layout, "vs_skin", "-skin"),
+            )
+        })
+    }
+
+    /// The same for a bucket bound to a texture-array set, built on first use
+    /// from the array build's source.
+    fn surface_array_pipeline(&self, gpu: &Gpu) -> &wgpu::RenderPipeline {
+        self.surface_array_pipeline.get_or_init(|| {
+            let code = self.custom_field.as_ref().map(|(f, s)| (f.as_str(), s.as_str()));
+            let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("raster-arrays"),
+                source: wgpu::ShaderSource::Wgsl(array_source(code).into()),
+            });
+            let target = (&gpu.device, gpu.pipeline_cache.as_ref());
+            surface_depth_pipeline(target, &module, &self.globals_layout, &self.pools.layout, "vs", "-array")
+        })
+    }
+
+    /// **The see-through depth pass**: the depth of every surface the scene
+    /// is seen through, nearest first, into a target of its own the size of
+    /// the frame's depth (`size`). A screen shader reads it as
+    /// `sceneSurfaceDepth`.
+    ///
+    /// What it draws is what the colour passes draw see-through: glass
+    /// ([`Self::draw_transmissive`]), every instance in the blended bucket
+    /// (a material that blends, or a solid one faded by its node), and every
+    /// surface whose own shader blends or reads the scene behind it
+    /// ([`Self::draw_flsl_scene_readers`]). A material leaves itself out with
+    /// [`floptle_core::Material::surface_depth`]. Particles, lines and script
+    /// quads are other passes and are never in it.
+    ///
+    /// Depth only, over just those surfaces, so the frame pays one more
+    /// vertex pass over its water and glass and no shading; the colour
+    /// passes are untouched. **Run it only in a frame whose screen shaders
+    /// read it** ([`crate::PostShaders::reads_surface_depth`]): nothing here
+    /// is built or allocated before the first call that has something to
+    /// draw. Read the result with [`Self::surface_depth_view`] straight
+    /// after; `None` there is "no see-through surface in this view".
+    pub fn surface_depth_pass(
+        &mut self,
+        gpu: &Gpu,
+        globals: Globals,
+        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
+        flsl: &[FlslDraw],
+        skins: &[SkinDraw],
+        size: wgpu::Extent3d,
+    ) {
+        self.surface_active = None;
+        const OPAQUE_CUTOFF: f32 = 0.999;
+        // The colour pass's own split (`draw_scene_with`), from the other side.
+        let flags: Vec<u32> = self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| c[1][0] as u32).collect();
+        let glassy = self.transmissive_extras();
+        let see_through = |raw: &InstanceRaw| {
+            let ext = ext_index_of(raw) as usize;
+            let f = flags.get(ext).copied().unwrap_or(0);
+            if is_terrain(raw) || f & (EXT_DITHER_ALPHA | EXT_DISSOLVE | EXT_NO_SURFACE_DEPTH) != 0 {
+                return false;
+            }
+            glassy.get(ext).copied().unwrap_or(false) || raw.color[3] < OPAQUE_CUTOFF || f & EXT_BLEND != 0
+        };
+        let counted = |raw: &InstanceRaw| {
+            flags.get(ext_index_of(raw) as usize).copied().unwrap_or(0) & EXT_NO_SURFACE_DEPTH == 0
+        };
+        let mut raws: Vec<InstanceRaw> = Vec::new();
+        let buckets: Vec<(usize, Option<u32>, u32, u32)> = bucket_into(
+            instances
+                .iter()
+                .filter(|(_, _, raw)| see_through(raw))
+                .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), raw)),
+            &mut raws,
+        )
+        .into_iter()
+        .map(|((mesh_idx, tex_key), start, count)| (mesh_idx, tex_key, start, count))
+        .collect();
+        let skin_buckets = self.bucket_skins(skins, &mut raws, see_through);
+        // A shader's phase is its own: it blends, or it shows the scene
+        // behind it. One that moves its vertices is drawn where they went.
+        let shows_through = |sh: &FlslShader| !sh.opaque || sh.reads_scene_color;
+        let flsl_plain = self.bucket_flsl_where(flsl, skins, &mut raws, |sh, raw| {
+            shows_through(sh) && sh.displaced_depth.is_none() && counted(raw)
+        });
+        let flsl_moved = self.bucket_flsl_where(flsl, skins, &mut raws, |sh, raw| {
+            shows_through(sh) && sh.displaced_depth.is_some() && counted(raw)
+        });
+        if raws.is_empty() {
+            return;
+        }
+        let (i, made) = claim_depth_slot(&mut self.surface, &mut self.prepass_seq, gpu, size, "raster-surface-depth");
+        self.surface_active = Some(i);
+        self.surface_targets_made += u64::from(made);
+        self.surface_passes += 1;
+        self.begin_pass(gpu, globals);
+        self.ensure_instances(gpu, raws.len() as u32);
+        gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
+        let (array_buckets, buckets): (Vec<_>, Vec<_>) =
+            buckets.into_iter().partition(|b| b.1.is_some_and(|t| self.pools.array_ids.contains(&t)));
+        let (plain, skinned) = self.surface_pipelines(gpu);
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-surface-depth") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raster-surface-depth"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.surface[i].view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_bind_group(0, &self.globals_bind, &[]);
+            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
+            let draw = |rp: &mut wgpu::RenderPass<'_>, mesh_idx: usize, tex_key: Option<u32>, start: u32, count: u32| {
+                let mesh = &self.meshes[mesh_idx];
+                let bind = match tex_key {
+                    Some(t) => &self.textures[t as usize].bind,
+                    None => &mesh.tex_bind,
+                };
+                rp.set_bind_group(1, bind, &[]);
+                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+            };
+            // Unmoved surfaces, shader-drawn or not, through the built-in
+            // vertex stage: plain, then skinned, then the array build's.
+            rp.set_pipeline(plain);
+            for &(mesh_idx, tex_key, start, count) in &buckets {
+                draw(&mut rp, mesh_idx, tex_key, start, count);
+            }
+            for &(mesh_idx, tex_key, _, is_skinned, start, count) in &flsl_plain {
+                if !is_skinned {
+                    draw(&mut rp, mesh_idx, tex_key, start, count);
+                }
+            }
+            rp.set_pipeline(skinned);
+            for &(mesh_idx, tex_key, start, count) in &skin_buckets {
+                draw(&mut rp, mesh_idx, tex_key, start, count);
+            }
+            for &(mesh_idx, tex_key, _, is_skinned, start, count) in &flsl_plain {
+                if is_skinned {
+                    draw(&mut rp, mesh_idx, tex_key, start, count);
+                }
+            }
+            if !array_buckets.is_empty() {
+                rp.set_pipeline(self.surface_array_pipeline(gpu));
+                for &(mesh_idx, tex_key, start, count) in &array_buckets {
+                    draw(&mut rp, mesh_idx, tex_key, start, count);
+                }
+            }
+            for &(mesh_idx, tex_key, bind_id, is_skinned, start, count) in &flsl_moved {
+                let binding = &self.flsl_bindings[bind_id as usize];
+                let Some(pipeline) = self.flsl_shaders[binding.shader.0 as usize].displaced_surface(is_skinned) else {
+                    continue;
+                };
+                rp.set_pipeline(pipeline);
+                rp.set_bind_group(3, &binding.bind, &[]);
+                draw(&mut rp, mesh_idx, tex_key, start, count);
+            }
+        }
+        gpu.queue.submit([encoder.finish()]);
+    }
+
+    /// The target the last [`Self::surface_depth_pass`] wrote, or `None` when
+    /// it had nothing to draw (or never ran).
+    pub fn surface_depth_view(&self) -> Option<&wgpu::TextureView> {
+        self.surface.get(self.surface_active?).map(|s| &s.view)
+    }
+
+    /// Give back the see-through depth targets: call it in a frame no screen
+    /// shader reads them, so a project that stops using `sceneSurfaceDepth`
+    /// stops holding a depth buffer for it.
+    pub fn drop_surface_depth(&mut self) {
+        self.surface.clear();
+        self.surface_active = None;
+    }
+
+    /// How many see-through depth targets are held now, how many were ever
+    /// allocated, and how many times the pass has drawn.
+    pub fn surface_depth_stats(&self) -> (usize, u64, u64) {
+        (self.surface.len(), self.surface_targets_made, self.surface_passes)
+    }
+
     /// Whether the last colour pass kept the depth the prepass primed rather
     /// than clearing it: true for a pass drawn straight after a prepass.
     pub fn last_pass_kept_primed_depth(&self) -> bool {
@@ -5962,6 +6194,99 @@ impl Raster {
 /// `tests/flsl_texture_slots.rs`, which builds a shader at exactly the limit
 /// this leaves.
 pub const FLSL_ENGINE_TEXTURES: u32 = 16;
+
+/// Find (or make) the depth target for `size` in a small cache of them,
+/// returning its index and whether it had to be allocated.
+///
+/// The cache is small and evicts the least recently used, because the set of
+/// sizes a frame asks for is small and stable (the window, a docked panel, a
+/// render target or two) and each entry is a full-frame depth texture.
+fn claim_depth_slot(
+    slots: &mut Vec<PrepassSlot>,
+    seq: &mut u64,
+    gpu: &Gpu,
+    size: wgpu::Extent3d,
+    label: &str,
+) -> (usize, bool) {
+    /// Enough for the window, a docked Game panel and a couple of render
+    /// targets. Past that the least-used goes, which costs one reallocation
+    /// on the frame a view comes back — far better than holding depth
+    /// buffers for every panel size a window was ever dragged through.
+    const MAX_SLOTS: usize = 4;
+    *seq += 1;
+    if let Some(i) = slots.iter().position(|s| s.size == size) {
+        slots[i].used = *seq;
+        return (i, false);
+    }
+    let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: Gpu::DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let slot = PrepassSlot { size, tex, view, token: *seq, used: *seq };
+    let i = if slots.len() < MAX_SLOTS {
+        slots.push(slot);
+        slots.len() - 1
+    } else {
+        let lru = slots.iter().enumerate().min_by_key(|(_, s)| s.used).map(|(i, _)| i).unwrap_or(0);
+        slots[lru] = slot;
+        lru
+    };
+    (i, true)
+}
+
+/// One pipeline of the see-through depth pass ([`Raster::surface_depth_pass`]):
+/// the depth prepass's layout (groups 0 and 1) and state, through
+/// `fs_surface_depth`.
+fn surface_depth_pipeline(
+    (device, cache): (&wgpu::Device, Option<&wgpu::PipelineCache>),
+    module: &wgpu::ShaderModule,
+    globals_layout: &wgpu::BindGroupLayout,
+    tex_layout: &wgpu::BindGroupLayout,
+    vs_entry: &str,
+    tag: &str,
+) -> wgpu::RenderPipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("raster-surface-depth"),
+        bind_group_layouts: &[Some(globals_layout), Some(tex_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(&format!("raster-surface-depth{tag}")),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some(vs_entry),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: Gpu::DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some("fs_surface_depth"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[],
+        }),
+        multiview_mask: None,
+        cache,
+    })
+}
 
 /// Material texture slots a device with these per-stage limits leaves: each
 /// slot is a texture and its sampler, and either can run out.

@@ -318,6 +318,7 @@ impl Rig {
             eye: [0.0; 3],
             water_depth: 0.0,
             sky: None,
+            surface_depth: None,
         };
         self.post.run(gpu, &s, Some(&ssao), &self.out_view);
         read_rgb(gpu, &self.out)

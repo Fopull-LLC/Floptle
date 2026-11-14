@@ -115,6 +115,7 @@ field_diff!(Material {
     faded_from,
     alpha_cutoff,
     double_sided,
+    surface_depth,
     normal_map,
     normal_strength,
     roughness_map,

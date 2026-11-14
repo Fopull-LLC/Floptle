@@ -236,6 +236,12 @@ pub(crate) fn render_frame_texture(
         eye: cam.world_position.as_vec3().to_array(),
         water_depth,
         sky: ed.raymarch.as_ref().map(|r| r.env_view()),
+        // Drawn by `render_world_into` above, when a pass reads it.
+        surface_depth: ed
+            .raster
+            .as_ref()
+            .filter(|_| ed.post_shaders.as_ref().is_some_and(|p| p.reads_surface_depth()))
+            .and_then(|r| r.surface_depth_view()),
     };
     // Where the chain lands: the retro target when there is one, the picture
     // itself otherwise. (`out` is the file; this is the texture.)

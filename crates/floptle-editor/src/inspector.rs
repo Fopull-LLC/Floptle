@@ -1505,6 +1505,18 @@ fn mat_rim_ui(ui: &mut egui::Ui, m: &mut Material, r: &mut MatEditResult) {
                 .on_hover_text("draw the back of each face too; off hides a face seen from behind")
                 .changed();
             ui.end_row();
+            // Only a see-through surface is ever one a screen shader reads.
+            if m.blend == floptle_core::BlendMode::Blend || m.alpha < 1.0 || m.transmission > 0.0 || m.shader.is_some() {
+                ui.label("seen through");
+                r.changed |= ui
+                    .checkbox(&mut m.surface_depth, "")
+                    .on_hover_text(
+                        "counts as a surface the scene is seen through, which a screen shader reads as \
+                         sceneSurfaceDepth(): on for water, glass and ice; off for a decal, a glow or a light shaft",
+                    )
+                    .changed();
+                ui.end_row();
+            }
         });
     });
 }

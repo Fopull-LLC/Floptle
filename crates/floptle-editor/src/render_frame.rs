@@ -936,6 +936,18 @@ impl Editor {
                     let (verts, batches) = pack_script_quads(&self.script_quads, cam.world_position);
                     tri_layer.draw_textured(gpu, color, depth, view_proj, &verts, &batches, raster);
                 }
+                // What the scene is seen through (water, glass, any blended
+                // surface), as a depth of its own for `sceneSurfaceDepth`: drawn
+                // only in a frame whose screen shaders read it, so a project
+                // that never does pays for no pass and holds no target.
+                let surface_wanted = post_shaders.is_some_and(|p| p.reads_surface_depth());
+                if surface_wanted {
+                    gpu_mark!("see-through depth");
+                    let size = if lowres { retro.depth_texture() } else { gpu.depth_texture() }.size();
+                    raster.surface_depth_pass(gpu, globals, &instances, &flsl_draws, &skin_draws, size);
+                } else {
+                    raster.drop_surface_depth();
+                }
                 // Live particles: after all opaque work (they depth-test against
                 // meshes and raymarched matter), before post/retro — so they're
                 // AO'd/bloomed and pixelate with the scene.
@@ -1101,6 +1113,7 @@ impl Editor {
                         eye: cam.world_position.as_vec3().to_array(),
                         water_depth,
                         sky: Some(raymarch.env_view()),
+                        surface_depth: if surface_wanted { raster.surface_depth_view() } else { None },
                     };
                     // In retro mode the chain writes the retro colour target and
                     // the nearest-neighbour blit carries the finished picture up;

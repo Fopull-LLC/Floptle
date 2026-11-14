@@ -1609,6 +1609,35 @@ fn every_set_material_key_reaches_a_patch() {
     assert!(missing.is_empty(), "setMaterial keys a patch drops: {missing:?}");
 }
 
+/// `surfaceDepth = false` reaches a material and a model's patch: a decal
+/// leaves itself out of what a screen shader reads as `sceneSurfaceDepth`,
+/// and a material that never says is in, as every blended surface was.
+#[test]
+fn set_material_leaves_a_surface_out_of_the_see_through_depth() {
+    use floptle_core::{Material, MaterialPatch, Matter};
+    let dir = std::env::temp_dir().join(format!("floptle-surfdepth-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(&dir, "decal", "function start(node) node:setMaterial{ alpha = 0.5, surfaceDepth = false } end\n");
+    let mut world = World::default();
+    let mut node = |m: Matter| {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, m);
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst::new("decal")]));
+        e
+    };
+    let model = node(Matter::Mesh { asset_path: "models/scorch.gltf".into() });
+    let prim = node(Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0; 3] });
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert!(Material::default().surface_depth, "a material that never says counts as a surface");
+    assert!(!world.get::<Material>(prim).unwrap().surface_depth, "surfaceDepth = false did not reach the material");
+    let drawn = world.get::<MaterialPatch>(model).unwrap().over(&Material::default());
+    assert!(!drawn.surface_depth, "surfaceDepth = false did not reach a model's own materials");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `alphaCutoff` and `doubleSided` reach a material and a model's patch: a
 /// leaf model given a softer cut and single sides keeps everything else.
 #[test]

@@ -630,13 +630,24 @@ pub(crate) fn push_mesh_instances(
 pub(crate) fn resolve_mesh_particles(
     mesh_registry: &HashMap<String, MeshAsset>,
     draws: &[floptle_vfx::MeshDraw],
+    raster: Option<&mut floptle_render::Raster>,
     instances: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
 ) {
+    if draws.is_empty() {
+        return;
+    }
+    // A particle is not a surface the scene is seen through, whatever it is
+    // drawn with: a fading mesh particle blends, and would otherwise read as
+    // one to a screen shader's `sceneSurfaceDepth`, as a billboard never does.
+    let ext = raster.map_or(0, |r| {
+        r.push_surface_extras(floptle_render::SurfaceExtras { surface_depth: false, ..Default::default() })
+    });
     for md in draws {
         let Some(asset) = mesh_registry.get(&md.asset_path) else { continue };
         for (model, color) in &md.instances {
             let mut mp = MaterialParams::flat([color[0], color[1], color[2]]);
             mp.alpha = color[3];
+            mp.ext_index = ext;
             let raw = instance_of_mat(*model, &mp);
             for &mid in &asset.parts {
                 instances.push((mid, None, raw));
@@ -738,5 +749,47 @@ mod tint_tests {
             "rim.w is the packed TILING flags, not part of the rim — a tinted node \
              must not lose its texture tiling"
         );
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "editor-ui")]
+mod particle_tests {
+    use super::resolve_mesh_particles;
+    use floptle_core::math::Mat4;
+
+    /// **A particle is not a surface the scene is seen through.** A mesh
+    /// particle fading out blends, exactly as a sheet of water does, and
+    /// rides the same instance list; it must not write the see-through depth
+    /// a screen shader reads as `sceneSurfaceDepth`, or every puff of debris
+    /// would read as a window on the ground behind it. The same instance
+    /// without the particle's mark is drawn into it: that is the control.
+    #[test]
+    fn a_fading_mesh_particle_is_not_a_surface_the_scene_is_seen_through() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let key = crate::vfx::BUILTIN_PARTICLE_MESHES[0].0;
+        // One particle four metres ahead, half faded.
+        let draws = [floptle_vfx::MeshDraw {
+            asset_path: key.to_string(),
+            instances: vec![(Mat4::from_translation(floptle_core::math::Vec3::new(0.0, 0.0, -4.0)), [1.0, 1.0, 1.0, 0.5])],
+        }];
+        let mut instances = Vec::new();
+        resolve_mesh_particles(&ed.mesh_registry, &draws, ed.raster.as_mut(), &mut instances);
+        assert!(!instances.is_empty(), "the fixture: the built-in particle mesh resolved to nothing");
+        let (gpu, raster) = (ed.gpu.as_ref().unwrap(), ed.raster.as_mut().unwrap());
+        let globals = floptle_render::Globals {
+            view_proj: Mat4::perspective_rh(1.0, 1.0, 0.1, 100.0).to_cols_array_2d(),
+            ..Default::default()
+        };
+        let size = gpu.depth_texture().size();
+        raster.surface_depth_pass(gpu, globals, &instances, &[], &[], size);
+        assert!(raster.surface_depth_view().is_none(), "a fading mesh particle was drawn as a see-through surface");
+
+        let mut plain = instances.clone();
+        for (_, _, raw) in &mut plain {
+            floptle_render::set_ext_index(raw, 0);
+        }
+        raster.surface_depth_pass(gpu, globals, &plain, &[], &[], size);
+        assert!(raster.surface_depth_view().is_some(), "the control: the same faded mesh, unmarked, is a see-through surface");
     }
 }

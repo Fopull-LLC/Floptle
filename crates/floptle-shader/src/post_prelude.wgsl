@@ -11,8 +11,9 @@
 //              built-in pass uses, so a custom pass can ping-pong between the
 //              chain's scratch targets with no bind group of its own).
 //   group(1) — the depth buffer the scene was rendered with, the inverse
-//              projection that turns it back into a position, and the camera's
-//              turn and position in the world.
+//              projection that turns it back into a position, the camera's
+//              turn and position in the world, the sky, and the depth of the
+//              see-through surfaces.
 //   group(2) — the shader's own uniforms (declared by the chunk).
 
 @group(0) @binding(0) var tex: texture_2d<f32>;
@@ -41,6 +42,11 @@ struct PostCam {
 // `skyRadiance`; one black texel when there is none.
 @group(1) @binding(2) var post_env_tex: texture_2d<f32>;
 @group(1) @binding(3) var post_env_samp: sampler;
+// The nearest see-through surface over each pixel (a water sheet, glass, any
+// blended material), as a depth the size of the scene's, for
+// `sceneSurfaceDepth`; one far texel in a frame no pass reads it in. Bound as
+// a float texture for the reason the scene's depth is.
+@group(1) @binding(4) var post_surface_tex: texture_2d<f32>;
 
 // The sky seen along world direction `r`, blurred to roughness `rough`: the
 // same lookup a surface's reflection makes in the raster pass, so a screen
@@ -84,6 +90,11 @@ fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
 // author writes finite, and it makes a silhouette against the sky the largest
 // depth step in the frame — which is exactly what an outline wants to find.
 const FLSL_SKY_DEPTH: f32 = 1.0e6;
+// What `sceneSurfaceDepth` returns where a pixel is seen through nothing.
+// Past the sky's depth on purpose: with the same number, bare sky would pass
+// `step(sceneSurfaceDepth(), sceneDepth())` and read as seen through
+// something.
+const FLSL_NO_SURFACE: f32 = 2.0e6;
 
 // One pixel of the chain, in uv. Follows the RETRO resolution when one is set,
 // so an effect written in texels stays one pixel wide instead of getting
@@ -116,13 +127,40 @@ fn flsl_post_view(uv: vec2<f32>) -> vec3<f32> {
     return v.xyz / v.w;
 }
 
-// Distance from the camera, in world units. The camera looks down -z in view
-// space, so the distance is -z.
+// Distance from the camera along its axis (view depth), in world units. The
+// camera looks down -z in view space, so that is -z: one number across a wall
+// the camera faces, and not the distance along each pixel's own ray, which is
+// `flsl_post_distance`.
 fn flsl_post_depth(uv: vec2<f32>) -> f32 {
     if (flsl_post_raw_depth(uv) >= 1.0) {
         return FLSL_SKY_DEPTH;
     }
     return max(-flsl_post_view(uv).z, 0.0);
+}
+
+// Distance from the camera to the nearest see-through surface drawn over the
+// pixel, in `flsl_post_depth`'s units; FLSL_NO_SURFACE where there is none.
+//
+// The surfaces are drawn into a depth target of their own, apart from the
+// scene, so one hidden behind a wall is in it too. The comparison against the
+// scene's depth is the depth test the surface's own colour pass ran, and
+// leaves the hidden one out. The margin is two steps of a 32-bit depth near
+// the far plane: glass writes the scene's depth as well as this one, and must
+// not lose to itself by a rounding.
+//
+// Never farther than the scene, so `step(sceneSurfaceDepth(), sceneDepth())`
+// is exactly "seen through something".
+fn flsl_post_surface_depth(uv: vec2<f32>) -> f32 {
+    let dims = vec2<i32>(textureDimensions(post_surface_tex));
+    let pix = clamp(vec2<i32>(clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * vec2<f32>(dims)),
+                    vec2<i32>(0), dims - vec2<i32>(1));
+    let s = textureLoad(post_surface_tex, pix, 0).x;
+    if (s >= 1.0 || s > flsl_post_raw_depth(uv) + 2.4e-7) {
+        return FLSL_NO_SURFACE;
+    }
+    let ndc = vec3<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, s);
+    let v = pc.inv_proj * vec4<f32>(ndc, 1.0);
+    return min(max(-v.z / v.w, 0.0), flsl_post_depth(uv));
 }
 
 // The surface normal, in view space (+z toward the camera), worked out from the
@@ -154,6 +192,32 @@ fn flsl_post_normal(uv: vec2<f32>) -> vec3<f32> {
     var un = normalize(n);
     if (dot(un, -c) < 0.0) { un = -un; }
     return un;
+}
+
+// How far along the pixel's own ray what it shows is: the camera's position
+// plus `flsl_post_ray` times this is the point. The view position measured
+// along the ray's direction, which for a perspective camera is its length and
+// for an orthographic one its depth.
+fn flsl_post_distance(uv: vec2<f32>) -> f32 {
+    if (flsl_post_raw_depth(uv) >= 1.0) {
+        return FLSL_SKY_DEPTH;
+    }
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0);
+    let a = pc.inv_proj * vec4<f32>(ndc, 0.0, 1.0);
+    let b = pc.inv_proj * vec4<f32>(ndc, 0.5, 1.0);
+    let d = normalize(b.xyz / b.w - a.xyz / a.w);
+    return max(dot(flsl_post_view(uv), d), 0.0);
+}
+
+// The world point seen at `uv`: the view position turned into the world and
+// set at the camera. Right off the view's centre line and for an orthographic
+// camera, where "the camera's position plus the ray times the depth" is not.
+// On sky, a point FLSL_SKY_DEPTH along the pixel's ray.
+fn flsl_post_position(uv: vec2<f32>) -> vec3<f32> {
+    if (flsl_post_raw_depth(uv) >= 1.0) {
+        return pc.eye.xyz + flsl_post_ray(uv) * FLSL_SKY_DEPTH;
+    }
+    return pc.eye.xyz + (pc.inv_view * vec4<f32>(flsl_post_view(uv), 0.0)).xyz;
 }
 
 // The world-space direction the camera looks through at `uv`, unit length.

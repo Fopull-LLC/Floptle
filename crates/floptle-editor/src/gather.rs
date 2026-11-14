@@ -496,7 +496,7 @@ impl Editor {
         // Mesh-render particle tracks ride the raster instance list (lit + shadowed
         // like scene meshes), so append them to `instances` built above.
         let vfx_mesh_draws = self.vfx.collect_mesh_draws(&self.world, &cam, vfx_preview_on);
-        resolve_mesh_particles(&self.mesh_registry, &vfx_mesh_draws, &mut instances);
+        resolve_mesh_particles(&self.mesh_registry, &vfx_mesh_draws, self.raster.as_mut(), &mut instances);
 
         // Skybox: a Skybox node drives the environment background — a solid color, or an
         // equirect texture × tint, rotated by the node so a script can spin the sky.
