@@ -165,6 +165,19 @@ end
 the ✱ Particles timeline so it ends cleanly. That's the whole loop: design it on
 the timeline → `spawnEffect` it from gameplay.
 
+The full form, `spawnEffect(key, pos, opts)`, turns it too. `normal` is the
+effect's +Y (a ring lies across it, a cone fires along it), and `forward` is
+its +Z, made square to the normal: the turn about the normal, which a round
+puff does not need and an Edge, a Box or a leaning cone does.
+
+```lua
+-- spray along the lip of a waterfall. The Edge runs along the effect's own X,
+-- square to forward: point forward downstream and the line lies along the lip
+spawnEffect("vfx/LipSpray", lipPoint, { normal = vec3(0, 1, 0), forward = downstream })
+```
+
+A forward along the normal says nothing about the turn and is ignored.
+
 ---
 
 ## 11. Audio: `audio.play`, `node:sound()` & the mixer

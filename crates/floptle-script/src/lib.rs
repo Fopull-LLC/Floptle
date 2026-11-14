@@ -1688,6 +1688,10 @@ pub struct SpawnedEffect {
     pub normal: Option<[f64; 3]>,
     /// The way up for Vertical and Horizontal billboards. `None` is `normal`.
     pub up: Option<[f64; 3]>,
+    /// The effect's +Z in the world, made square to its +Y: which way an
+    /// Edge, a Box or a leaning cone lies across `normal`. `None` leaves the
+    /// turn about `normal` as it was.
+    pub forward: Option<[f64; 3]>,
     pub scale: Option<f32>,
     pub intensity: Option<f32>,
     /// How big the space it fills is, as a multiple of its authored emission

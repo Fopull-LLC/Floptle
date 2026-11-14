@@ -137,6 +137,28 @@ fn effect_local(world: &World, e: Entity, p: [f64; 3]) -> Vec3 {
     Vec3::new(unrotated.x / safe(tr.scale.x), unrotated.y / safe(tr.scale.y), unrotated.z / safe(tr.scale.z))
 }
 
+/// How a one-shot effect is turned: its +Y along `up`, and its +Z along
+/// `forward` made square to `up`, so a non-round shape (an Edge, a Box, a
+/// leaning cone) lies the way it was asked across a lip or a seam.
+///
+/// No `up` is world +Y. No `forward`, or one along `up` (nothing is left of
+/// it once squared), keeps the shortest turn from +Y to `up`: what an effect
+/// with only a normal has always done.
+pub(crate) fn effect_rotation(up: Option<Vec3>, forward: Option<Vec3>) -> floptle_core::math::Quat {
+    use floptle_core::math::{Mat3, Quat};
+    let arc = |u: Option<Vec3>| u.map_or(Quat::IDENTITY, |u| Quat::from_rotation_arc(Vec3::Y, u));
+    let Some(f) = forward else { return arc(up) };
+    let y = up.and_then(|u| u.try_normalize()).unwrap_or(Vec3::Y);
+    let square = f - y * f.dot(y);
+    // What is left of a forward along `up` once squared is rounding, not a
+    // direction.
+    if f.length_squared() < 1e-12 || square.length() <= 1e-3 * f.length() {
+        return arc(up);
+    }
+    let z = square.normalize();
+    Quat::from_mat3(&Mat3::from_cols(y.cross(z), y, z)).normalize()
+}
+
 /// The world's own up where an effect plays, if anything defines one:
 /// against the field gravity there.
 fn up_against(g: Vec3) -> Option<Vec3> {
@@ -2152,5 +2174,49 @@ mod level_watch_tests {
         assert_eq!(inst.resting(), 200);
         let _ = sim.terrain_collider_mut(7);
         assert_eq!(watch.changes(&sim.world), LevelChange::Everywhere);
+    }
+}
+
+#[cfg(test)]
+mod effect_rotation_tests {
+    use super::effect_rotation;
+    use floptle_core::math::{Quat, Vec3};
+
+    fn near(a: Vec3, b: Vec3) -> bool {
+        (a - b).length() < 1e-5
+    }
+
+    /// **`forward` turns the effect about its normal and nothing else.** +Y
+    /// lands on the normal, +Z on the forward made square to it, and +X
+    /// completes a right-handed frame, so the shape is turned, never
+    /// mirrored or sheared.
+    #[test]
+    fn forward_lands_on_z_square_to_the_normal() {
+        let up = Vec3::new(1.0, 1.0, 0.0).normalize();
+        let r = effect_rotation(Some(up), Some(Vec3::new(0.0, 3.0, 2.0)));
+        assert!(near(r * Vec3::Y, up), "+Y went to {}", r * Vec3::Y);
+        let f = Vec3::new(0.0, 3.0, 2.0);
+        let want = (f - up * f.dot(up)).normalize();
+        assert!(near(r * Vec3::Z, want), "+Z went to {} not {want}", r * Vec3::Z);
+        assert!(near((r * Vec3::X).cross(r * Vec3::Y), r * Vec3::Z), "the frame is mirrored");
+        // No normal: +Y stays up, and the effect turns about it.
+        let flat = effect_rotation(None, Some(Vec3::X));
+        assert!(near(flat * Vec3::Y, Vec3::Y) && near(flat * Vec3::Z, Vec3::X));
+        assert!(near(flat * Vec3::X, Vec3::NEG_Z), "+X should complete the frame: {}", flat * Vec3::X);
+    }
+
+    /// **Without a usable forward, nothing changes.** No forward, a zero
+    /// one, or one along the normal gives exactly the turn an effect with
+    /// only a normal always had.
+    #[test]
+    fn no_forward_or_a_parallel_one_keeps_the_old_turn() {
+        let up = Vec3::new(0.3, 1.0, -0.2).normalize();
+        let old = Quat::from_rotation_arc(Vec3::Y, up);
+        assert_eq!(effect_rotation(Some(up), None), old);
+        assert_eq!(effect_rotation(None, None), Quat::IDENTITY);
+        assert_eq!(effect_rotation(Some(up), Some(Vec3::ZERO)), old);
+        assert_eq!(effect_rotation(Some(up), Some(up * 5.0)), old, "a forward along the normal");
+        assert_eq!(effect_rotation(Some(up), Some(-up)), old, "a forward against the normal");
+        assert_eq!(effect_rotation(None, Some(Vec3::new(0.0, -2.0, 0.0))), Quat::IDENTITY);
     }
 }

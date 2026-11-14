@@ -54,6 +54,7 @@ fn moving_world_with(
     for (name, shape) in [
         ("Puff", VfxShapeDoc::Point),
         ("Ring", VfxShapeDoc::Ring { radius: 3.0 }),
+        ("Line", VfxShapeDoc::Edge { length: 8.0 }),
     ] {
         floptle_scene::save_vfx_effect(&still_puff(name, shape), &dir.join("vfx").join(format!("{name}.vfx.ron")))
             .unwrap();
@@ -180,6 +181,56 @@ fn a_ring_fired_with_a_normal_lies_across_it() {
         assert!(off.length() > 2.5, "a ring particle sits {} m from the centre", off.length());
         assert!(off.normalize().dot(normal).abs() < 0.02, "a ring particle is out of the plane: {off}");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **An Edge fired with a `forward` lies across it.** Four one-shot lines on
+/// a level spot (normal +Y): with no forward the Edge lies along world X, as
+/// it always did; `forward = +X` turns it so the Edge, which runs along the
+/// effect's own X, lies along world −Z; `forward = +Z` is no turn at all;
+/// and a forward along the normal is ignored. Each line is checked by where
+/// its particles fall about its centre.
+#[test]
+fn an_edge_fired_with_a_forward_lies_across_it() {
+    let (mut ed, _home, dir) = moving_world(
+        "edge",
+        "local fired = false\n\
+         function update(node, dt)\n\
+           if fired then return end\n\
+           fired = true\n\
+           local home = find('Home')\n\
+           local at = vec3(home.x, home.y + 60, home.z)\n\
+           spawnEffect('vfx/Line', at, { normal = vec3(0, 1, 0) })\n\
+           spawnEffect('vfx/Line', at, { normal = vec3(0, 1, 0), forward = vec3(1, 0, 0) })\n\
+           spawnEffect('vfx/Line', at, { normal = vec3(0, 1, 0), forward = vec3(0, 0, 1) })\n\
+           spawnEffect('vfx/Line', at, { normal = vec3(0, 1, 0), forward = vec3(0, 3, 0) })\n\
+         end\n",
+    );
+    ed.play_step(1.0 / 60.0, true);
+    assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    assert_eq!(ed.vfx.detached.len(), 4, "all four lines should be playing");
+    // The unit axis each line's particles spread along, from the widest pair.
+    let axis = |i: usize| -> Vec3 {
+        let d = &ed.vfx.detached[i];
+        let p = d.inst.track_particles(0);
+        assert!(p.count >= 4, "line {i} should have particles");
+        let offs: Vec<Vec3> = (0..p.count).map(|k| p.pos_age[k].truncate() + (d.inst.anchor() - d.pos).as_vec3()).collect();
+        let far = offs.iter().copied().max_by(|a, b| a.length().total_cmp(&b.length())).unwrap();
+        for o in &offs {
+            assert!(o.cross(far.normalize()).length() < 0.05, "line {i}: a particle off the line: {o}");
+        }
+        far.normalize()
+    };
+    let along = |i: usize, want: Vec3| {
+        let a = axis(i);
+        assert!(a.dot(want).abs() > 0.999, "line {i} lies along {a}, not {want}");
+    };
+    along(0, Vec3::X);
+    // forward +X: the effect's +Z is world +X, so its X (the Edge) is +Y × +X = −Z.
+    along(1, Vec3::Z);
+    // forward +Z: the effect's +Z is world +Z, the identity turn: the Edge on X.
+    along(2, Vec3::X);
+    along(3, Vec3::X);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

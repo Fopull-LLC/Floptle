@@ -1933,7 +1933,8 @@ fn install_ui(lua: &Lua, net: &crate::net_api::SharedNet) -> UiCells {
 }
 
 /// Every key `spawnEffect`'s options table reads.
-pub const SPAWN_EFFECT_KEYS: &[&str] = &["normal", "up", "scale", "intensity", "volume", "vel", "tint", "frame"];
+pub const SPAWN_EFFECT_KEYS: &[&str] =
+    &["normal", "forward", "up", "scale", "intensity", "volume", "vel", "tint", "frame"];
 
 /// Read `spawnEffect`'s arguments in either form: `x, y, z [, vx, vy, vz]`, or
 /// `pos [, opts]`.
@@ -1979,6 +1980,7 @@ fn spawn_effect_args(key: String, args: Vec<mlua::Value>) -> mlua::Result<crate:
         }
     };
     fx.normal = vec("normal")?;
+    fx.forward = vec("forward")?;
     fx.up = vec("up")?;
     fx.vel = vec("vel")?.unwrap_or([0.0; 3]);
     fx.scale = crate::opts::opt_num(&opts, CALL, "scale", 0.0, 1.0e4)?.map(|v| v as f32);

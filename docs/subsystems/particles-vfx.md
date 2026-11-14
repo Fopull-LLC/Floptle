@@ -106,6 +106,14 @@ emitter's over the world it rides: a node's own motion across a moving planet
 (what `node.vel` reports for a body), not the planet's orbit, and for a
 `spawnEffect` one-shot the `vel` it was fired with.
 
+A `spawnEffect` one-shot is turned by `vfx::effect_rotation`: its +Y along
+`normal` (or against gravity on a round world, else world +Y), and, when
+`forward` is given, its +Z along `forward` made square to that +Y. Without a
+forward, or with one along the normal (nothing is left once squared), it is
+the shortest turn from +Y onto the normal, as it always was. A forward is
+what lays a non-round shape (an Edge, a Box, a cone leaning off its axis)
+across something: a fall's lip, a skid, a weld seam.
+
 A one-shot fired with a `vel` moves its emit point on at that velocity, so a
 stream it is still emitting keeps pace with what fired it. Its `Local` tracks'
 particles take the velocity at birth as their own motion, the way a World

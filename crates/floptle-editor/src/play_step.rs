@@ -1630,7 +1630,7 @@ impl Editor {
         if asked.is_empty() {
             return;
         }
-        use floptle_core::math::{DVec3, Quat, Vec3};
+        use floptle_core::math::{DVec3, Vec3};
         let spheres = self.moving_world_spheres();
         for fx in asked {
             let pos = DVec3::from_array(fx.pos);
@@ -1644,7 +1644,7 @@ impl Editor {
                 let up = -g.normalize_or_zero();
                 (up != Vec3::ZERO && up.dot(Vec3::Y) < 0.999).then_some(up)
             });
-            let rotation = up.map_or(Quat::IDENTITY, |u| Quat::from_rotation_arc(Vec3::Y, u));
+            let rotation = crate::vfx::effect_rotation(up, fx.forward.map(to_vec).filter(|v| *v != Vec3::ZERO));
             let emitter = floptle_core::transform::Transform {
                 translation: pos,
                 rotation,
