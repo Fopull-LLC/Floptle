@@ -588,10 +588,15 @@ mesh.build(water.surface(river, { colors = true }))   -- on a node at the parent
   there. A bend is whole: no wedge of dry ground on the outside of a turn,
   no strip counted twice on the inside. The river ends square at its first
   and last points.
-- **On a round world** the points are positions in the parent's frame, about
-  the parent's centre, as a lake's `center` is: up is each point's own
-  radial and a height is a distance from the centre. `flat = true` lays it on
-  a flat world instead: up is the parent's +Y and a height is a `y`.
+- **Flat, or round a world: it follows the parent.** With no `parent`, or
+  on a node that is not a world (a ship, a building, a level's root), the
+  river lies flat in the parent's frame: up is the parent's +Y and a height
+  is a `y`. On a parent that is a celestial body it lies round the body: the
+  points are positions about the body's centre, as a lake's `center` is, up
+  is each point's own radial and a height is a distance from the centre.
+  `flat = true` or `flat = false` says which whatever it lies on; say it for
+  a body a script made in the same frame it declares the river, which is
+  not yet known to be a world.
 - **`water.surface(id [, { cells, colors, fixed, buffers }])`** is a strip
   down the channel over exactly the water `water.at` answers for, `cells`
   columns of triangles from bank to bank (4 by default). Its `uvs` are

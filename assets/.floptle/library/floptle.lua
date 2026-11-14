@@ -1926,8 +1926,9 @@ function water.flowAt(x, y, z) end
 ---`halfWidth`, `depth` and a number `current` on the volume are what a point
 ---that gives none takes; `current` runs along the channel, m/s; `bed = "u"`,
 ---the default, shallows to the banks and `"flat"` does not;
----`curve = "straight"` joins the points with straight lines; it lies on a
----round world about its parent's origin unless `flat = true`). It floats things, slows
+---`curve = "straight"` joins the points with straight lines; it lies flat
+---in its parent's frame, or round its parent when that is a celestial body,
+---and `flat = true` or `false` says which). It floats things, slows
 ---them and carries them on its `current`, and
 ---`water.at` answers for it. `depth` is how far below the surface its bed lies,
 ---so a cave under a lake is dry. From inside it looks like a Water Volume node

@@ -3012,6 +3012,7 @@ impl ScriptHost {
         let water_splashes: Rc<RefCell<std::collections::VecDeque<floptle_physics::splash::Splash>>> = Rc::default();
         let water_wet: Rc<RefCell<(f64, HashMap<u32, f64>)>> = Rc::default();
         let water_slam: Rc<RefCell<HashMap<u32, f32>>> = Rc::default();
+        let water_worlds: Rc<RefCell<std::collections::HashSet<String>>> = Rc::default();
         crate::water_api::install_water_api(
             &lua,
             crate::water_api::WaterShared {
@@ -3024,6 +3025,7 @@ impl ScriptHost {
                 splashes: water_splashes.clone(),
                 wet: water_wet.clone(),
                 slam: water_slam.clone(),
+                worlds: water_worlds.clone(),
                 next_id: Rc::default(),
                 colliders: colliders.clone(),
                 sim_origin: sim_origin.clone(),
@@ -3646,6 +3648,7 @@ impl ScriptHost {
             water_splashes,
             water_wet,
             water_slam,
+            water_worlds,
             scatter_sources,
             scatter_owners,
             scatter_settled,
@@ -4345,6 +4348,18 @@ impl ScriptHost {
         for &n in wet {
             w.1.insert(n, clock);
         }
+    }
+
+    /// Tell `water.addVolume` which nodes are round worlds (the scene's
+    /// celestial bodies), by name, before scripts run: a river declared on
+    /// one lies round it, and one declared anywhere else lies flat. Costs
+    /// nothing while the set has not changed.
+    pub fn set_water_worlds<'a>(&self, names: impl Iterator<Item = &'a str> + Clone) {
+        let mut worlds = self.water_worlds.borrow_mut();
+        if names.clone().count() == worlds.len() && names.clone().all(|n| worlds.contains(n)) {
+            return;
+        }
+        *worlds = names.map(str::to_string).collect();
     }
 
     /// `water.setSlam`'s values, by the water's entity.

@@ -1037,6 +1037,9 @@ pub struct ScriptHost {
     water_wet: Rc<RefCell<(f64, HashMap<u32, f64>)>>,
     /// `water.setSlam`, by the water's entity.
     water_slam: Rc<RefCell<HashMap<u32, f32>>>,
+    /// The nodes that are round worlds, by name: what a river declared on
+    /// one lies round.
+    water_worlds: Rc<RefCell<std::collections::HashSet<String>>>,
     /// Scatter sources scripts declared — resolved into
     /// drawable instances by the driver, never into scene nodes.
     scatter_sources: scatter_api::Sources,

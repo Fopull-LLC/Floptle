@@ -84,6 +84,9 @@ pub(crate) struct WaterShared {
     pub wet: Rc<RefCell<(f64, std::collections::HashMap<u32, f64>)>>,
     /// Each body of water's slam (`water.setSlam`), by the water's entity.
     pub slam: Rc<RefCell<std::collections::HashMap<u32, f32>>>,
+    /// The nodes that are round worlds, by name, refreshed by the driver
+    /// before scripts run: a ribbon declared on one lies round it.
+    pub worlds: Rc<RefCell<std::collections::HashSet<String>>>,
     pub next_id: Rc<std::cell::Cell<u32>>,
     /// The level, lent for the frame, so `water.surface` can tell which of a
     /// lake's sphere lies in its basin and which runs under the ground.
@@ -528,7 +531,7 @@ pub const MAX_TILED_SIDE: usize = 4096;
 pub const MAX_SIM_POINTS: usize = 128 * 128;
 
 /// A `water.addVolume` options table as the water it declares.
-fn declared_from(opts: &Table, id: u32) -> mlua::Result<DeclaredWater> {
+fn declared_from(opts: &Table, id: u32, worlds: &std::collections::HashSet<String>) -> mlua::Result<DeclaredWater> {
     const CALL: &str = "water.addVolume";
     crate::opts::check_keys(opts, VOLUME_KEYS, CALL)?;
     let err = |m: &str| mlua::Error::RuntimeError(format!("{CALL}: {m}"));
@@ -633,7 +636,12 @@ fn declared_from(opts: &Table, id: u32) -> mlua::Result<DeclaredWater> {
             Surface::Grid(std::sync::Arc::new(HeightGrid { x0: origin.x, z0: origin.z, cell, columns, rows, levels, flow }))
         }
         // A river: a line of points down its channel.
-        "ribbon" => crate::water_ribbon::ribbon_from(opts, CALL)?,
+        "ribbon" => {
+            // It lies round a world it is declared on, and flat anywhere
+            // else, unless it says which itself.
+            let on_world = matches!(opts.get::<Value>("parent")?, Value::String(n) if worlds.contains(&*n.to_str()?));
+            crate::water_ribbon::ribbon_from(opts, CALL, on_world)?
+        }
         other => return Err(err(&format!("`shape` is \"lake\", \"heightfield\", \"sim\" or \"ribbon\", not \"{other}\""))),
     };
     let anchor = match opts.get::<Value>("parent")? {
@@ -1020,7 +1028,7 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
         let s = shared.clone();
         if let Ok(f) = lua.create_function(move |_, opts: Table| {
             let id = s.next_id.get().wrapping_add(1).max(1);
-            let w = declared_from(&opts, id)?;
+            let w = declared_from(&opts, id, &s.worlds.borrow())?;
             s.next_id.set(id);
             s.declared.borrow_mut().push(w);
             Ok(id)
@@ -1628,6 +1636,7 @@ mod tests {
             splashes: Rc::default(),
             wet: Rc::default(),
             slam: Rc::default(),
+            worlds: Rc::default(),
             next_id: Rc::default(),
             colliders: Rc::default(),
             sim_origin: Rc::default(),

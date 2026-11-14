@@ -19,8 +19,9 @@ pub(crate) const CELLS_ACROSS: usize = 4;
 ///
 /// `halfWidth`, `depth` and `current` (a number) on the volume are what a
 /// point that gives none of its own takes, so a river of one width is
-/// written once.
-pub(crate) fn ribbon_from(opts: &Table, call: &str) -> mlua::Result<Surface> {
+/// written once. `on_world` says its parent is a round world: it then lies
+/// round the parent's centre, and flat otherwise, unless `flat` says which.
+pub(crate) fn ribbon_from(opts: &Table, call: &str, on_world: bool) -> mlua::Result<Surface> {
     let err = |m: &str| mlua::Error::RuntimeError(format!("{call}: {m}"));
     let num = |t: &Table, k: &str, what: &str| -> mlua::Result<Option<f64>> {
         match t.get::<Value>(k)? {
@@ -38,7 +39,7 @@ pub(crate) fn ribbon_from(opts: &Table, call: &str) -> mlua::Result<Surface> {
         Value::Integer(n) => Some(n as f64),
         _ => None,
     };
-    let flat = crate::opts::opt_bool(opts, call, "flat")?.unwrap_or(false);
+    let flat = crate::opts::opt_bool(opts, call, "flat")?.unwrap_or(!on_world);
     let straight = match crate::opts::opt_str(opts, call, "curve")?.as_deref() {
         None | Some("smooth") => false,
         Some("straight") => true,
@@ -147,6 +148,7 @@ mod tests {
             splashes: Rc::default(),
             wet: Rc::default(),
             slam: Rc::default(),
+            worlds: Rc::default(),
             next_id: Rc::default(),
             colliders: Rc::default(),
             sim_origin: Rc::default(),
@@ -397,7 +399,7 @@ mod tests {
             (r#"shape = "ribbon", flat = true, points = { { pos = vec3(0, 0, 0) }, { pos = vec3(9, 0, 0) } }"#, "halfWidth"),
             (r#"shape = "ribbon", flat = true, halfWidth = 2, points = { { pos = vec3(0, 0, 0), width = 3 }, { pos = vec3(9, 0, 0) } }"#, "width"),
             (r#"shape = "ribbon", flat = true, halfWidth = 2, points = { { pos = vec3(0, 0, 0), depth = 1 }, { pos = vec3(9, 0, 0) } }"#, "depth"),
-            (r#"shape = "ribbon", halfWidth = 2, points = { { pos = vec3(0, 0, 0) }, { pos = vec3(9, 0, 0) } }"#, "flat = true"),
+            (r#"shape = "ribbon", flat = false, halfWidth = 2, points = { { pos = vec3(0, 0, 0) }, { pos = vec3(9, 0, 0) } }"#, "flat = true"),
             (r#"shape = "ribbon", flat = true, halfWidth = 2, bed = "v", points = { { pos = vec3(0, 0, 0) }, { pos = vec3(9, 0, 0) } }"#, "bed"),
             (r#"shape = "ribbon", flat = true, halfWidth = 2, points = { { pos = vec3(0, 0, 0) }, { pos = vec3(0, 5, 0) } }"#, "above the other"),
             (r#"shape = "ribbon", flat = true, halfWidth = 2, curve = "wavy", points = { { pos = vec3(0, 0, 0) }, { pos = vec3(9, 0, 0) } }"#, "curve"),
@@ -421,6 +423,51 @@ mod tests {
         assert!(flat && open, "{flat} {open}");
     }
 
+    /// **A ribbon lies flat unless it is declared on a world.** With no
+    /// parent, or on a node that is not a world (a ship, a building), up is
+    /// the parent's +Y and its points may lie anywhere, the origin included;
+    /// on a node that is a world it lies round the world's centre; and
+    /// `flat = true` or `flat = false` says which whatever it lies on.
+    #[test]
+    fn a_ribbon_is_flat_unless_its_parent_is_a_world() {
+        let (lua, shared) = host();
+        shared.worlds.borrow_mut().insert("Planet".into());
+        lua.load(
+            r#"local low = { { pos = vec3(0, 0, 0) }, { pos = vec3(60, 0, 0) } }
+               local high = { { pos = vec3(0, 500, 0) }, { pos = vec3(60, 500, 0) } }
+               local function river(parent, flat, points)
+                 return water.addVolume{ shape = "ribbon", parent = parent, flat = flat, halfWidth = 3, depth = 2, points = points }
+               end
+               river(nil, nil, low)          -- 1: no parent
+               river("Ship", nil, low)       -- 2: a parent that is not a world
+               river("Planet", nil, high)    -- 3: a world
+               river("Planet", true, high)   -- 4: a world, told flat
+               river(nil, false, high)       -- 5: no parent, told round
+               up = water.at(30, -1, 0).up"#,
+        )
+        .exec()
+        .unwrap();
+        let flat: Vec<bool> = shared
+            .declared
+            .borrow()
+            .iter()
+            .map(|w| match &w.surface {
+                Surface::Ribbon { course, .. } => course.flat,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(flat, [true, true, false, true, false], "no parent, a ship, a world, a world told flat, no parent told round");
+        assert_eq!(lua.globals().get::<crate::math_api::LuaVec3>("up").unwrap().0, DVec3::Y);
+        // Round the world, up at the river's far end leans out along the
+        // radial; flat, it is the parent's +Y there as everywhere.
+        let d = shared.declared.borrow();
+        let up = |i: usize| match &d[i].surface {
+            Surface::Ribbon { course, .. } => course.stations.last().unwrap().up,
+            _ => unreachable!(),
+        };
+        assert!(up(2).x > 0.1 && up(3) == DVec3::Y, "{:?} {:?}", up(2), up(3));
+    }
+
     /// **On a round world a ribbon lies on the world.** Its points are in
     /// its parent's frame, about the parent's centre: up is the radial, the
     /// level `water.levelOf` reads is a radius, and its strip's normals
@@ -428,6 +475,7 @@ mod tests {
     #[test]
     fn a_ribbon_on_a_round_world_is_radial() {
         let (lua, shared) = host();
+        shared.worlds.borrow_mut().insert("Planet".into());
         let (depth, level, up): (f64, f64, crate::math_api::LuaVec3) = lua
             .load(
                 r#"local function on(a, r) return vec3(math.sin(a) * r, math.cos(a) * r, 0) end

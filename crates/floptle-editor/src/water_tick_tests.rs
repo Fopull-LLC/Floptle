@@ -506,7 +506,7 @@ end
 }
 
 /// **A river rides the node it lies on, tick by tick.** A ribbon declared
-/// on a node turned a quarter about +Y and lifted 5 m every tick, two ticks
+/// on a node that is no world (so it lies flat in the node's frame), turned a quarter about +Y and lifted 5 m every tick, two ticks
 /// a frame: `water.at` in `fixedUpdate` finds the river 50 m down its
 /// channel where the node has carried it (along the world's −Z, the node's
 /// +X), half a metre under its eased surface, its current running down the
@@ -521,7 +521,7 @@ local id, n = nil, 0
 function fixedUpdate(node, dt)
   local bed = find("Bed")
   if not id then
-    id = water.addVolume{ shape = "ribbon", parent = "Bed", flat = true, halfWidth = 3, depth = 4, current = 2,
+    id = water.addVolume{ shape = "ribbon", parent = "Bed", halfWidth = 3, depth = 4, current = 2,
                           points = { { pos = vec3(0, 0, 0) }, { pos = vec3(100, -2, 0) } } }
     return
   end
@@ -571,5 +571,50 @@ end
     let b = floptle_core::world_transform(&ed.world, ball).translation;
     assert!(b.z < -24.0 && b.z > -34.0, "the ball is {} m down the channel; it went in at 20", -b.z);
     assert!((b.y - (200.0 + b.z / 50.0)).abs() < 0.15, "the ball is at {}, the river's surface there at {}", b.y, 200.0 + b.z / 50.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A river lies round a world and flat anywhere else, from the first
+/// frame.** Declared in a game's first `update`, before any tick has run,
+/// with nothing said about `flat`: the one on the planet is round (its
+/// surface 101 m from the planet's centre all the way along, up the radial),
+/// the one on no parent is flat, and each can be told otherwise.
+#[test]
+fn a_ribbon_is_round_on_a_world_and_flat_off_it() {
+    let (mut ed, dir, _) = round_world(
+        "ribbon_up",
+        r#"
+local made = false
+function update(node, dt)
+  if made then return end
+  made = true
+  local function on(a, r) return vec3(math.cos(a) * r, 0, math.sin(a) * r) end
+  local round = { { pos = on(0, 101) }, { pos = on(0.3, 101) }, { pos = on(0.6, 101) } }
+  local level = { { pos = vec3(0, 300, 0) }, { pos = vec3(40, 300, 0) } }
+  water.addVolume{ shape = "ribbon", parent = "Planet", halfWidth = 2, depth = 1, points = round }
+  water.addVolume{ shape = "ribbon", halfWidth = 2, depth = 1, points = level }
+  water.addVolume{ shape = "ribbon", parent = "Planet", flat = true, halfWidth = 2, depth = 1, points = round }
+  water.addVolume{ shape = "ribbon", flat = false, halfWidth = 2, depth = 1, points = level }
+  local w = water.at(on(0.15, 100.5))
+  log(string.format("UP %.3f %.3f", w and w.depth or -1, w and (w.up.x * math.cos(0.15) + w.up.z * math.sin(0.15)) or 0))
+end
+"#,
+    );
+    ed.toggle_play();
+    ed.play_step(1.0 / 60.0, true);
+    assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    let flat: Vec<bool> = ed
+        .script_host
+        .declared_water()
+        .iter()
+        .map(|w| match &w.surface {
+            floptle_core::water::Surface::Ribbon { course, .. } => course.flat,
+            _ => panic!("a ribbon"),
+        })
+        .collect();
+    assert_eq!(flat, [false, true, true, false], "on the planet, on nothing, on the planet told flat, on nothing told round");
+    ed.drain_script_logs();
+    let line = ed.console.entries.iter().find_map(|e| e.msg.strip_prefix("UP ").map(str::to_string)).expect("the script logged");
+    assert_eq!(line, "0.500 1.000", "half a metre under a surface 101 m out, up along the radial");
     let _ = std::fs::remove_dir_all(&dir);
 }

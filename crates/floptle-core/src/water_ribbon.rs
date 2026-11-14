@@ -273,7 +273,7 @@ impl Ribbon {
             }
             if !flat && p.pos.length() <= p.half_width {
                 return Err(format!(
-                    "point {} is at its parent's centre: a ribbon lies on a round world about its parent's origin unless it is declared `flat = true`",
+                    "point {} is at its parent's centre: a ribbon on a world lies round the world's centre, and `flat = true` lays it flat instead",
                     i + 1
                 ));
             }
