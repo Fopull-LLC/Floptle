@@ -40,6 +40,8 @@ pub struct AssemblyInfo {
     /// length²): the tensor the solver turns torques with.
     pub inertia: [[f64; 3]; 3],
     pub grounded: bool,
+    /// How many of its parts touched something in the last tick.
+    pub contacts: u32,
     /// Pinned in place by `assembly.setAnchored` (launch clamps, latches).
     pub anchored: bool,
     /// Holding on with `assembly.grip` (and the grip has not broken).
@@ -441,6 +443,7 @@ pub(crate) fn install_assembly_api(
             }
             out.set("inertia", inertia)?;
             out.set("grounded", i.grounded)?;
+            out.set("contacts", i.contacts)?;
             out.set("anchored", i.anchored)?;
             out.set("coasting", i.coasting)?;
             out.set("gripped", i.gripped)?;

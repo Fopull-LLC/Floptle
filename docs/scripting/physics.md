@@ -351,6 +351,32 @@ A part's mass is read and written as `rb.mass`; the assembly re-weighs itself
 on the next tick. `assembly.info` reports the inertia the solver uses, and a
 parked assembly falls asleep like a single body (`node.asleep`).
 
+Writing a mass every tick is fine: the mass, the centre of mass and the inertia
+are exact after every write, and a tank burning off a few grams a tick does not
+keep its craft awake. A change of mass wakes a sleeping craft only once it could
+matter to what the craft rests on: more than a twentieth of its mass, or its
+centre of mass moved by more than a hundredth of its reach, since a change of
+mass last woke it. A slow burn therefore still wakes a parked craft now and
+then, for the half second it takes to settle again. `assembly.syncColliders`
+works the same way: every pose is taken, and the craft is woken only when a
+part stands more than a millimetre, or is turned more than a milliradian, from
+where it was when a re-pose last woke it, so calling it every tick on parts
+that have not moved costs a parked craft nothing.
+
+`assembly.info(node).contacts` is how many of the craft's parts touched
+something in the last tick: the level, a body, another craft. A craft asleep
+counts the parts it rests on. A craft that never sleeps while it reads 0 is not
+resting on anything (it is afloat, held by forces, or hanging from a joint),
+whatever it looks like; `assembly.impacts` says which parts touched and how
+hard.
+
+A moving craft is swept against the level so that it stops at the first thing
+it reaches instead of ending the tick inside it. Each part is swept only when
+it moves further in one tick than a quarter of its own thickness, so a thin part (a
+fender, an aerial, a solar panel) is swept at walking pace and a thick one only
+at speed: at 120 ticks a second a part 2 cm thick is swept above about 0.6 m/s
+and one 50 cm thick above about 15 m/s.
+
 ### 4.2 Two telegraph layers: `draw.*` (game) vs `gizmo.*` (debug)
 
 They look similar but serve different masters:
