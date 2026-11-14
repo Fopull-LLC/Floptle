@@ -225,7 +225,13 @@ Start small (the ADR-0007 subset), grow over time. Categories, with examples:
   see [`./materials-and-textures.md`](./materials-and-textures.md).
 - **Screen** (`stage post` only) — `sceneColor`, `sceneDepth`, `sceneNormal`,
   `sceneRay`, `cameraPosition`, `screenTexel`: the finished frame, readable at any pixel rather than only this
-  one, and `sceneWaterDepth`, how far under water the camera is. A screen
+  one, `scenePosition`, the world point a pixel shows, and `sceneDistance`, how
+  far along its ray that is (`sceneDepth` here is depth along the camera's
+  axis, and `1e6` on sky), `sceneWaterDepth`, how far under water the camera is, and
+  `sceneSurfaceDepth`, how far away the nearest see-through surface over a
+  pixel is (water, glass, any blended material; `2e6` where there is none, past the sky's `1e6`), so
+  `step(sceneSurfaceDepth(), sceneDepth())` tells ground under water from bare
+  ground. A material leaves itself out with `surfaceDepth = false`. A screen
   shader also declares texture slots (`sample`, `sampleTriplanar`) and
   **uniform arrays**, `uniform bodies: vec4[8]` read as `bodies[i]`, which a
   script fills in one call. See [`./post-processing.md`](./post-processing.md).
@@ -247,8 +253,9 @@ Start small (the ADR-0007 subset), grow over time. Categories, with examples:
   where a point lands on the screen (`screenUv(worldPos)` is this pixel). A
   shader that reads `sceneColor` is drawn after the rest of the scene is
   captured, as glass is, so it sees what is behind it and never itself; that is
-  refraction. `sceneDepth` is the solid scene's distance from the camera (water
-  and glass are not in it), so `sceneDepth(uv) - length(worldPos)` is how much
+  refraction. `sceneDepth` is the solid scene's distance from the camera along
+  the view ray (water and glass are not in it; `1e9` where there is only sky,
+  or no depth to read), so `sceneDepth(uv) - length(worldPos)` is how much
   water a view ray crosses: what depth colour and absorption are made of.
 
   ```

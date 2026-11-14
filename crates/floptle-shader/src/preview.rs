@@ -526,6 +526,29 @@ fn flsl_post_depth(uv: vec2<f32>) -> f32 {
     return FLSL_SKY_DEPTH;
 }
 
+// The tile's camera is at the origin, so the point is the ray scaled out to
+// the depth along its axis.
+fn flsl_post_position(uv: vec2<f32>) -> vec3<f32> {
+    let r = flsl_post_ray(uv);
+    return r * (flsl_post_depth(uv) / max(-r.z, 1e-4));
+}
+fn flsl_post_distance(uv: vec2<f32>) -> f32 {
+    let d = flsl_post_depth(uv);
+    if (d >= FLSL_SKY_DEPTH) {
+        return FLSL_SKY_DEPTH;
+    }
+    return d / max(-flsl_post_ray(uv).z, 1e-4);
+}
+
+// A sheet of water across the tile's lower third, nearer than the ball, so
+// `sceneSurfaceDepth` shows both of its answers in one tile.
+fn flsl_post_surface_depth(uv: vec2<f32>) -> f32 {
+    if (uv.y > 0.66) {
+        return min(3.0, flsl_post_depth(uv));
+    }
+    return 2.0e6;
+}
+
 fn flsl_post_normal(uv: vec2<f32>) -> vec3<f32> {
     let b = pv_ball(uv);
     if (b > 0.0) {
@@ -727,6 +750,26 @@ mod tests {
         }
         let ui = "shader u {\n  stage ui\n  output color = vec4(skyRadiance(vec3(0, 1, 0)), 1)\n}\n";
         assert!(crate::compile_ui(ui).is_err(), "a UI shader read the sky");
+    }
+
+    /// **The preview has every screen op.** `sceneSurfaceDepth` compiles
+    /// against the real screen prelude and against the preview's, which lays
+    /// a sheet of water across the tile's lower third; a shader that reads it
+    /// keeps its preview tile in the graph.
+    #[test]
+    fn a_screen_shader_reads_what_a_pixel_is_seen_through_in_its_preview() {
+        let src = "shader wet {\n  stage post\n  let through = step(sceneSurfaceDepth(), sceneDepth())\n  \
+                   let p = scenePosition() + scenePosition(uv + screenTexel()) * sceneDistance()\n  \
+                   output color = mix(sceneColor().rgb, vec3(0, 0.3, 0.6), through * 0.5 + sceneSurfaceDepth(uv + screenTexel()) * 0) + p * 0\n}\n";
+        let compiled = crate::compile_post(src).expect("sceneSurfaceDepth is a screen op");
+        let prelude = format!("{}\n{}", crate::transpile::POST_PRELUDE, crate::transpile::POST_FIELD_SHIM);
+        crate::transpile::validate(&prelude, &compiled.chunk).unwrap_or_else(|e| panic!("naga rejects: {}", e.message));
+        assert!(compiled.chunk.contains("flsl_post_surface_depth(in.uv)"), "{}", compiled.chunk);
+        assert!(compiled.chunk.contains("flsl_post_position(in.uv)") && compiled.chunk.contains("flsl_post_distance(in.uv)"), "{}", compiled.chunk);
+        let pv = preview_of(src);
+        if let Err(d) = validate_module(&pv.wgsl) {
+            panic!("the preview module is rejected: {}", d.message);
+        }
     }
 
     #[test]

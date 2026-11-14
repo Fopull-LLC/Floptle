@@ -376,6 +376,13 @@ pub struct SsaoFrame<'a> {
     /// `skyRadiance` in a screen shader. `None` reads black, as a surface
     /// does with no sky captured.
     pub sky: Option<&'a wgpu::TextureView>,
+    /// The depth of the surfaces the scene is seen through
+    /// ([`crate::Raster::surface_depth_view`], the size of `depth`), for
+    /// `sceneSurfaceDepth` in a screen shader. `None` reads "seen through
+    /// nothing" everywhere: pass it only in a frame whose passes read it
+    /// ([`PostShaders::reads_surface_depth`]), which is what keeps the pass
+    /// that draws it out of every other frame.
+    pub surface_depth: Option<&'a wgpu::TextureView>,
 }
 
 /// The camera a `stage post` shader reads — `PostCam` in `post_prelude.wgsl`.
@@ -520,8 +527,10 @@ pub(crate) mod layouts {
         })
     }
 
-    /// An authored screen shader's group(1): [`depth`]'s two, and the sky the
-    /// frame captured with its sampler at bindings 2 and 3, for `skyRadiance`.
+    /// An authored screen shader's group(1): [`depth`]'s two, the sky the
+    /// frame captured with its sampler at bindings 2 and 3, for `skyRadiance`,
+    /// and the see-through surfaces' depth at binding 4, for
+    /// `sceneSurfaceDepth`.
     pub fn flsl(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
         let mut entries = vec![
             wgpu::BindGroupLayoutEntry {
@@ -559,6 +568,18 @@ pub(crate) mod layouts {
             binding: 3,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        });
+        // A depth texture read with textureLoad through a float binding, as
+        // binding 0 is and for its reason.
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
             count: None,
         });
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries: &entries })
@@ -645,6 +666,18 @@ struct CustomPost {
     /// How many texture slots the shader declares: which group(2) layout its
     /// pipeline was built against.
     tex_slots: usize,
+    /// The shader calls `sceneSurfaceDepth`, so a frame that runs it needs
+    /// the see-through depth pass. Recorded when it is built, the one place
+    /// that sees its source.
+    reads_surface_depth: bool,
+}
+
+/// Does a screen shader's complete module call `sceneSurfaceDepth`? The
+/// prelude defines `flsl_post_surface_depth` once, and only the transpiler
+/// emits a call to it, so any mention that is not that definition is a call.
+fn module_reads_surface_depth(module_src: &str) -> bool {
+    const CALL: &str = "flsl_post_surface_depth(";
+    module_src.match_indices(CALL).any(|(at, _)| !module_src[..at].ends_with("fn "))
 }
 
 /// The most texture slots a screen shader can declare (the shader language's
@@ -838,13 +871,14 @@ impl PostShaders {
     }
 }
 
-/// [`PostShaders::fits`] against explicit limits: the frame and the depth are
-/// two textures and one sampler a pass binds before its own slots.
+/// [`PostShaders::fits`] against explicit limits: the frame, the depth, the
+/// sky and the see-through depth are four textures, and the frame's and the
+/// sky's two samplers, that a pass binds before its own slots.
 fn post_fits_within(tex_slots: usize, max_textures: u32, max_samplers: u32) -> Result<(), String> {
     if tex_slots > POST_TEXTURE_SLOTS {
         return Err(format!("a screen shader can declare at most {POST_TEXTURE_SLOTS} texture slots (this one declares {tex_slots})"));
     }
-    let (textures, samplers) = (2 + tex_slots as u32, 1 + tex_slots as u32);
+    let (textures, samplers) = (4 + tex_slots as u32, 2 + tex_slots as u32);
     if textures > max_textures || samplers > max_samplers {
         return Err(format!(
             "this screen shader's {tex_slots} texture slots need {textures} textures and {samplers} samplers in one pass; \
@@ -902,7 +936,7 @@ impl PostShaderBuilder {
             multiview_mask: None,
             cache: None,
         });
-        BuiltPostShader(CustomPost { pipeline, tex_slots })
+        BuiltPostShader(CustomPost { pipeline, tex_slots, reads_surface_depth: module_reads_surface_depth(module_src) })
     }
 }
 
@@ -990,6 +1024,15 @@ impl PostShaders {
         !self.slots.is_empty()
     }
 
+    /// Does any pass in this frame's list read `sceneSurfaceDepth`? Only
+    /// then does a frame draw the see-through surfaces' depth
+    /// ([`crate::Raster::surface_depth_pass`]) and hand it to the chain
+    /// ([`SsaoFrame::surface_depth`]); a project whose screen shaders never
+    /// read it pays nothing for it.
+    pub fn reads_surface_depth(&self) -> bool {
+        self.slots.iter().any(|s| self.shaders.get(s.shader).is_some_and(|sh| sh.reads_surface_depth))
+    }
+
     /// Forget every compiled pass and every slot (a project switch).
     pub fn clear(&mut self) {
         self.shaders.clear();
@@ -1065,6 +1108,10 @@ pub struct PostStack {
     /// no-op: it is a validation error at the moment of drawing.
     _far_depth: wgpu::Texture,
     far_depth_view: wgpu::TextureView,
+    /// A 1×1 depth texture cleared to far: what `sceneSurfaceDepth` reads in
+    /// a frame that drew no see-through surface, or was handed none.
+    _no_surface: wgpu::Texture,
+    no_surface_view: wgpu::TextureView,
 }
 
 impl PostStack {
@@ -1332,6 +1379,35 @@ impl PostStack {
             view_formats: &[],
         });
         let far_depth_view = far_depth.create_view(&wgpu::TextureViewDescriptor::default());
+        // Cleared here, once: far is "no surface over this pixel".
+        let no_surface = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("post-no-surface-depth"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let no_surface_view = no_surface.create_view(&wgpu::TextureViewDescriptor::default());
+        {
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("post-no-surface-depth") });
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("post-no-surface-depth"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &no_surface_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            gpu.queue.submit([encoder.finish()]);
+        }
 
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("post-params"),
@@ -1408,6 +1484,8 @@ impl PostStack {
             no_sky,
             _far_depth: far_depth,
             far_depth_view,
+            _no_surface: no_surface,
+            no_surface_view,
         }
     }
 
@@ -1888,6 +1966,7 @@ impl PostStack {
             };
             gpu.queue.write_buffer(&self.dof_cam_buf, 0, bytemuck::bytes_of(&cam));
             let sky = ssao.and_then(|f| f.sky).unwrap_or(&self.no_sky.0);
+            let surface = ssao.and_then(|f| f.surface_depth).unwrap_or(&self.no_surface_view);
             let depth_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("post-flsl-depth"),
                 layout: &self.flsl_layout,
@@ -1902,6 +1981,7 @@ impl PostStack {
                     },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(sky) },
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.no_sky.1) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(surface) },
                 ],
             });
             // The chain params an authored pass can read: the texel (so an

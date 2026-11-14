@@ -824,4 +824,57 @@ mod screen_pass_tests {
             .expect_err("post only");
         assert!(err.contains("sceneWaterDepth"), "{err}");
     }
+
+    /// `sceneSurfaceDepth([uv])` is a screen op, with `sceneDepth`'s optional
+    /// uv. A shader written before it that uses the name for a value of its
+    /// own (a `let`, a uniform) still compiles, and reads its own value.
+    #[test]
+    fn a_screen_shader_reads_what_a_pixel_is_seen_through() {
+        let c = crate::compile_post(
+            "shader wet {\n  stage post\n  let through = step(sceneSurfaceDepth(), sceneDepth())\n  \
+             output color = mix(sceneColor().rgb, vec3(0, 0.2, 0.3), through * saturate(sceneSurfaceDepth(uv + screenTexel())))\n}\n",
+        )
+        .expect("compiles");
+        assert!(c.chunk.contains("flsl_post_surface_depth(in.uv)"), "{}", c.chunk);
+        naga(&c);
+        // The example `docs/subsystems/post-processing.md` gives.
+        let c = crate::compile_post(
+            "shader wetShore {\n  stage post\n  uniform waterline: float = 0\n  \
+             let film = 1 - saturate(abs(scenePosition().y - waterline) * 2)\n  \
+             let through = step(sceneSurfaceDepth(), sceneDepth())\n  \
+             output color = sceneColor().rgb * (1 - 0.4 * film * (1 - through))\n}\n",
+        )
+        .expect("the documented example compiles");
+        naga(&c);
+        let err = crate::compile_fragment("shader s {\n  stage fragment\n  output color = vec3(sceneSurfaceDepth())\n}\n")
+            .expect_err("post only");
+        assert!(err.contains("sceneSurfaceDepth"), "{err}");
+        // The other two ops that arrived with it: the world point and the
+        // distance along the ray.
+        let c = crate::compile_post(
+            "shader grid {\n  stage post\n  let p = scenePosition(uv)\n  \
+             output color = sceneColor().rgb * fract(p.x) * step(sceneDistance(), 50)\n}\n",
+        )
+        .expect("compiles");
+        assert!(c.chunk.contains("flsl_post_position(in.uv)") && c.chunk.contains("flsl_post_distance(in.uv)"), "{}", c.chunk);
+        naga(&c);
+        for op in ["scenePosition", "sceneDistance"] {
+            let err = crate::compile_fragment(&format!("shader s {{\n  stage fragment\n  output color = vec3({op}())\n}}\n"))
+                .expect_err("post only");
+            assert!(err.contains(op), "{err}");
+        }
+        for body in [
+            "let sceneSurfaceDepth = sceneDepth() * 0.5\n  output color = sceneColor().rgb * sceneSurfaceDepth",
+            "uniform sceneSurfaceDepth: float = 2\n  output color = sceneColor().rgb * sceneSurfaceDepth",
+            "let scenePosition = cameraPosition() + sceneRay() * sceneDepth()\n  output color = sceneColor().rgb * scenePosition.y",
+            "let sceneDistance = length(sceneRay() * sceneDepth())\n  output color = sceneColor().rgb * sceneDistance",
+        ] {
+            let c = crate::compile_post(&format!("shader old {{\n  stage post\n  {body}\n}}\n"))
+                .unwrap_or_else(|e| panic!("a shader that already used the name no longer compiles: {e}"));
+            for f in ["flsl_post_surface_depth", "flsl_post_position", "flsl_post_distance"] {
+                assert!(!c.chunk.contains(f), "the shader's own value was replaced by the op:\n{}", c.chunk);
+            }
+            naga(&c);
+        }
+    }
 }

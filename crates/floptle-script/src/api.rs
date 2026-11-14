@@ -2506,6 +2506,9 @@ pub(crate) fn apply_material_fields(m: &mut floptle_core::Material, fields: &[(S
                 m.alpha_cutoff = num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.alpha_cutoff)
             }
             "doubleSided" => m.double_sided = num(v).map(|n| n != 0.0).unwrap_or(m.double_sided),
+            // `surfaceDepth = false` leaves a blended surface out of what a
+            // screen shader's `sceneSurfaceDepth` reads.
+            "surfaceDepth" => m.surface_depth = num(v).map(|n| n != 0.0).unwrap_or(m.surface_depth),
             // "opaque", "cutout" or "blend": how alpha is drawn.
             "blend" => {
                 if let CompVal::Str(b) = v
@@ -3465,7 +3468,7 @@ pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "normalMap", "normalStrength", "roughnessMap", "roughness", "metallicMap", "metallic",
     "occlusionMap", "occlusionStrength", "emissiveMap", "reflectivity", "transmission", "ior", "thickness",
     "refraction", "sway", "backlight", "nearFadeStart", "nearFadeEnd", "shading", "jitter", "affineUv", "vertexLit",
-    "ditherAlpha", "retroExempt", "alphaCutoff", "doubleSided", "blend", "shader",
+    "ditherAlpha", "retroExempt", "alphaCutoff", "doubleSided", "surfaceDepth", "blend", "shader",
 ];
 
 /// Every key `node:setCelestial{...}` reads.

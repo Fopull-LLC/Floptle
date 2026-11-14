@@ -120,6 +120,7 @@ fn main() {
             eye: [0.0; 3],
             water_depth: 0.0,
             sky: None,
+            surface_depth: None,
         };
         post.run_with(&gpu, &settings, Some(&ssao), &out_view, shaders);
         read_rgb(&gpu, &out)

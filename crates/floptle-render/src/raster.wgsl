@@ -3099,6 +3099,36 @@ fn fs_mask(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(1.0, 0.0, 0.0, 1.0);
 }
 
+// The see-through surfaces, depth only, into a target of their own: what a
+// screen shader reads as `sceneSurfaceDepth`. The complement of `fs_depth`,
+// which draws only what is solid. It writes where the surface's colour pass
+// draws something: every pixel of a surface its own shader draws (as that pass
+// does), every texel of glass its cutoff keeps, and every texel of a blended
+// surface with any opacity at all, so a blended picture's empty border is not
+// a surface.
+@fragment
+fn fs_surface_depth(in: VsOut, @builtin(front_facing) front: bool) {
+    g1_set_layers(in.imeta);
+    // The texel first: see `fs_depth` on uniform control flow.
+    let texel_a = base_texel(in).a;
+    let ext = ext_at(imeta_ext(in));
+    let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
+    if (near_fade_cut(ext, in.view_pos, pix)) {
+        discard;
+    }
+    if (ext_has(ext, EXT_SHADED)) {
+        return;
+    }
+    if (ext_has(ext, EXT_SINGLE_SIDED) && !front) {
+        discard;
+    }
+    let a = texel_a * in.color.a * in.vcolor.a;
+    let blended = ext_has(ext, EXT_BLEND) || in.color.a < 0.999;
+    if (a < select(ext_cutoff(ext), 0.004, blended)) {
+        discard;
+    }
+}
+
 // Depth-only prepass: writes depth for texels that are CERTAINLY opaque and
 // discards the rest — conservative, so cutout/blended texels never wrongly
 // occlude what's behind them (they simply don't prime the depth buffer). The
