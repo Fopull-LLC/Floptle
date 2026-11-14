@@ -26,7 +26,7 @@ pub(crate) struct AudioBridges {
 pub(crate) const PLAY_KEYS: &[&str] = &[
     "volume", "pitch", "pan", "minDistance", "maxDistance", "mode", "falloff", "track",
     "endBehavior", "loop", "sends", "lowpass", "group", "priority", "airAbsorption",
-    "lowpassFalloff",
+    "lowpassFalloff", "listenerSpace",
 ];
 
 /// Read a play-options table into `PlayParams`, refusing anything it does not
@@ -105,6 +105,16 @@ fn parse_params(opts: Option<&Table>) -> mlua::Result<PlayParams> {
     }
     if let Some(v) = crate::opts::opt_num(t, CALL, "airAbsorption", 0.0, 1.0e6)? {
         p.air_absorption = v as f32;
+    }
+    match t.raw_get::<Value>("listenerSpace")? {
+        Value::Nil => {}
+        Value::Boolean(b) => p.listener_space = b,
+        v => {
+            return Err(mlua::Error::runtime(format!(
+                "{CALL}: `listenerSpace` is true or false, got {}",
+                v.type_name()
+            )));
+        }
     }
     match t.raw_get::<Value>("lowpassFalloff")? {
         Value::Nil => {}
@@ -503,6 +513,24 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
                     }
                 };
                 cmds.borrow_mut().push(AudioCmd::GroupLimit { group, max });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // audio.setWorldLowpass(hz) — the listener's medium: muffle every
+        // sound out in the world; nil or 0 clears it.
+        let cmds = b.commands.clone();
+        audio.set(
+            "setWorldLowpass",
+            lua.create_function(move |_, hz: Option<f64>| {
+                let hz = hz.unwrap_or(0.0);
+                if !(hz.is_finite() && hz >= 0.0) {
+                    return Err(mlua::Error::runtime(format!(
+                        "audio.setWorldLowpass(hz): hz is 0 or more (0 or nil = clear air), got {hz}"
+                    )));
+                }
+                cmds.borrow_mut().push(AudioCmd::WorldLowpass { hz: hz.min(1.0e6) as f32 });
                 Ok(())
             })?,
         )?;

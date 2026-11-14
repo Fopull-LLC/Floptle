@@ -290,6 +290,41 @@ lowest cutoff wins: one filter on the sound, never two stacked. Only a sound
 in the world has a distance: a flat sound (no position, or `mode = "Flat"`)
 is never dulled by either. Both are off unless named.
 
+### Muffle the world, not the cockpit: `audio.setWorldLowpass`
+
+Under water, or in a vacuum suit, the world outside goes dull while the
+breath in the helmet and the beeps in the cockpit stay crisp. One call
+sets the listener's medium, and one option marks what is heard inside:
+
+```lua
+audio.play("audio/breath.ogg", diver, { loop = true, listenerSpace = true })
+audio.play("audio/sonar.ogg", sub, { listenerSpace = true })
+
+function update(node, dt)
+  audio.setWorldLowpass(camera.y < seaLevel and 600 or 0)   -- 0 / nil = clear air
+end
+```
+
+`audio.setWorldLowpass(hz)` puts a low-pass at `hz` on every sound out in the
+world: placed at a point or on a node, and not flat. A sound played with
+`listenerSpace = true` passes it by, and so does a flat one (music, UI,
+stingers), which is not in the world to begin with. The change glides over a
+few milliseconds, so flipping it on the frame the camera goes under never
+clicks; to ease in over a second, call it every frame with a moving value.
+It holds until Play stops.
+
+How the low-passes compose:
+
+- On each sound, its own `lowpass` (`s:setLowpass`), its distance low-pass
+  (`airAbsorption`, `lowpassFalloff`) and the world low-pass are one filter
+  at the **lowest** of their cutoffs. A sound behind a wall under water is
+  as dull as the duller of the two, not doubly so.
+- A track's `audio.track(name):setLowpass(hz)` is a separate filter on the
+  whole bus, after the sounds are mixed and after the track's effects, so it
+  stacks on top. That is still the tool for a whole bus (dull the music when
+  the pause menu opens); the world low-pass is the one that tells the world
+  from the cockpit.
+
 ### The Audio Source component
 
 For authored emitters (ambient loops, music zones, alarm props), add an

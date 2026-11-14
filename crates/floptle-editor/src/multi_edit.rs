@@ -225,6 +225,7 @@ field_diff!(floptle_audio::PlayParams {
     priority,
     air_absorption,
     lowpass_falloff,
+    listener_space,
 });
 
 impl FieldDiff for floptle_audio::AudioSource {

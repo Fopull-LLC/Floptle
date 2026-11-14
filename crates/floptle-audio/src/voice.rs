@@ -93,9 +93,11 @@ struct Group {
 }
 
 /// The cutoff a voice is filtered at, in Hz (0 = open): the lowest of its own
-/// `lowpass` and what distance puts on it. `dist` is `None` for a sound with
-/// no place in the world, which distance cannot dull.
-fn voice_cutoff(params: &PlayParams, dist: Option<f32>) -> f32 {
+/// `lowpass`, what distance puts on it, and the world low-pass. `dist` is
+/// `None` for a sound with no place in the world, which neither distance nor
+/// the world's medium can dull; a sound in the listener's own space
+/// (`listener_space`) is in the world for distance but passes the medium by.
+fn voice_cutoff(params: &PlayParams, dist: Option<f32>, world_lowpass: f32) -> f32 {
     let mut hz = params.lowpass.max(0.0);
     let mut lower = |c: f32| {
         if c > 0.0 && (hz == 0.0 || c < hz) {
@@ -110,6 +112,9 @@ fn voice_cutoff(params: &PlayParams, dist: Option<f32>) -> f32 {
             params.min_distance,
             params.max_distance,
         ));
+        if !params.listener_space {
+            lower(world_lowpass);
+        }
     }
     hz
 }
@@ -241,6 +246,9 @@ pub struct AudioCore {
     /// Every voice group seen since the last reset. A voice holds its group's
     /// place in this list, so the list only grows.
     groups: Vec<Group>,
+    /// The listener's medium: a low-pass on every sound out in the world, in
+    /// Hz; 0 = clear air.
+    world_lowpass: f32,
 }
 
 /// Match `params.sends` onto a voice's taps, keeping the level a surviving
@@ -270,6 +278,7 @@ impl AudioCore {
             tmp_l: vec![0.0; block],
             tmp_r: vec![0.0; block],
             groups: Vec::with_capacity(MAX_GROUPS),
+            world_lowpass: 0.0,
         }
     }
 
@@ -412,6 +421,15 @@ impl AudioCore {
         self.listener = listener;
     }
 
+    /// Muffle the world, not the cockpit: a low-pass at `hz` on every sound
+    /// out in the world (placed, and not flat), for a listener under water or
+    /// in a vacuum suit. A `listener_space` sound passes it by, and so does a
+    /// flat one (music, UI). 0 = off. It joins each sound's own cutoffs (the
+    /// lowest wins) and glides there over a block, so it never clicks.
+    pub fn set_world_lowpass(&mut self, hz: f32) {
+        self.world_lowpass = if hz.is_finite() { hz.max(0.0) } else { 0.0 };
+    }
+
     /// Start a voice. `emitter` = None means the sound has no world position
     /// (it plays as Flat regardless of the requested mode).
     pub fn play(&mut self, id: VoiceId, clip: ClipRef, emitter: Option<DVec3>, params: PlayParams) {
@@ -451,7 +469,7 @@ impl AudioCore {
         let sends = resolve_sends(&self.mixer, &[], &params);
         let mut lowpass = LowPass::off();
         let dist = world_distance(&params, emitter, &self.listener);
-        lowpass.set(voice_cutoff(&params, dist), self.sample_rate);
+        lowpass.set(voice_cutoff(&params, dist, self.world_lowpass), self.sample_rate);
         // A sound that starts muffled starts muffled, not gliding into it.
         lowpass.cur = lowpass.tgt;
         self.voices.push(Voice {
@@ -524,7 +542,7 @@ impl AudioCore {
         let sends = resolve_sends(&self.mixer, &self.voices[pos].sends, &params);
         let v = &mut self.voices[pos];
         let dist = world_distance(&params, v.positioned.then_some(v.emitter), &self.listener);
-        v.lowpass.set(voice_cutoff(&params, dist), sr);
+        v.lowpass.set(voice_cutoff(&params, dist, self.world_lowpass), sr);
         v.group = group;
         v.params = params;
         v.track_idx = idx;
@@ -558,8 +576,9 @@ impl AudioCore {
         for v in self.voices.drain(..) {
             self.finished.push(v.id);
         }
-        // Group limits belong to the play session that set them.
+        // Group limits and the medium belong to the play session that set them.
         self.groups.clear();
+        self.world_lowpass = 0.0;
         self.mixer.reset();
     }
 
@@ -589,7 +608,7 @@ impl AudioCore {
     /// and into the tracks it sends to.
     fn render_block(&mut self, n: usize) {
         let smooth = self.smooth;
-        let Self { mixer, voices, listener, tmp_l, tmp_r, sample_rate, .. } = self;
+        let Self { mixer, voices, listener, tmp_l, tmp_r, sample_rate, world_lowpass, .. } = self;
         for v in voices.iter_mut() {
             if v.done || v.paused {
                 continue;
@@ -613,7 +632,7 @@ impl AudioCore {
             // the filter glides its coefficient across the block, so a sound
             // moving away dulls smoothly.
             let dist = world_distance(&v.params, v.positioned.then_some(v.emitter), listener);
-            v.lowpass.set(voice_cutoff(&v.params, dist), *sample_rate);
+            v.lowpass.set(voice_cutoff(&v.params, dist, *world_lowpass), *sample_rate);
 
             let step = v.source.sample_rate() as f64 / *sample_rate as f64
                 * v.params.pitch.clamp(0.05, 8.0) as f64;
@@ -1022,6 +1041,71 @@ mod tests {
         let own = PlayParams { lowpass: 300.0, air_absorption: 0.001, ..Default::default() };
         let near = Some(DVec3::new(0.0, 0.0, -1.0));
         assert!(heard_peak(5000.0, near, own, None) < open * 0.05, "its own 300 Hz low-pass was lost");
+    }
+
+    /// The settled peak of a looping 5 kHz tone with the world low-pass at
+    /// `world` Hz, set before the sound starts (`before`) or once it is
+    /// playing.
+    fn through_the_medium(world: f32, before: bool, at: Option<DVec3>, params: PlayParams) -> f32 {
+        let mut core = AudioCore::new(48_000.0, 128);
+        if before {
+            core.set_world_lowpass(world);
+        }
+        core.play(1, sine(5000.0), at, PlayParams { end: EndBehavior::Loop, ..params });
+        let (mut l, mut r) = (vec![0.0f32; 4800], vec![0.0f32; 4800]);
+        core.render(&mut l, &mut r);
+        if !before {
+            core.set_world_lowpass(world);
+            core.render(&mut l, &mut r);
+        }
+        peak(&l[2400..]).max(peak(&r[2400..]))
+    }
+
+    /// **The world low-pass muffles the world and spares the cockpit.** A
+    /// 5 kHz tone placed in the world goes dull under a 500 Hz medium; the
+    /// same tone marked `listener_space`, and a flat one, are untouched.
+    #[test]
+    fn the_world_lowpass_muffles_world_sounds_and_spares_listener_space_ones() {
+        let at = Some(DVec3::new(0.0, 0.0, -1.0));
+        let world = PlayParams::default();
+        let helmet = PlayParams { listener_space: true, ..Default::default() };
+        let open = through_the_medium(0.0, true, at, world.clone());
+        assert!(open > 0.1, "the fixture: the tone is heard ({open})");
+        let muffled = through_the_medium(500.0, true, at, world.clone());
+        assert!(muffled < open * 0.05, "a world sound under a 500 Hz medium kept {muffled} of {open}");
+        let spared = through_the_medium(500.0, true, at, helmet);
+        assert!((spared - open).abs() < open * 0.01, "a listener-space sound was muffled: {spared} vs {open}");
+        let flat = through_the_medium(500.0, true, None, PlayParams::default());
+        let flat_open = through_the_medium(0.0, true, None, PlayParams::default());
+        assert!((flat - flat_open).abs() < flat_open * 0.01, "a flat sound was muffled: {flat} vs {flat_open}");
+        // Set while the sound plays, as a dive would: it takes hold, and 0
+        // clears it.
+        assert!(through_the_medium(500.0, false, at, world.clone()) < open * 0.05, "set mid-sound, it did nothing");
+        assert!((through_the_medium(0.0, false, at, world) - open).abs() < open * 0.01, "0 did not clear it");
+    }
+
+    /// **The world low-pass joins a sound's own cutoffs: the lowest wins.**
+    /// Under a 4 kHz medium, a sound with its own 300 Hz low-pass sounds as
+    /// it does with that alone; a sound whose distance cutoff is the lower
+    /// keeps it. And a reset (Play stopped) clears the medium.
+    #[test]
+    fn the_world_lowpass_and_a_sounds_own_cutoffs_take_the_lowest() {
+        let at = Some(DVec3::new(0.0, 0.0, -1.0));
+        let own = PlayParams { lowpass: 300.0, ..Default::default() };
+        let alone = through_the_medium(0.0, true, at, own.clone());
+        let both = through_the_medium(4000.0, true, at, own);
+        assert!((both - alone).abs() < alone * 0.05 + 1e-4, "own 300 Hz under a 4 kHz medium: {both} vs {alone}");
+        let medium_only = through_the_medium(4000.0, true, at, PlayParams::default());
+        assert!(both < medium_only * 0.5, "the medium overrode the lower own cutoff: {both} vs {medium_only}");
+
+        let mut core = AudioCore::new(48_000.0, 128);
+        core.set_world_lowpass(500.0);
+        core.reset();
+        core.play(1, sine(5000.0), at, PlayParams { end: EndBehavior::Loop, ..Default::default() });
+        let (mut l, mut r) = (vec![0.0f32; 4800], vec![0.0f32; 4800]);
+        core.render(&mut l, &mut r);
+        let open = through_the_medium(0.0, true, at, PlayParams::default());
+        assert!((peak(&l[2400..]) - open).abs() < open * 0.01, "the medium outlived a reset");
     }
 
     /// Twenty looping voices' worth of render, to let a stolen voice fade out

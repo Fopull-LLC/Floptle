@@ -141,10 +141,13 @@ non-zero of
 - `PlayParams::lowpass` (`audio.play{lowpass=}`, `s:setLowpass`);
 - the distance cutoff, `spatial::distance_cutoff`, from `air_absorption`
   (`20 kHz / (1 + k × (d − min_distance))`) and `lowpass_falloff` (`near` at
-  `min_distance` to `far` at `max_distance`, geometric in between).
+  `min_distance` to `far` at `max_distance`, geometric in between);
+- the world low-pass, `AudioCore::world_lowpass` (`set_world_lowpass`,
+  `audio.setWorldLowpass` in Lua): the listener's medium, under water or in a
+  suit. A `listener_space` voice is exempt. Cleared by `reset`.
 
-Distance applies only to a voice in the world: positioned and not `Flat`
-(`world_distance`). A voice with none of these set gets the same cutoff
+Distance and the medium apply only to a voice in the world: positioned and
+not `Flat` (`world_distance`). A voice with none of these set gets the same cutoff
 every block, so its filter does exactly what it did before. The lowest
 cutoff, not a filter per source, keeps the cost at one filter per voice; the
 track's bus low-pass (`TrackDesc::lowpass`) is a separate filter after the

@@ -44,6 +44,7 @@ enum Cmd {
     Group(String),
     /// A group's cap, by its place in the list (see [`AudioEngine::group`]).
     GroupLimit(u16, Option<usize>),
+    WorldLowpass(f32),
 }
 
 struct VoiceEntry {
@@ -382,6 +383,12 @@ impl AudioEngine {
         }
     }
 
+    /// Muffle every sound out in the world at `hz` (0 = off), sparing
+    /// listener-space and flat ones. See [`AudioCore::set_world_lowpass`].
+    pub fn set_world_lowpass(&self, hz: f32) {
+        self.send(Cmd::WorldLowpass(hz));
+    }
+
     /// Voices playing per voice group, as of the last mixed block.
     pub fn group_counts(&self) -> Vec<(String, u32)> {
         let counts = self.status.groups.lock().map(|g| g.clone()).unwrap_or_default();
@@ -408,6 +415,7 @@ fn drain_commands(rx: &Receiver<Cmd>, core: &mut AudioCore) {
             Cmd::Reset => core.reset(),
             Cmd::Group(name) => core.add_group(name),
             Cmd::GroupLimit(i, limit) => core.set_group_slot_limit(i, limit),
+            Cmd::WorldLowpass(hz) => core.set_world_lowpass(hz),
         }
     }
 }

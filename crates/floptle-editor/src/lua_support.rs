@@ -483,6 +483,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field priority integer? Which sound gives way when its group is full: the lowest goes first (default 0).
 ---@field airAbsorption number? How fast distance dulls it: past minDistance its cutoff falls as 20 kHz / (1 + k × metres); 0 = off.
 ---@field lowpassFalloff {near: number, far: number}? A low-pass that closes with distance: `near` Hz at minDistance to `far` Hz at maxDistance.
+---@field listenerSpace boolean? Heard inside the listener's own space (helmet, cockpit): `audio.setWorldLowpass` passes it by.
 
 ---The sound system: fire-and-forget playback + mixer control. Positions and
 ---following make it spatial; pass no position for flat 2D (UI, music).
@@ -491,6 +492,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field stopAll fun() Stop every playing sound (sources and one-shots).
 ---@field limit fun(group: string, maxVoices: integer?) Cap how many sounds a voice group plays at once; nil lifts the cap. At the cap a new sound replaces the lowest-priority voice, then the quietest at the listener, or is dropped if it ranks below them all.
 ---@field groupCount fun(group: string): integer How many voices a voice group is playing, as the mixer last counted them.
+---@field setWorldLowpass fun(hz: number?) Muffle every sound out in the world above `hz` (under water, in a vacuum suit), sparing `listenerSpace` and flat ones; nil or 0 clears it.
 ---@field track fun(name: string): AudioTrackHandle? A mixer track handle (\"Master\" or a track name from the Mixer tab); nil when the mixer has no such track.
 ---@field tracks fun(): AudioTrackInfo[] Every mixer track, Master first, as this play session has it.
 audio = {}

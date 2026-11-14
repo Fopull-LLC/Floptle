@@ -1748,6 +1748,8 @@ pub enum AudioCmd {
     TrackBypass { track: String, slot: usize, on: bool },
     /// `audio.limit(group, maxVoices)` — `None` lifts the group's cap.
     GroupLimit { group: String, max: Option<u32> },
+    /// `audio.setWorldLowpass(hz)` — 0 clears it.
+    WorldLowpass { hz: f32 },
 }
 
 /// Live playback state of one sound / source, mirrored for script reads.

@@ -161,6 +161,11 @@ pub struct PlayParams {
     /// `far` Hz at `max_distance`, gliding evenly in pitch between them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lowpass_falloff: Option<LowpassFalloff>,
+    /// Heard inside the listener's own space (a helmet, a cockpit), not out
+    /// in the world: the world low-pass
+    /// ([`crate::voice::AudioCore::set_world_lowpass`]) passes it by.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub listener_space: bool,
 }
 
 /// A distance low-pass curve: the cutoff at a sound's `min_distance` and at
@@ -215,6 +220,7 @@ impl Default for PlayParams {
             priority: 0,
             air_absorption: 0.0,
             lowpass_falloff: None,
+            listener_space: false,
         }
     }
 }

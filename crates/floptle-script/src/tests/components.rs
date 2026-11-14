@@ -1351,3 +1351,39 @@ fn distance_lowpass_options_reach_the_engine() {
     assert_eq!((params(2).air_absorption, params(2).lowpass_falloff), (0.0, None), "a sound that names neither");
     assert_eq!(cmds.len(), 3, "a refused play still queued: {cmds:?}");
 }
+
+/// **A script muffles the world and marks what is heard inside the helmet.**
+/// `audio.setWorldLowpass` queues the medium (nil and 0 clear it, a negative
+/// is refused), and `listenerSpace` reaches the play parameters.
+#[test]
+fn the_world_lowpass_and_listener_space_reach_the_engine() {
+    let dir = std::env::temp_dir().join("floptle_script_test_world_lowpass");
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "dive",
+        "function start(node)\n\
+         \x20 audio.setWorldLowpass(600)\n\
+         \x20 audio.setWorldLowpass(nil)\n\
+         \x20 audio.setWorldLowpass(0)\n\
+         \x20 audio.play('audio/breath.ogg', node, { listenerSpace = true })\n\
+         \x20 audio.play('audio/fish.ogg', 1, 2, 3)\n\
+         \x20 local ok, e = pcall(audio.setWorldLowpass, -5)\n\
+         \x20 print(tostring(ok) .. ' ' .. tostring(e))\n\
+         \x20 local ok2, e2 = pcall(audio.play, 'audio/a.ogg', { listenerSpace = 1 })\n\
+         \x20 print(tostring(ok2) .. ' ' .. tostring(e2))\n\
+         end\n",
+    );
+    let (mut world, _) = world_with_script("dive");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.1, 0.1);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let said = host.drain_logs().into_iter().map(|l| l.msg).collect::<Vec<_>>().join("\n");
+    assert!(said.contains("false") && said.contains("hz is 0 or more"), "{said}");
+    assert!(said.contains("`listenerSpace` is true or false"), "{said}");
+    let cmds = host.take_audio_commands();
+    let hz: Vec<f32> = cmds.iter().filter_map(|c| match c { AudioCmd::WorldLowpass { hz } => Some(*hz), _ => None }).collect();
+    assert_eq!(hz, vec![600.0, 0.0, 0.0], "{cmds:?}");
+    let spaces: Vec<bool> = cmds.iter().filter_map(|c| match c { AudioCmd::Play { params, .. } => Some(params.listener_space), _ => None }).collect();
+    assert_eq!(spaces, vec![true, false], "{cmds:?}");
+}

@@ -762,6 +762,11 @@ impl AudioSystem {
                         eng.set_group_limit(&group, max.map(|n| n as usize));
                     }
                 }
+                AudioCmd::WorldLowpass { hz } => {
+                    if let Some(eng) = self.engine() {
+                        eng.set_world_lowpass(hz);
+                    }
+                }
                 AudioCmd::TrackBypass { track, slot, on } => {
                     mixer_dirty |= self.edit_track(
                         &track,
@@ -1052,6 +1057,56 @@ mod tests {
         assert!(info.sounds.contains_key(&1) && info.sounds.contains_key(&3), "the two that outrank it play on");
         assert!(!info.sounds.contains_key(&2), "the lowest-priority sound was not replaced");
         assert!(info.sounds.contains_key(&9), "a sound outside the group was touched");
+    }
+
+    /// **`audio.setWorldLowpass` reaches the real mixer and spares a
+    /// listener-space sound.** A 5 kHz tone placed in the world, through the
+    /// command queue and the engine's channel, rendered offline: dull under
+    /// a 500 Hz medium, untouched when marked `listenerSpace`, and open again
+    /// once the medium is cleared.
+    #[test]
+    fn the_world_lowpass_reaches_the_mixer_and_spares_listener_space() {
+        let root = project("medium", &["tone.ogg"]);
+        let world = World::default();
+        let sine: crate::audio_clips::Decoder = std::sync::Arc::new(|_: &Path| {
+            Ok(floptle_audio::Clip {
+                sample_rate: 48_000,
+                channels: 1,
+                samples: (0..48_000).map(|i| (std::f32::consts::TAU * 5000.0 * i as f32 / 48_000.0).sin() * 0.5).collect(),
+            })
+        });
+        let heard = |medium: f32, listener_space: bool, clear_after: bool| {
+            let (engine, mut render) = AudioEngine::offline(48_000);
+            let mut a = AudioSystem {
+                engine: Some(engine),
+                clips: ClipCache::with_decoder(sine.clone(), IDLE_BUDGET_BYTES),
+                ..Default::default()
+            };
+            let params = PlayParams { listener_space, end: EndBehavior::Loop, ..Default::default() };
+            a.apply_script_commands(
+                &world,
+                &root,
+                vec![
+                    AudioCmd::WorldLowpass { hz: medium },
+                    AudioCmd::Play { handle: 1, clip: "audio/tone.ogg".into(), at: AudioAt::Pos([0.0, 0.0, -1.0]), params: Box::new(params) },
+                ],
+            );
+            until_live(&mut a, &world, &root, 1);
+            if clear_after {
+                a.apply_script_commands(&world, &root, vec![AudioCmd::WorldLowpass { hz: 0.0 }]);
+            }
+            let mut buf = vec![0.0f32; 9600];
+            render(&mut buf);
+            buf[4800..].iter().map(|s| s.abs()).fold(0.0f32, f32::max)
+        };
+        let open = heard(0.0, false, false);
+        assert!(open > 0.1, "the fixture: the tone is heard ({open})");
+        let muffled = heard(500.0, false, false);
+        assert!(muffled < open * 0.05, "under a 500 Hz medium a world sound kept {muffled} of {open}");
+        let helmet = heard(500.0, true, false);
+        assert!((helmet - open).abs() < open * 0.01, "a listener-space sound was muffled: {helmet} vs {open}");
+        let cleared = heard(500.0, false, true);
+        assert!((cleared - open).abs() < open * 0.01, "clearing the medium left it dull: {cleared} vs {open}");
     }
 
     /// A playlist polls `isPlaying()` to know when a track has ended. A track
