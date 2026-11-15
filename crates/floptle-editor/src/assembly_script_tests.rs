@@ -2220,6 +2220,74 @@ end
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **A script can ask which relief layer made a place.** `terrain.layersAt`
+/// on a generated planet moved off the origin answers the generator's own
+/// shares, summing to the height, and names the ravine whose line it is
+/// on; over a slab nothing generated, and far out in space, it is nil.
+#[test]
+fn a_script_reads_which_relief_layer_made_a_place() {
+    let spec = floptle_field::procgen::PlanetFill {
+        seed: 23,
+        radius: 60.0,
+        voxel: 1.5,
+        relief: 3.0,
+        cave_depth: 0.0,
+        core_r: 0.0,
+        mountains: Some(floptle_field::procgen::Mountains { height: 8.0, ..Default::default() }),
+        ravines: Some(floptle_field::procgen::Ravines { count: 2, depth: 7.0, width: 8.0, length: 150.0, meander: 1.0 }),
+        ..Default::default()
+    };
+    let channels = floptle_field::relief::channels_of(&spec);
+    let c = &channels[0];
+    let si = c.points.len() / 2;
+    let on = (c.points[si] + c.points[si + 1]).normalize() * spec.radius;
+    let at = DVec3::new(300.0, 20.0, -40.0);
+    let p = at + on.as_dvec3();
+    let (mut ed, dir) = project(
+        "layers",
+        &format!(
+            r#"
+function update(node, dt)
+  local l = terrain.layersAt(vec3({}, {}, {}))
+  if not l then log("L nil") return end
+  local c = l.channel
+  log(string.format("L %.4f %.4f %s %d %.2f %.2f %.3f %.2f", l.height,
+    l.base + l.mountains + l.plateau + l.terraces + l.channels + l.craters,
+    c.kind, c.index, c.width, c.depth, c.distance, c.profile))
+  log("S " .. tostring(terrain.layersAt(vec3(2, 5, 0))) .. " " .. tostring(terrain.layersAt(vec3(300, 5000, -40))))
+end
+"#,
+            p.x, p.y, p.z
+        ),
+    );
+    let field = floptle_field::procgen::generate_planet(&spec);
+    let want = field.relief_layers(on).expect("a generated field has layers");
+    let planet = ed.world.spawn();
+    ed.world.insert(planet, Transform::from_translation(at));
+    ed.world.insert(planet, Name("Planet".into()));
+    ed.world.insert(planet, Matter::Terrain { id: 7, collision: Default::default() });
+    ed.terrains.insert(planet, crate::terrain_edit::EditorTerrain::new(field));
+    let mut slab = floptle_field::ChunkField::new(1.0);
+    slab.fill_slab(Vec3::new(-20.0, -20.0, -20.0), Vec3::new(20.0, 0.0, 20.0), 0.0, [0.5, 0.5, 0.5]);
+    let g = ed.world.spawn();
+    ed.world.insert(g, Transform::IDENTITY);
+    ed.world.insert(g, Name("Slab".into()));
+    ed.world.insert(g, Matter::Terrain { id: 8, collision: Default::default() });
+    ed.terrains.insert(g, crate::terrain_edit::EditorTerrain::new(slab));
+    ed.toggle_play();
+    run(&mut ed, 3);
+    let l = lines(&mut ed, "L").last().cloned().unwrap_or_default();
+    let v: Vec<&str> = l.split(' ').collect();
+    assert_eq!(v.len(), 8, "layersAt answered {l:?}");
+    let num = |k: usize| v[k].parse::<f32>().unwrap();
+    assert!((num(0) - want.height).abs() < 1e-3, "height {} for the field's {}", v[0], want.height);
+    assert!((num(1) - num(0)).abs() < 2e-3, "the shares sum to {} for ground {}", v[1], v[0]);
+    assert_eq!((v[2], v[3]), ("ravine", "1"), "on ravine 1's line: {l}");
+    assert!((num(4) - 8.0).abs() < 1e-3 && (num(5) - 7.0).abs() < 1e-3 && num(6) < 0.05 && (num(7) - 1.0).abs() < 1e-3, "{l}");
+    assert_eq!(lines(&mut ed, "S").last().map(String::as_str), Some("nil nil"), "a slab and open space have no layers");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **Many ground queries answer in one call, off the field.**
 /// `terrain.surfaceBelow` over a slab whose top is y = 0: a point 5 m above
 /// it is 5, one 0.3 m inside it is -0.3 (the surface above it), one past the

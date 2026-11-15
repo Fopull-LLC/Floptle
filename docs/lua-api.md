@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 79
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 38
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 39
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 30
 - [weather — wind](#weather--wind) — 6
@@ -3043,6 +3043,10 @@ terrain.height(x, z) — world Y of the highest terrain surface under (x,z), or 
 ### `terrain.impostorAt`
 
 terrain.impostorAt(id [, { radii = n } | { pixels = n }]) — when the planet with terrain id `id` stops drawing its ground and draws as one shaded ball, one draw in the colour its ground draws: past `radii` of its own radii from the camera, or once its disc is smaller than `pixels` across on screen. Its ground loads in as much farther out as the rule keeps it drawn. With no rule it goes back to the default, sixty radii. Rules last until Play stops.
+
+### `terrain.layersAt`
+
+terrain.layersAt(pos) → what each relief layer of the generator adds to the ground's height in the direction of `pos` (a world point) on the generated planet nearest it: { height=, base=, mountains=, plateau=, terraces=, channels=, craters=, overhangs=, warp=, cell=, channel= }, in metres. `base` + `mountains` + `plateau` + `terraces` + `channels` + `craters` = `height`, the generated ground above the radius before any digging. `overhangs` is how far the overhang layer moves the surface there (positive raises it, not part of `height`), `warp` how far the warp moved the point the relief noise is read at, and `cell` the spacing of the grid the layered ground is worked out on (0 without one). `channel` is the nearest river or ravine: { index=, kind="river"|"ravine", width=, depth=, distance=, profile=, carve= }, `index` its place in terrain.planetRivers, `distance` how far `pos` is from its line, `profile` the fraction of its depth the ground at that distance loses and `carve` = depth × profile. nil for a point outside every generated body. A debug read for telling a game's own shaping from the generator's; it walks every channel's whole line (about 0.1 ms on a world of a dozen ravines and rivers), so ask it for a few points, not thousands a frame.
 
 ### `terrain.lodAnchor`
 

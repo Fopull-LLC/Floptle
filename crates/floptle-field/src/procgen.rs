@@ -593,21 +593,33 @@ impl PlanetShape {
 
     /// The ground with its overhangs, before the craters: negative under it.
     fn ground_with(&self, p: Vec3, bump: f32) -> f32 {
-        let mut body = match &self.small {
-            Some(s) => s.d(p, &self.noise) - bump,
-            None => p.length() - (self.radius + bump),
-        };
-        if let Some(o) = &self.overhangs
-            && o.strength != 0.0
-        {
-            // Strongest at the surface, gone `depth` either side of it.
-            let shell = 1.0 - (body.abs() / o.depth.max(0.1)).min(1.0);
-            if shell > 0.0 {
-                let s = shell * shell * (3.0 - 2.0 * shell);
-                body += o.strength * s * self.noise.fbm(p * o.scale + Vec3::splat(431.0), 3);
-            }
+        let mut body = self.bare_ground(p, bump);
+        if let Some(lean) = self.overhang(p, body) {
+            body += lean;
         }
         body
+    }
+
+    /// The ground before its overhangs: negative under it.
+    fn bare_ground(&self, p: Vec3, bump: f32) -> f32 {
+        match &self.small {
+            Some(s) => s.d(p, &self.noise) - bump,
+            None => p.length() - (self.radius + bump),
+        }
+    }
+
+    /// What the overhang layer adds to the ground's distance `body` at `p`,
+    /// where it reaches.
+    #[inline]
+    fn overhang(&self, p: Vec3, body: f32) -> Option<f32> {
+        let o = self.overhangs.as_ref().filter(|o| o.strength != 0.0)?;
+        // Strongest at the surface, gone `depth` either side of it.
+        let shell = 1.0 - (body.abs() / o.depth.max(0.1)).min(1.0);
+        if shell > 0.0 {
+            let s = shell * shell * (3.0 - 2.0 * shell);
+            return Some(o.strength * s * self.noise.fbm(p * o.scale + Vec3::splat(431.0), 3));
+        }
+        None
     }
 
     /// The lowest and highest the ground stands above the radius anywhere.
@@ -822,7 +834,37 @@ impl Planet {
     /// Overhangs and caves are not part of it.
     pub(crate) fn ground_height(&self, d: Vec3) -> f32 {
         let s = &self.shape;
-        let mut t = s.radius + s.bump(d * s.radius, &mut FbmCache::default());
+        self.cratered(d, s.radius + s.bump(d * s.radius, &mut FbmCache::default())) - s.radius
+    }
+
+    /// What each relief layer adds to the ground's height in `p`'s
+    /// direction ([`crate::ChunkField::relief_layers`]).
+    pub(crate) fn relief_layers(&self, p: Vec3) -> crate::relief::ReliefLayers {
+        let s = &self.shape;
+        let r = p.length();
+        let d = if r > 1e-3 { p / r } else { Vec3::X };
+        let bump = s.bump(d * s.radius, &mut FbmCache::default());
+        let mut out = match &s.ground {
+            Some(relief) => relief.layers(&self.spec, d),
+            None => crate::relief::ReliefLayers { height: bump, base: bump, ..Default::default() },
+        };
+        let t = s.radius + bump;
+        let floor = self.cratered(d, t);
+        out.height = floor - s.radius;
+        if floor != t {
+            out.craters = out.height - bump;
+        }
+        // The overhangs' push where the ground stands, as a height: more
+        // distance there is more air, so lower ground.
+        let at = d * floor;
+        out.overhangs = s.overhang(at, s.bare_ground(at, bump)).map_or(0.0, |lean| -lean);
+        out
+    }
+
+    /// The ground at `t` from the centre in direction `d`, a crater's floor
+    /// where one has been carved.
+    fn cratered(&self, d: Vec3, mut t: f32) -> f32 {
+        let s = &self.shape;
         // A crater is a ball taken out of the ground: where the surface falls
         // inside one, the ground is the ball's floor along this direction.
         for (c, cr) in &s.craters {
@@ -835,7 +877,7 @@ impl Planet {
                 }
             }
         }
-        t - s.radius
+        t
     }
 
     /// How far from the centre the ground can reach: the radius, the highest
@@ -1095,6 +1137,10 @@ impl crate::VoxelSource for Planet {
     /// A chunk wholly below the crust gate holds no outer surface, so all
     /// that is in it is caves and the rock between them: nothing anyone sees
     /// from outside. Only those the classifier cannot already settle.
+    fn relief_layers(&self, p: Vec3) -> Option<crate::relief::ReliefLayers> {
+        Some(Planet::relief_layers(self, p))
+    }
+
     fn defer(&self, lo: Vec3, hi: Vec3, band: f32) -> bool {
         let s = &self.shape;
         if s.cave_depth <= 0.0 {
@@ -2087,6 +2133,131 @@ mod tests {
         assert_eq!(new.5, 0, "a new world with no cave zone still has deep rock");
         assert!(RC2.5 > 0);
         assert_eq!(PlanetFill::default().generator(), GENERATOR_VERSION, "a spec made today is not stamped today");
+    }
+
+    /// **Reading a world's layers back does not move its ground.** The
+    /// relief layers are summed through the same functions
+    /// [`crate::relief::ReliefLayers`] reads each term from, so splitting the
+    /// sum open must leave every voxel where it was: the numbers are what
+    /// this world generated before the split, every layer on (craters,
+    /// warp, mountains, plateau, terraces, overhangs, rivers, ravines and
+    /// biomes), and a plain world beside it.
+    #[test]
+    fn reading_the_layers_back_leaves_the_world_as_it_was() {
+        let layered = PlanetFill {
+            seed: 23,
+            radius: 70.0,
+            voxel: 1.5,
+            relief: 5.0,
+            cave_depth: 0.0,
+            core_r: 0.0,
+            craters: 3,
+            mountains: Some(Mountains { height: 14.0, ..Default::default() }),
+            warp: Some(Warp { strength: 0.2, scale: 2.0, ..Default::default() }),
+            plateau: Some(Plateau::default()),
+            terrace: Some(Terrace::default()),
+            overhangs: Some(Overhangs { depth: 6.0, scale: 0.1, strength: 2.0 }),
+            rivers: Some(Rivers { count: 3, sea_level: -2.0, ..Default::default() }),
+            ravines: Some(Ravines { count: 2, depth: 8.0, width: 8.0, length: 160.0, meander: 1.0 }),
+            biomes: vec![Biome { paint: LayerPaint { slot: 9, color: [1.0; 3] }, slope: Some([30.0, 90.0]), near_river: Some(12.0), ..Default::default() }],
+            ..PlanetFill::default()
+        };
+        let plain = PlanetFill { seed: 23, radius: 50.0, craters: 2, ..PlanetFill::default() };
+        assert_eq!(fingerprint(&layered), LAYERED_STAMP, "the layered world moved");
+        assert_eq!(fingerprint(&plain), PLAIN_STAMP, "the plain world moved");
+    }
+    const LAYERED_STAMP: (usize, u64, usize, u64, u64, usize) =
+        (222, 7569182015188951651, 64, 5353354899777420613, 9276737300415191524, 0);
+    const PLAIN_STAMP: (usize, u64, usize, u64, u64, usize) =
+        (0, 14695981039346656037, 32, 9514036609283582394, 14843399028468003984, 34269);
+
+    /// A world with every relief layer on, rivers, ravines and craters.
+    fn layered_world() -> PlanetFill {
+        PlanetFill {
+            seed: 23,
+            radius: 120.0,
+            voxel: 1.5,
+            relief: 5.0,
+            cave_depth: 0.0,
+            core_r: 0.0,
+            craters: 4,
+            mountains: Some(Mountains { height: 14.0, ..Default::default() }),
+            warp: Some(Warp { strength: 0.2, scale: 2.0, ..Default::default() }),
+            plateau: Some(Plateau { height: 8.0, ..Default::default() }),
+            terrace: Some(Terrace { step: 3.0, ..Default::default() }),
+            overhangs: Some(Overhangs { depth: 6.0, scale: 0.1, strength: 2.0 }),
+            rivers: Some(Rivers { count: 3, sea_level: -2.0, ..Default::default() }),
+            ravines: Some(Ravines { count: 3, depth: 9.0, width: 10.0, length: 300.0, meander: 1.0 }),
+            ..PlanetFill::default()
+        }
+    }
+
+    /// **The layers' shares add up to the ground.** `terrain.layersAt`
+    /// tells a game which layer made a place; if the shares did not sum to
+    /// the height the generator made, it would be telling a story about
+    /// some other ground. Every layer has to show up somewhere on this
+    /// world, or the sum proves nothing about it.
+    #[test]
+    fn the_layers_shares_add_up_to_the_ground() {
+        for spec in [layered_world(), PlanetFill { seed: 5, radius: 60.0, craters: 3, ..PlanetFill::default() }] {
+            let planet = Planet::new(&spec);
+            let mut r = Rng::new(3);
+            let mut seen = [false; 6];
+            for _ in 0..3000 {
+                let d = Vec3::new(r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32).normalize_or(Vec3::Y);
+                let p = d * (spec.radius + 3.0);
+                let l = planet.relief_layers(p);
+                assert_eq!(l.height, planet.ground_height(p / p.length()), "layersAt's height is not the generator's at {d:?}");
+                let sum = l.base + l.mountains + l.plateau + l.terraces + l.channels + l.craters;
+                assert!((sum - l.height).abs() < 2e-3, "shares {sum} for ground {} at {d:?}: {l:?}", l.height);
+                for (k, v) in [l.mountains, l.plateau, l.terraces, l.channels, l.craters, l.overhangs].into_iter().enumerate() {
+                    seen[k] |= v.abs() > 0.1;
+                }
+            }
+            if spec.mountains.is_some() {
+                assert_eq!(seen, [true; 6], "a layer never showed (mountains, plateau, terraces, channels, craters, overhangs)");
+            } else {
+                assert_eq!(seen, [false, false, false, false, true, false], "a plain world grew layers");
+            }
+        }
+    }
+
+    /// **A channel reads right on its own line, and half its width off.** The
+    /// figures a game sees for the nearest river or ravine (which one, what
+    /// kind, how wide, how far, how much of its depth it cuts) are checked
+    /// against the lines `channels_of` traces, read through the field the
+    /// world generated into.
+    #[test]
+    fn a_channel_reads_right_on_its_line() {
+        let spec = layered_world();
+        let field = generate_planet(&spec);
+        let channels = crate::relief::channels_of(&spec);
+        let ravine = channels.iter().position(|c| !c.river).expect("no ravine");
+        let river = channels.iter().position(|c| c.river).expect("no river");
+        for k in [ravine, river] {
+            let c = &channels[k];
+            let si = c.points.len() / 2;
+            let (a, b) = (c.points[si], c.points[si + 1]);
+            let on = (a + b).normalize();
+            let w = (c.widths[si] + c.widths[si + 1]) * 0.5;
+            let l = field.relief_layers(on * spec.radius).expect("a generated field has no layers");
+            let ch = l.channel.as_ref().expect("no channel");
+            assert_eq!((ch.index, ch.river, ch.depth), (k, c.river, c.depth));
+            assert!(ch.distance < 0.05, "{} m off its own line", ch.distance);
+            assert!((ch.width - w).abs() < 1e-3, "width {} for {w}", ch.width);
+            assert!((ch.profile - 1.0).abs() < 1e-3 && (ch.carve - c.depth).abs() < 1e-2, "{ch:?}");
+            assert!(l.channels < -0.5 * c.depth, "the line carves only {} of {}", l.channels, c.depth);
+            // Half a width to the side: a ravine's bank is half way down.
+            let side = on.cross(b - a).normalize();
+            let off = (on + side * (0.5 * w / spec.radius)).normalize();
+            let ch = field.relief_layers(off * spec.radius).unwrap().channel.unwrap();
+            assert_eq!(ch.index, k);
+            assert!((ch.distance - 0.5 * w).abs() < 0.03 * w, "{} m off, wanted {}", ch.distance, 0.5 * w);
+            if !c.river {
+                assert!((ch.profile - 0.5).abs() < 0.08, "a ravine half a width off keeps {} of its depth", ch.profile);
+            }
+            assert!((ch.carve - ch.depth * ch.profile).abs() < 1e-4);
+        }
     }
 
     /// A world with ravines cut through soil, subsoil and strata.

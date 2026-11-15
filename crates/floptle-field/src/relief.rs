@@ -63,6 +63,60 @@ pub(crate) struct Relief {
     /// The steepest the ground is anywhere (rise over run), when `slopes`
     /// are kept.
     steepest: f32,
+    /// The rivers and ravines carved in, for [`Relief::layers`].
+    channels: Vec<Channel>,
+}
+
+/// What each relief layer adds to the ground's height in one direction, in
+/// world units: [`crate::ChunkField::relief_layers`]. The shares from `base`
+/// to `craters` sum to `height`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReliefLayers {
+    /// The generated ground's height above the radius, edits aside.
+    pub height: f32,
+    /// The rolling relief noise.
+    pub base: f32,
+    /// The mountain ranges.
+    pub mountains: f32,
+    /// What rounding the peaks off took away.
+    pub plateau: f32,
+    /// What stepping the ground moved it.
+    pub terraces: f32,
+    /// What rivers and ravines carved (zero or negative).
+    pub channels: f32,
+    /// What a crater took away (zero or negative).
+    pub craters: f32,
+    /// How far the overhang layer moves the surface at the ground there,
+    /// positive raising it. Not part of `height`, the ground along the
+    /// direction.
+    pub overhangs: f32,
+    /// How far the warp moved the point the relief noise is read at.
+    pub warp: f32,
+    /// The spacing of the grid the layered ground is worked out on; 0 for
+    /// a world without one.
+    pub cell: f32,
+    /// The river or ravine whose line passes nearest, on a world with any.
+    pub channel: Option<ChannelAt>,
+}
+
+/// A point's nearest river or ravine ([`ReliefLayers::channel`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChannelAt {
+    /// Its place in [`channels_of`].
+    pub index: usize,
+    /// A river (`true`) or a ravine.
+    pub river: bool,
+    /// Its width where it passes nearest.
+    pub width: f32,
+    /// How deep it is carved.
+    pub depth: f32,
+    /// How far the point is from its line.
+    pub distance: f32,
+    /// The fraction of `depth` the ground at that distance loses: 1 on the
+    /// line, 0 past the bank.
+    pub profile: f32,
+    /// `depth × profile`: the cut it makes at the point itself.
+    pub carve: f32,
 }
 
 /// Which face of the cube `d` points through, and where on it, in [-1, 1].
@@ -98,9 +152,28 @@ struct Layers<'a> {
     noise: Noise,
 }
 
+/// The terms [`Layers::height`] sums, each as the sum stood after it, so
+/// the generator's own arithmetic is what is read back.
+#[derive(Clone, Copy, Default)]
+struct Parts {
+    base: f32,
+    mountains: f32,
+    plateau: f32,
+    height: f32,
+    /// How far the warp moved the point the noise is read at, in units of
+    /// the radius.
+    warp: f32,
+}
+
 impl Layers<'_> {
     /// The ground's height above the radius in direction `d`, before carving.
     fn height(&self, d: Vec3) -> f32 {
+        self.parts(d).height
+    }
+
+    /// [`Self::height`], with the sum after each layer.
+    #[inline]
+    fn parts(&self, d: Vec3) -> Parts {
         let s = self.spec;
         let n = &self.noise;
         // Each layer only as far as its latitude band reaches, fading at its
@@ -122,6 +195,7 @@ impl Layers<'_> {
             _ => d,
         };
         let mut h = n.fbm(w * s.bump_freq, 5) * s.relief;
+        let base = h;
         if let Some(m) = &s.mountains {
             let k = if bands { lat(m.latitude, m.latitude_edge) } else { 1.0 };
             if k > 0.0 {
@@ -132,6 +206,7 @@ impl Layers<'_> {
                 h += if bands { m.height * mask * ridges * k } else { m.height * mask * ridges };
             }
         }
+        let mountains = h;
         if let Some(p) = &s.plateau {
             if bands {
                 let k = lat(p.latitude, p.latitude_edge);
@@ -140,6 +215,7 @@ impl Layers<'_> {
                 h = smin(h, p.height, p.smooth.max(0.01));
             }
         }
+        let plateau = h;
         if let Some(t) = &s.terrace
             && t.step > 0.0
         {
@@ -150,8 +226,22 @@ impl Layers<'_> {
                 h = terrace(h, t.step, t.sharpness);
             }
         }
-        h
+        Parts { base, mountains, plateau, height: h, warp: (w - d).length() }
     }
+}
+
+/// The direction through corner `(i, j)` of face `f` of an `n`-cell grid.
+fn corner_dir(f: usize, i: usize, j: usize, n: usize) -> Vec3 {
+    from_face(f, -1.0 + 2.0 * i as f32 / n as f32, -1.0 + 2.0 * j as f32 / n as f32)
+}
+
+/// Bilinear between a cell's corners: `a` at (0, 0), `b` (1, 0), `c` (0, 1),
+/// `e` (1, 1).
+#[inline]
+fn bilerp(a: f32, b: f32, c: f32, e: f32, fx: f32, fy: f32) -> f32 {
+    let top = a + (b - a) * fx;
+    let bot = c + (e - c) * fx;
+    top + (bot - top) * fy
 }
 
 impl Relief {
@@ -178,7 +268,7 @@ impl Relief {
             let (f, j) = (k / (n + 1), k % (n + 1));
             (0..=n)
                 .map(|i| {
-                    let d = from_face(f, -1.0 + 2.0 * i as f32 / n as f32, -1.0 + 2.0 * j as f32 / n as f32);
+                    let d = corner_dir(f, i, j, n);
                     let (carve, river) = index.carve(d, s.radius);
                     (layers.height(d) - carve, river)
                 })
@@ -201,7 +291,76 @@ impl Relief {
         let lo = faces.iter().flat_map(|f| f.h.iter()).fold(f32::INFINITY, |a, b| a.min(*b));
         let hi = faces.iter().flat_map(|f| f.h.iter()).fold(f32::NEG_INFINITY, |a, b| a.max(*b));
         let steepest = faces.iter().filter_map(|f| f.slopes.last()).flat_map(|(_, v)| v.iter()).fold(0.0f32, |a, b| a.max(*b));
-        Relief { n, faces, lo, hi, radius: s.radius, steepest }
+        drop(index);
+        Relief { n, faces, lo, hi, radius: s.radius, steepest, channels }
+    }
+
+    /// What each layer adds to the height [`Self::height`] answers in
+    /// direction `d` (unit), for the spec the grid was built from. Each
+    /// share is worked out at the cell's corners by the functions that
+    /// built the grid and blended as the grid blends them, so they sum to
+    /// the grid's height. Craters and overhangs are the caller's.
+    pub(crate) fn layers(&self, spec: &PlanetFill, d: Vec3) -> ReliefLayers {
+        let layers = Layers { spec, noise: Noise::new(spec.seed) };
+        let (f, i, j, fx, fy) = self.cell_of(d);
+        let n = self.n;
+        let all: Vec<(u32, u32)> = self
+            .channels
+            .iter()
+            .enumerate()
+            .flat_map(|(ci, c)| (0..c.points.len().saturating_sub(1)).map(move |si| (ci as u32, si as u32)))
+            .collect();
+        let at = |a: usize, b: usize| {
+            let c = corner_dir(f, a, b, n);
+            let (carve, _) = carve_over(&self.channels, all.iter().copied(), c, self.radius);
+            (layers.parts(c), carve)
+        };
+        let q = [at(i, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1)];
+        let mix = |g: &dyn Fn(&(Parts, f32)) -> f32| bilerp(g(&q[0]), g(&q[1]), g(&q[2]), g(&q[3]), fx, fy);
+        let base = mix(&|p| p.0.base);
+        let mountains = mix(&|p| p.0.mountains - p.0.base);
+        let plateau = mix(&|p| p.0.plateau - p.0.mountains);
+        let terraces = mix(&|p| p.0.height - p.0.plateau);
+        let channels = -mix(&|p| p.1);
+        let warp = layers.parts(d).warp * self.radius;
+        let cell = (corner_dir(f, i + 1, j, n) - corner_dir(f, i, j, n)).length() * self.radius;
+        // The nearest line, by the same distance the carve measures.
+        let mut near: Option<(usize, f32, f32)> = None;
+        for &(ci, si) in &all {
+            let (dist, w) = segment(&self.channels[ci as usize], si as usize, d, self.radius);
+            if near.is_none_or(|b| dist < b.1) {
+                near = Some((ci as usize, dist, w));
+            }
+        }
+        let channel = near.map(|(index, distance, width)| {
+            let c = &self.channels[index];
+            let profile = profile(distance, width, c.river);
+            ChannelAt { index, river: c.river, width, depth: c.depth, distance, profile, carve: c.depth * profile }
+        });
+        ReliefLayers {
+            height: self.height(d),
+            base,
+            mountains,
+            plateau,
+            terraces,
+            channels,
+            warp,
+            cell,
+            channel,
+            ..Default::default()
+        }
+    }
+
+    /// The cell of the grid `d` falls in: its face, its corner, and how far
+    /// across it `d` is.
+    #[inline]
+    fn cell_of(&self, d: Vec3) -> (usize, usize, usize, f32, f32) {
+        let (f, u, v) = to_face(d);
+        let n = self.n;
+        let x = ((u + 1.0) * 0.5 * n as f32).clamp(0.0, n as f32);
+        let y = ((v + 1.0) * 0.5 * n as f32).clamp(0.0, n as f32);
+        let (i, j) = ((x as usize).min(n - 1), (y as usize).min(n - 1));
+        (f, i, j, x - i as f32, y - j as f32)
     }
 
     /// The ground near the points `corners` cover, within `reach` world
@@ -281,17 +440,11 @@ impl Relief {
     }
 
     fn sample(&self, d: Vec3, pick: impl Fn(&Face) -> &Vec<f32>) -> f32 {
-        let (f, u, v) = to_face(d);
+        let (f, i, j, fx, fy) = self.cell_of(d);
         let n = self.n;
-        let x = ((u + 1.0) * 0.5 * n as f32).clamp(0.0, n as f32);
-        let y = ((v + 1.0) * 0.5 * n as f32).clamp(0.0, n as f32);
-        let (i, j) = ((x as usize).min(n - 1), (y as usize).min(n - 1));
-        let (fx, fy) = (x - i as f32, y - j as f32);
         let g = pick(&self.faces[f]);
         let at = |a: usize, b: usize| g[b * (n + 1) + a];
-        let top = at(i, j) + (at(i + 1, j) - at(i, j)) * fx;
-        let bot = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * fx;
-        top + (bot - top) * fy
+        bilerp(at(i, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1), fx, fy)
     }
 
     /// Bounds on the ground's height over every direction a box with corners
@@ -683,21 +836,37 @@ impl<'a> ChannelIndex<'a> {
         // interpolates this, and infinity minus infinity between two corners
         // is NaN, which every range test then passes.
         let Some(segs) = self.cells.get(&(k(d.x), k(d.y), k(d.z))) else { return (0.0, FAR) };
-        let (mut cut, mut river) = (0.0f32, FAR);
-        for &(ci, si) in segs {
-            let c = &self.channels[ci as usize];
-            let (a, b) = (c.points[si as usize], c.points[si as usize + 1]);
-            let ab = b - a;
-            let t = ((d - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
-            let dist = (d - (a + ab * t)).length() * radius;
-            let w = c.widths[si as usize] + (c.widths[si as usize + 1] - c.widths[si as usize]) * t;
-            cut = cut.max(c.depth * profile(dist, w, c.river));
-            if c.river {
-                river = river.min(dist);
-            }
-        }
-        (cut, river)
+        carve_over(self.channels, segs.iter().copied(), d, radius)
     }
+}
+
+/// How far from segment `si` of `c` direction `d` is (world units), and the
+/// channel's width there.
+#[inline]
+fn segment(c: &Channel, si: usize, d: Vec3, radius: f32) -> (f32, f32) {
+    let (a, b) = (c.points[si], c.points[si + 1]);
+    let ab = b - a;
+    let t = ((d - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+    let dist = (d - (a + ab * t)).length() * radius;
+    let w = c.widths[si] + (c.widths[si + 1] - c.widths[si]) * t;
+    (dist, w)
+}
+
+/// The deepest cut the segments `segs` (channel, segment) make at `d`, and
+/// how far the nearest river among them is. A segment out of a channel's
+/// reach cuts nothing, so any list holding every segment in reach answers
+/// the same.
+fn carve_over(channels: &[Channel], segs: impl Iterator<Item = (u32, u32)>, d: Vec3, radius: f32) -> (f32, f32) {
+    let (mut cut, mut river) = (0.0f32, FAR);
+    for (ci, si) in segs {
+        let c = &channels[ci as usize];
+        let (dist, w) = segment(c, si as usize, d, radius);
+        cut = cut.max(c.depth * profile(dist, w, c.river));
+        if c.river {
+            river = river.min(dist);
+        }
+    }
+    (cut, river)
 }
 
 /// How far from its line a channel of width `w` still lowers the ground.

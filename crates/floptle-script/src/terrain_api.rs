@@ -1489,6 +1489,68 @@ pub(crate) fn install_terrain_api(
         }
     }
 
+    // terrain.layersAt(pos) → what each relief layer of the generator adds
+    // to the ground's height in the direction of `pos` (world), on the
+    // generated terrain nearest it: { height=, base=, mountains=, plateau=,
+    // terraces=, channels=, craters=, overhangs=, warp=, cell=, channel= }.
+    // The shares from `base` to `craters` sum to `height`, the generated
+    // ground's height above the radius; edits are not part of it. `channel`
+    // is the nearest river or ravine, { index=, kind=, width=, depth=,
+    // distance=, profile=, carve= }, `index` its place in
+    // terrain.planetRivers. nil off every generated body.
+    {
+        let cols = colliders.clone();
+        if let Ok(f) = lua.create_function(move |lua, pos: crate::math_api::LuaVec3| {
+            let mut best: Option<(f32, floptle_field::relief::ReliefLayers, f32)> = None;
+            for c in cols.borrow().iter() {
+                let Some(t) = c.shape.chunk_terrain() else { continue };
+                let s = t.scale.max(1e-6);
+                let local = (t.rot.inverse() * (pos.0 - c.anchor).as_vec3()) / s;
+                // Over the body: within the box its generation filled.
+                let Some((lo, hi)) = t.field.bounds() else { continue };
+                if local.cmplt(lo).any() || local.cmpgt(hi).any() {
+                    continue;
+                }
+                let Some(layers) = t.field.relief_layers(local) else { continue };
+                // The nearest body's, as terrain.slotAt picks.
+                let d = t.field.d(local).abs() * s;
+                if best.as_ref().is_none_or(|b| d < b.0) {
+                    best = Some((d, layers, s));
+                }
+            }
+            let Some((_, l, s)) = best else { return Ok(Value::Nil) };
+            let out = lua.create_table()?;
+            for (k, v) in [
+                ("height", l.height),
+                ("base", l.base),
+                ("mountains", l.mountains),
+                ("plateau", l.plateau),
+                ("terraces", l.terraces),
+                ("channels", l.channels),
+                ("craters", l.craters),
+                ("overhangs", l.overhangs),
+                ("warp", l.warp),
+                ("cell", l.cell),
+            ] {
+                out.set(k, (v * s) as f64)?;
+            }
+            if let Some(ch) = &l.channel {
+                let c = lua.create_table()?;
+                c.set("index", ch.index + 1)?;
+                c.set("kind", if ch.river { "river" } else { "ravine" })?;
+                c.set("width", (ch.width * s) as f64)?;
+                c.set("depth", (ch.depth * s) as f64)?;
+                c.set("distance", (ch.distance * s) as f64)?;
+                c.set("profile", ch.profile as f64)?;
+                c.set("carve", (ch.carve * s) as f64)?;
+                out.set("channel", c)?;
+            }
+            Ok(Value::Table(out))
+        }) {
+            let _ = t.set("layersAt", f);
+        }
+    }
+
     // terrain.raycast(origin, dir [, maxDist]) → the first terrain surface
     // along the ray, read from the ground's own field rather than from
     // collision meshes that may not be built yet: { pos =, normal =,
