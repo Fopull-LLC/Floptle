@@ -418,6 +418,42 @@ pub use std::time::UNIX_EPOCH;
 #[cfg(target_arch = "wasm32")]
 pub use web_time::UNIX_EPOCH;
 
+/// CPU time this thread has used so far, where the platform can say.
+///
+/// The thread's own clock (`CLOCK_THREAD_CPUTIME_ID`): it only grows while
+/// the thread runs, so time spent waiting for a core on a loaded machine, or
+/// asleep, is not in it. The script watchdog's budget and the frame
+/// profile's `main_cpu_ms` both read it.
+#[cfg(unix)]
+pub fn thread_cpu() -> Option<std::time::Duration> {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: `ts` is a valid, writable timespec for the duration of the call.
+    let ok = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } == 0;
+    ok.then(|| std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
+}
+
+/// CPU time this thread has used so far, where the platform can say.
+#[cfg(windows)]
+pub fn thread_cpu() -> Option<std::time::Duration> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+    let z = || FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut c, mut e, mut k, mut u) = (z(), z(), z(), z());
+    // SAFETY: the pseudo-handle is always valid for the calling thread, and
+    // every out-pointer is a live FILETIME.
+    let ok = unsafe { GetThreadTimes(GetCurrentThread(), &mut c, &mut e, &mut k, &mut u) } != 0;
+    let t = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
+    // 100 ns units, kernel and user both: a script's own work in a binding
+    // counts as its own.
+    ok.then(|| std::time::Duration::from_nanos((t(k) + t(u)) * 100))
+}
+
+/// No per-thread CPU clock here (the browser).
+#[cfg(not(any(unix, windows)))]
+pub fn thread_cpu() -> Option<std::time::Duration> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

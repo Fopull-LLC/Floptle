@@ -40,8 +40,18 @@
 //! anyway: the interrupt only runs while Lua runs, so a binding that never
 //! returns never reaches it.
 //!
+//! **The collector's work inside a pass is timed here too.** Luau collects
+//! in small steps it takes on its own whenever a script allocates past its
+//! debt, and it calls the same interrupt, with a non-negative state, at the
+//! start and the end of every step. mlua drops those calls, so the
+//! interrupt is wrapped ([`time_gc_steps`]): the wrapper times each step on
+//! this thread and hands every other call on to mlua. What an armed pass
+//! spent in those steps reaches the frame profile as `gc_ms`. The steps the
+//! engine itself paces between frames (`ScriptHost::step_gc`) run outside
+//! any pass and are not counted.
+//!
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -72,38 +82,18 @@ pub struct Budget {
     /// Outermost entries into Lua so far, so a reader of the interrupt (the
     /// script sampler) can tell one pass from the next.
     entries: Cell<u64>,
+    /// This thread's collector time ([`gc_spent`]) when the outermost entry
+    /// armed.
+    gc_at_arm: Cell<Duration>,
+    /// Where a pass's collector time is reported, and what of it is still
+    /// waiting because the profile was borrowed when the pass ended.
+    gc_report: RefCell<Option<crate::SharedProfile>>,
+    gc_pending: Cell<f32>,
 }
 
-/// CPU time this thread has used so far, where the platform can say.
-#[cfg(unix)]
-pub fn thread_cpu() -> Option<Duration> {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-    // SAFETY: `ts` is a valid, writable timespec for the duration of the call.
-    let ok = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } == 0;
-    ok.then(|| Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
-}
-
-/// CPU time this thread has used so far, where the platform can say.
-#[cfg(windows)]
-pub fn thread_cpu() -> Option<Duration> {
-    use windows_sys::Win32::Foundation::FILETIME;
-    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
-    let z = || FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-    let (mut c, mut e, mut k, mut u) = (z(), z(), z(), z());
-    // SAFETY: the pseudo-handle is always valid for the calling thread, and
-    // every out-pointer is a live FILETIME.
-    let ok = unsafe { GetThreadTimes(GetCurrentThread(), &mut c, &mut e, &mut k, &mut u) } != 0;
-    let t = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
-    // 100 ns units, kernel and user both: a script's own work in a binding
-    // counts as its own.
-    ok.then(|| Duration::from_nanos((t(k) + t(u)) * 100))
-}
-
-/// No per-thread CPU clock here (the browser): the wall is the budget.
-#[cfg(not(any(unix, windows)))]
-pub fn thread_cpu() -> Option<Duration> {
-    None
-}
+/// CPU time this thread has used so far, where the platform can say. It
+/// lives in `floptle_core::time` because the frame profile reads it too.
+pub use floptle_core::time::thread_cpu;
 
 impl Budget {
     pub fn new() -> Rc<Self> {
@@ -112,6 +102,9 @@ impl Budget {
             deadline: Cell::new(None),
             ticks: Cell::new(0),
             entries: Cell::new(0),
+            gc_at_arm: Cell::new(Duration::ZERO),
+            gc_report: RefCell::new(None),
+            gc_pending: Cell::new(0.0),
         })
     }
 
@@ -132,6 +125,7 @@ impl Budget {
         if prev.is_none() {
             self.deadline.set(Some((Instant::now(), thread_cpu())));
             self.entries.set(self.entries.get().wrapping_add(1));
+            self.gc_at_arm.set(gc_spent());
         }
         Armed { budget: self.clone(), prev }
     }
@@ -204,7 +198,102 @@ impl Budget {
     pub fn install(self: &Rc<Self>, lua: &mlua::Lua) {
         let b = self.clone();
         lua.set_interrupt(move |lua| b.check(lua));
+        time_gc_steps(lua);
     }
+
+    /// Report the collector's time inside each pass to `profile`
+    /// ([`FrameProfile::record_gc`](floptle_core::profile::FrameProfile::record_gc)).
+    pub fn report_gc_to(&self, profile: &crate::SharedProfile) {
+        *self.gc_report.borrow_mut() = Some(profile.clone());
+    }
+
+    /// The outermost pass ended: hand its collector time to the profile.
+    fn pass_ended(&self) {
+        let spent = gc_spent().saturating_sub(self.gc_at_arm.get());
+        let ms = self.gc_pending.get() + spent.as_secs_f32() * 1000.0;
+        if ms <= 0.0 {
+            return;
+        }
+        let report = self.gc_report.borrow();
+        let Some(profile) = report.as_ref() else { return };
+        // A pass that ends while the profile is borrowed keeps its time for
+        // the next one rather than losing it.
+        match profile.try_borrow_mut() {
+            Ok(mut p) => {
+                p.record_gc(ms);
+                self.gc_pending.set(0.0);
+            }
+            Err(_) => self.gc_pending.set(ms),
+        }
+    }
+}
+
+thread_local! {
+    /// When the collector step in progress on this thread began.
+    static GC_STEP_BEGAN: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// The wall time this thread has spent in collector steps so far.
+    static GC_SPENT: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+}
+
+/// The wall time this thread has spent in Luau's collector steps so far,
+/// counted by the interrupt [`time_gc_steps`] installs.
+pub fn gc_spent() -> Duration {
+    GC_SPENT.with(Cell::get)
+}
+
+type Interrupt = unsafe extern "C-unwind" fn(*mut mlua::ffi::lua_State, std::ffi::c_int);
+
+/// mlua's own interrupt, which [`gc_interrupt`] hands the script's
+/// safepoints on to. One function for every state.
+static NEXT_INTERRUPT: std::sync::OnceLock<Interrupt> = std::sync::OnceLock::new();
+
+/// Luau calls the interrupt with `gc >= 0` twice a collector step, at its
+/// start and at its end (`luaC_step`), and with `gc < 0` at a script's
+/// safepoints. The first are timed here; the rest go to mlua. No script runs
+/// inside a step, so a safepoint seen while a step is open means the step
+/// never reached its end (an error raised inside it), and the open step is
+/// dropped rather than paired with the next one.
+unsafe extern "C-unwind" fn gc_interrupt(state: *mut mlua::ffi::lua_State, gc: std::ffi::c_int) {
+    if gc >= 0 {
+        GC_STEP_BEGAN.with(|began| match began.take() {
+            None => began.set(Some(Instant::now())),
+            Some(t0) => GC_SPENT.with(|s| s.set(s.get() + t0.elapsed())),
+        });
+        return;
+    }
+    GC_STEP_BEGAN.with(|began| {
+        if began.get().is_some() {
+            began.set(None);
+        }
+    });
+    if let Some(next) = NEXT_INTERRUPT.get() {
+        // SAFETY: the same call Luau would have made to mlua's interrupt had
+        // this one not been put in front of it.
+        unsafe { next(state, gc) }
+    }
+}
+
+/// Put [`gc_interrupt`] in front of the interrupt mlua installed, so the
+/// collector's steps are timed. Call it after every `set_interrupt`, which
+/// puts mlua's own back. Does nothing when no interrupt is set, or when the
+/// one set is not mlua's.
+pub fn time_gc_steps(lua: &mlua::Lua) {
+    // SAFETY: `lua_callbacks` returns the state's callback table, valid for
+    // the state's life; only its `interrupt` is read and written, from the
+    // thread that owns the state.
+    let _ = unsafe {
+        lua.exec_raw::<()>((), |state| {
+            let cb = mlua::ffi::lua_callbacks(state);
+            let Some(current) = (*cb).interrupt else { return };
+            if std::ptr::fn_addr_eq(current, gc_interrupt as Interrupt) {
+                return;
+            }
+            let next = *NEXT_INTERRUPT.get_or_init(|| current);
+            if std::ptr::fn_addr_eq(next, current) {
+                (*cb).interrupt = Some(gc_interrupt);
+            }
+        })
+    };
 }
 
 /// The armed deadline; dropping it restores what was there before.
@@ -216,6 +305,9 @@ pub struct Armed {
 impl Drop for Armed {
     fn drop(&mut self) {
         self.budget.deadline.set(self.prev);
+        if self.prev.is_none() {
+            self.budget.pass_ended();
+        }
     }
 }
 

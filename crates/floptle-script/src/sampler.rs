@@ -108,6 +108,7 @@ pub fn install(lua: &mlua::Lua, budget: &Rc<crate::budget::Budget>, sampler: &Rc
         s.poll(lua, b.entries());
         b.check(lua)
     });
+    crate::budget::time_gc_steps(lua);
 }
 
 #[cfg(test)]

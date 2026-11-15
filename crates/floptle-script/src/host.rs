@@ -2988,6 +2988,9 @@ impl ScriptHost {
             input_sim,
         } = install_input(&lua, &logs);
         let profile: crate::SharedProfile = Rc::new(RefCell::new(Default::default()));
+        // The collector's work inside each pass is counted in the frame's
+        // `gc_ms`.
+        budget.report_gc_to(&profile);
         // The scripts' copy of the scene: made before the queries, whose
         // `ignoreChildren` walks its children.
         let scene_mirror: Rc<RefCell<SceneMirror>> = Rc::default();

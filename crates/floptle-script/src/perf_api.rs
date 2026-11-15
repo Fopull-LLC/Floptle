@@ -91,6 +91,11 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
                 }
                 row.set("ticks", r.ticks)?;
                 row.set("ticksDropped", r.ticks_dropped)?;
+                // nil where the platform has no per-thread CPU clock.
+                if let Some(cpu) = r.main_cpu_ms {
+                    row.set("mainCpuMs", cpu)?;
+                }
+                row.set("gcMs", r.gc_ms)?;
                 list.raw_set(i + 1, row)?;
             }
             Ok(list)
@@ -430,7 +435,8 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
 
     // perf.hitches() -> every frame since the last call whose buckets added up
     // to the hitch threshold (50 ms unless `perf.hitchThreshold` says otherwise)
-    // or more: { {frame=, ms=, top=, buckets={terrain=157.4, ...}}, ... },
+    // or more: { {frame=, ms=, top=, buckets={terrain=157.4, ...}, mainCpuMs=,
+    // gcMs=}, ... },
     // oldest first. The window behind `worstMs` is sixty frames, so a probe
     // that reads every few seconds had already lost the spike it was after.
     let p = profile.clone();
@@ -471,6 +477,10 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
                 row.set("calls", calls_table(lua, &h.calls)?)?;
                 row.set("samples", samples_table(lua, &h.samples)?)?;
                 row.set("bodies", named_ms(lua, &h.bodies)?)?;
+                if let Some(cpu) = h.main_cpu_ms {
+                    row.set("mainCpuMs", cpu)?;
+                }
+                row.set("gcMs", h.gc_ms)?;
                 list.raw_set(i + 1, row)?;
             }
             Ok(list)

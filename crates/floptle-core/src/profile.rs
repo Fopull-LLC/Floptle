@@ -212,6 +212,22 @@ pub struct FrameRecord {
     /// budget, or slow motion, dropped them. The game ran that much slower
     /// than real time this frame.
     pub ticks_dropped: u32,
+    /// The CPU time the thread that ends the frames (the main thread) used
+    /// over the same span as [`Self::ms`]: from the end of the frame before
+    /// to the end of this one. Where it is well under `ms` and the frame was
+    /// not waiting on the GPU, the display or a frame cap, the thread was
+    /// ready to run and the machine did not run it: another program, or a
+    /// machine loaded on every core, held the frame up. `None` where the
+    /// platform has no per-thread CPU clock (the browser), and on the first
+    /// frame, which has no frame before it.
+    pub main_cpu_ms: Option<f32>,
+    /// The script collector's work while scripts ran this frame: the steps
+    /// Luau takes on its own when a script (or the engine handing it
+    /// values) allocates past the collector's debt, inside a pass of hooks,
+    /// timers or callbacks. Wall time, already counted in the `scripts`
+    /// bucket and in the hook it fell in. The steps the engine paces between
+    /// frames (the `scriptsGc` part) are not in it.
+    pub gc_ms: f32,
 }
 
 impl FrameRecord {
@@ -328,6 +344,12 @@ pub struct Hitch {
     pub samples: Vec<Sample>,
     /// The costliest physics assemblies and bodies, by node name.
     pub bodies: Vec<(String, f32)>,
+    /// See [`FrameRecord::main_cpu_ms`]: a hitch whose `ms` is far above
+    /// it, and whose waits do not explain the gap, was held up by the
+    /// machine rather than made slow by the frame's own work.
+    pub main_cpu_ms: Option<f32>,
+    /// See [`FrameRecord::gc_ms`].
+    pub gc_ms: f32,
 }
 
 /// How many assets a hitch names.
@@ -576,6 +598,11 @@ pub struct FrameProfile {
     /// Fixed ticks run this frame (see [`FrameRecord::ticks`]).
     ticks_frame: u32,
     ticks_dropped_frame: u32,
+    /// The ending thread's CPU clock when the last frame ended, for
+    /// [`FrameRecord::main_cpu_ms`].
+    last_cpu: Option<std::time::Duration>,
+    /// Collector time inside script hooks this frame ([`Self::record_gc`]).
+    gc_frame: f32,
     /// Sweeps scripts cast this frame (`spherecast`, `capsulecast`,
     /// `boxcast`) and their milliseconds, the same way as the rays.
     sweeps_frame: (u64, f32),
@@ -985,6 +1012,14 @@ impl FrameProfile {
         self.ticks_dropped_frame = n;
     }
 
+    /// Count `ms` of the script collector's work done inside a script hook
+    /// (see [`FrameRecord::gc_ms`]). Nothing while off.
+    pub fn record_gc(&mut self, ms: f32) {
+        if self.on {
+            self.gc_frame += ms;
+        }
+    }
+
     /// Count `n` script rays that took `ms` between them. Nothing while off.
     pub fn record_rays(&mut self, n: u64, ms: f32) {
         if self.on {
@@ -1134,6 +1169,15 @@ impl FrameProfile {
         let now = crate::time::Instant::now();
         let last_end = self.last_end.replace(now);
         let between = last_end.map(|t| (now - t).as_secs_f32() * 1000.0);
+        // The CPU clock is read beside the wall clock, so the two cover the
+        // same span. Read whether or not collection is on, like `last_end`,
+        // so the first frame after `perf.enable` already has its span.
+        let cpu = crate::time::thread_cpu();
+        let last_cpu = std::mem::replace(&mut self.last_cpu, cpu);
+        let main_cpu_ms = match (last_end, last_cpu, cpu) {
+            (Some(_), Some(a), Some(b)) => Some(b.saturating_sub(a).as_secs_f32() * 1000.0),
+            _ => None,
+        };
         let began = self.began.take();
         let untimed_rest = self.untimed_rest.take();
         if !self.on {
@@ -1143,6 +1187,7 @@ impl FrameProfile {
             self.sweeps_frame = (0, 0.0);
             self.ticks_frame = 0;
             self.ticks_dropped_frame = 0;
+            self.gc_frame = 0.0;
             return;
         }
         // The time before this frame's own work began, back to the end of the
@@ -1231,6 +1276,8 @@ impl FrameProfile {
             paced,
             ticks: std::mem::take(&mut self.ticks_frame),
             ticks_dropped: std::mem::take(&mut self.ticks_dropped_frame),
+            main_cpu_ms,
+            gc_ms: std::mem::take(&mut self.gc_frame),
         };
         if total >= self.hitch_threshold() {
             let mut buckets = record.buckets.clone();
@@ -1250,6 +1297,8 @@ impl FrameProfile {
                 calls: record.calls.clone(),
                 samples: record.samples.clone(),
                 bodies: record.bodies.clone(),
+                main_cpu_ms: record.main_cpu_ms,
+                gc_ms: record.gc_ms,
             });
         }
         if self.ring.len() >= FRAME_RING {
@@ -1904,5 +1953,62 @@ mod frame_record_tests {
         }
         let ticks: Vec<u32> = p.recent_frames(3).map(|r| r.ticks).collect();
         assert_eq!(ticks, [3, 0, 5]);
+    }
+
+    /// **A frame's CPU time is the thread's own clock, not the wall.** A
+    /// frame that sleeps 40 ms takes 40 ms of wall time and almost no CPU;
+    /// a frame that spins for 40 ms takes about as much of both. Read off
+    /// the wall, the sleeping frame would claim 40 ms of CPU, and a game
+    /// could not tell a frame the machine held up from one it made slow.
+    #[test]
+    fn a_frames_cpu_time_is_the_threads_own_not_the_wall() {
+        let mut p = FrameProfile::default();
+        p.enable(true);
+        p.end_frame();
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        p.end_frame();
+        let t0 = crate::time::Instant::now();
+        let mut x = 0u64;
+        while t0.elapsed() < std::time::Duration::from_millis(40) {
+            x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
+        }
+        p.end_frame();
+        let frames: Vec<&FrameRecord> = p.recent_frames(3).collect();
+        assert_eq!(frames[0].main_cpu_ms, None, "the first frame has no frame before it to measure from");
+        let (slept, spun) = (frames[1], frames[2]);
+        if crate::time::thread_cpu().is_none() {
+            assert_eq!(slept.main_cpu_ms, None, "no CPU clock reads as nil, not as zero");
+            return;
+        }
+        let slept_cpu = slept.main_cpu_ms.expect("a CPU clock was read");
+        let spun_cpu = spun.main_cpu_ms.expect("a CPU clock was read");
+        assert!(slept.ms >= 40.0, "the sleeping frame's wall time: {}", slept.ms);
+        assert!(slept_cpu < 10.0, "a sleeping frame uses almost no CPU, got {slept_cpu} of {} ms", slept.ms);
+        assert!(spun.ms >= 40.0, "the spinning frame's wall time: {}", spun.ms);
+        assert!(
+            spun_cpu >= 0.5 * spun.ms && spun_cpu <= spun.ms + 1.0,
+            "a spinning frame's CPU is close to its wall time, got {spun_cpu} of {} ms",
+            spun.ms
+        );
+    }
+
+    /// Collector time reported inside a frame lands on that frame only, and
+    /// a hitch carries it with the frame's CPU time.
+    #[test]
+    fn collector_time_lands_on_its_own_frame_and_hitch() {
+        let mut p = FrameProfile::default();
+        p.enable(true);
+        p.end_frame();
+        p.record_gc(1.5);
+        p.record_gc(0.5);
+        p.record(Bucket::Scripts, 60.0);
+        p.end_frame();
+        p.end_frame();
+        let gc: Vec<f32> = p.recent_frames(2).map(|r| r.gc_ms).collect();
+        assert_eq!(gc, [2.0, 0.0]);
+        let h = p.take_hitches();
+        assert_eq!(h.len(), 1, "{h:?}");
+        assert_eq!(h[0].gc_ms, 2.0);
+        assert_eq!(h[0].main_cpu_ms.is_some(), crate::time::thread_cpu().is_some());
     }
 }

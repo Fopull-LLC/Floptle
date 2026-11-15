@@ -196,3 +196,53 @@ fn the_collector_steps_between_frames_and_is_named() {
     assert!(after < before, "stepping the collector to the end of a cycle freed nothing: {before} -> {after} bytes");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **The collector's work while scripts run is counted per frame, and the
+/// engine's own paced steps are not.** A script that leaves megabytes of
+/// garbage every frame makes Luau take collector steps inside its hook; the
+/// frame's `gcMs` is above zero, within the hook's own time, and readable from
+/// Lua with `mainCpuMs` beside it. A frame where no script runs but the
+/// engine steps the collector between frames (`step_gc`, the `scriptsGc`
+/// part) reads zero.
+#[test]
+fn collector_time_inside_hooks_is_counted_and_paced_steps_are_not() {
+    let dir = std::env::temp_dir().join(format!("floptle-perf-gcms-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "litter",
+        "local frame = 0\n\
+         function update(node, dt)\n  \
+           frame = frame + 1\n  \
+           if frame == 1 then perf.enable(true) return end\n  \
+           local junk = {}\n  \
+           for i = 1, 60000 do junk[i] = { i, tostring(i) } end\n  \
+           if frame == 3 then\n    \
+             local f = perf.frames(1)[1]\n    \
+             assert(type(f.gcMs) == 'number', 'gcMs is not a number')\n    \
+             assert(f.gcMs > 0, 'a littering frame read no collector time')\n    \
+             assert(f.mainCpuMs == nil or f.mainCpuMs >= 0, 'mainCpuMs is not a time')\n  \
+           end\n\
+         end\n",
+    );
+    let (mut world, _) = world_with_script("litter");
+    let mut host = ScriptHost::new();
+    for i in 1..=3 {
+        host.profile().borrow_mut().begin_frame();
+        host.run(&mut world, &dir, 0.016, 0.016 * i as f32);
+        assert!(host.errors().is_empty(), "frame {i}: {:?}", host.errors());
+        host.profile().borrow_mut().end_frame();
+    }
+    let littered = host.profile().borrow().recent_frames(1).next().expect("a frame").clone();
+    assert!(littered.gc_ms > 0.0, "a frame that littered megabytes read no collector time");
+    let hook = littered.scripts.iter().find(|(n, _)| n == "litter").map(|(_, ms)| *ms).expect("litter ran");
+    assert!(littered.gc_ms <= hook, "collector time {} is more than the hook it fell in, {hook}", littered.gc_ms);
+    assert_eq!(littered.main_cpu_ms.is_some(), crate::budget::thread_cpu().is_some());
+    host.profile().borrow_mut().begin_frame();
+    host.step_gc(2.0);
+    host.profile().borrow_mut().end_frame();
+    let paced = host.profile().borrow().recent_frames(1).next().expect("a frame").clone();
+    assert!(paced.part("scriptsGc") > 0.0, "the paced step did not run: {:?}", paced.parts);
+    assert_eq!(paced.gc_ms, 0.0, "the engine's paced collector steps were counted as the scripts'");
+    let _ = std::fs::remove_dir_all(&dir);
+}

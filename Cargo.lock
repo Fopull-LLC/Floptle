@@ -1698,8 +1698,10 @@ name = "floptle-core"
 version = "0.118.2"
 dependencies = [
  "glam",
+ "libc",
  "rustc-hash 2.1.2",
  "web-time",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2081,7 +2083,6 @@ dependencies = [
  "fontdue",
  "glam",
  "image",
- "libc",
  "mlua",
  "ron",
  "serde",
