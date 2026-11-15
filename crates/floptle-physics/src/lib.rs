@@ -31,6 +31,7 @@ mod gravity;
 mod hull;
 pub mod joints;
 mod pairs;
+mod sane;
 mod shapes;
 mod sim;
 mod water;
@@ -46,6 +47,7 @@ pub use shapes::*;
 pub use sim::*;
 pub use water::*;
 pub use world::*;
+pub use sane::{Sanity, SanityReport, MAX_REACH, MAX_SPEED, MAX_SPIN};
 
 #[cfg(test)]
 mod tests {

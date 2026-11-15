@@ -1937,6 +1937,7 @@ dependencies = [
  "floptle-core",
  "floptle-field",
  "floptle-rules",
+ "floptle-say",
 ]
 
 [[package]]

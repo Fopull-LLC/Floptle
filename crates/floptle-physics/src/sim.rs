@@ -1570,7 +1570,9 @@ impl Sim {
                 self.world.rebase(new_origin);
             }
         }
-        self.accum += real_dt.clamp(0.0, 0.25);
+        // A frame time that is not a number would leave the clock NaN for
+        // good: no step would ever run again.
+        self.accum += if real_dt.is_finite() { real_dt.clamp(0.0, 0.25) } else { 0.0 };
         let mut iters = 0;
         while self.accum >= self.fixed_dt && iters < 8 {
             self.swell_clock(self.water_t);
@@ -1624,7 +1626,10 @@ impl Sim {
             self.tick_vel_c.clear();
             self.tick_vel_c.extend(self.world.compounds.iter().map(|c| (c.vel, c.ang_vel)));
         }
-        let n = (tick_dt / self.fixed_dt).round().max(1.0) as u32;
+        let n = tick_substeps(tick_dt, self.fixed_dt);
+        // The water's clock moves on by the tick: by its substeps, for one
+        // whose length is not a number, or the clock would be NaN for good.
+        let tick_dt = if tick_dt.is_finite() { tick_dt } else { n as f32 * self.fixed_dt };
         // Accumulate contacts across the tick's substeps (each step clears its
         // own) so a one-substep graze still registers as a touch this tick.
         let mut tick_contacts: Vec<crate::body::Contact> = Vec::new();
@@ -1798,12 +1803,57 @@ impl Sim {
         self.coasting.contains(&eid)
     }
 
+    /// Hold `force` (at world point `at`, or through the centre of mass) and
+    /// `torque` on the assembly rooted at `eid` through the next tick. A
+    /// force, point or torque that is not a finite number is refused whole,
+    /// and the log says so.
     pub fn hold_compound_force(&mut self, eid: u32, force: Vec3, at: Option<DVec3>, torque: Vec3) {
+        if !self.usable(eid, "held force", force)
+            || !self.usable(eid, "held torque", torque)
+            || at.is_some_and(|p| !self.usable_point(eid, "held force's point", p))
+        {
+            return;
+        }
         self.held.push(HeldForce { eid, force, at, torque });
     }
 
-    /// Instantaneous impulse on the compound rooted at `eid` at world point `at`.
+    /// Whether `v`, written to node `eid` as `what`, is finite; when it is
+    /// not, the write is counted and logged (see [`crate::sane`]) and the
+    /// caller drops it.
+    fn usable(&mut self, eid: u32, what: &str, v: Vec3) -> bool {
+        if v.is_finite() {
+            return true;
+        }
+        self.world.sanity.refuse(eid, what, v);
+        false
+    }
+
+    /// [`Self::usable`] for a world point: finite, and within
+    /// [`crate::MAX_REACH`] of the floating origin once it is in the sim's
+    /// frame.
+    fn usable_point(&mut self, eid: u32, what: &str, p: DVec3) -> bool {
+        if p.is_finite() && crate::sane::within((p - self.world.origin).as_vec3(), crate::MAX_REACH) {
+            return true;
+        }
+        self.world.sanity.refuse(eid, what, p);
+        false
+    }
+
+    /// [`Self::usable`] for a world-space move.
+    fn usable_move(&mut self, eid: u32, what: &str, d: DVec3) -> bool {
+        if d.is_finite() && crate::sane::within(d.as_vec3(), crate::MAX_REACH) {
+            return true;
+        }
+        self.world.sanity.refuse(eid, what, d);
+        false
+    }
+
+    /// Instantaneous impulse on the compound rooted at `eid` at world point
+    /// `at`. One that is not a finite number is refused.
     pub fn compound_impulse(&mut self, eid: u32, imp: Vec3, at: DVec3) {
+        if !self.usable(eid, "impulse", imp) || !self.usable_point(eid, "impulse's point", at) {
+            return;
+        }
         let origin = self.world.origin;
         if let Some(c) = self.compound_of_mut(eid) {
             let at_sim = (at - origin).as_vec3();
@@ -1835,6 +1885,9 @@ impl Sim {
     /// dominant-frame carry: ride the orbiting planet). The render anchor
     /// moves with it so the shift doesn't smear across interpolation.
     pub fn shift_compound(&mut self, eid: u32, delta: DVec3) {
+        if !self.usable_move(eid, "carry", delta) {
+            return;
+        }
         for l in &self.cmap {
             if l.entity.index() == eid {
                 let d = delta.as_vec3();
@@ -1851,6 +1904,9 @@ impl Sim {
 
     /// Overwrite a compound's linear velocity (SOI-seam frame handoffs).
     pub fn set_compound_velocity(&mut self, eid: u32, vel: Vec3) {
+        if !self.usable(eid, "velocity", vel) {
+            return;
+        }
         if let Some(c) = self.compound_of_mut(eid) {
             if c.vel != vel {
                 c.wake(crate::body::WakeReason::Script);
@@ -1875,6 +1931,9 @@ impl Sim {
     /// rebuild — terrain streaming rebuilds the sim mid-flight and must not
     /// silently de-spin a tumbling stage).
     pub fn set_compound_angular_velocity(&mut self, eid: u32, ang: Vec3) {
+        if !self.usable(eid, "angular velocity", ang) {
+            return;
+        }
         if let Some(c) = self.compound_of_mut(eid) {
             if c.ang_vel != ang {
                 c.wake(crate::body::WakeReason::Script);
@@ -2030,6 +2089,9 @@ impl Sim {
     /// the nodes it moved (the root first), for the caller to write back.
     pub fn set_compound_origin(&mut self, eid: u32, target: DVec3) -> Vec<u32> {
         use crate::joints::Link;
+        if !self.usable_point(eid, "position", target) {
+            return Vec::new();
+        }
         let origin = self.world.origin;
         let Some(ci) = self.cmap.iter().find(|l| l.entity.index() == eid).map(|l| l.compound) else {
             return Vec::new();
@@ -2784,7 +2846,7 @@ impl Sim {
         if let Some(tp) = self.tick_prev.get_mut(bi) {
             *tp = self.world.bodies[bi].pos;
         }
-        let n = (tick_dt / self.fixed_dt).round().max(1.0) as u32;
+        let n = tick_substeps(tick_dt, self.fixed_dt);
         for i in 0..n {
             self.swell_clock(self.water_t + i as f64 * self.fixed_dt as f64);
             self.world.step_body(bi, self.fixed_dt);
@@ -2847,6 +2909,16 @@ impl Sim {
     /// apply). Converts the absolute position back into the sim frame and resets the
     /// interpolation anchors too, so a rollback never smears across the correction.
     pub fn restore_body(&mut self, eid: u32, s: &BodySnapshot) {
+        if !self.usable_point(eid, "restored position", s.pos)
+            || !self.usable(eid, "restored velocity", s.vel)
+            || !self.usable(eid, "restored spin", s.ang_vel)
+        {
+            return;
+        }
+        if !s.orient.is_finite() {
+            self.world.sanity.refuse(eid, "restored orientation", s.orient);
+            return;
+        }
         for l in &self.map {
             if l.entity.index() == eid {
                 let p = (s.pos - self.world.origin).as_vec3();
@@ -3072,6 +3144,9 @@ impl Sim {
     /// stands on it) ride with it. Bodies and assemblies in another frame are
     /// then shifted by the difference, those in none by `-delta`.
     pub fn ride_frame(&mut self, delta: DVec3, riders: &[u32]) {
+        if !self.usable_move(u32::MAX, "frame carry", delta) {
+            return;
+        }
         // A set: a planet's base can be thousands of pieces, each asked about.
         let riders: std::collections::HashSet<u32> = riders.iter().copied().collect();
         self.world.ride(delta, |c| c.eid.is_some_and(|e| riders.contains(&e)));
@@ -3098,6 +3173,9 @@ impl Sim {
     /// the dominant body's frame). The render anchor shifts too, so the carry
     /// never smears interpolation.
     pub fn shift_body(&mut self, eid: u32, delta: DVec3) {
+        if !self.usable_move(eid, "carry", delta) {
+            return;
+        }
         for l in &self.map {
             if l.entity.index() == eid {
                 let d = delta.as_vec3();
@@ -3114,6 +3192,9 @@ impl Sim {
     /// position): velocity is preserved, the render anchor moves with it so the
     /// jump doesn't smear across interpolation.
     pub fn set_body_position(&mut self, eid: u32, pos: DVec3) {
+        if !self.usable_point(eid, "position", pos) {
+            return;
+        }
         for l in &self.map {
             if l.entity.index() == eid {
                 let local = (pos - self.world.origin).as_vec3();
@@ -3248,6 +3329,10 @@ impl Sim {
     /// Set a turning body's spin about Z, radians a second (`node.spin`). A
     /// body that does not turn, or whose Z turn is frozen, ignores it.
     pub fn set_body_spin(&mut self, eid: u32, spin: f32) {
+        if !spin.is_finite() {
+            self.world.sanity.refuse(eid, "spin", spin);
+            return;
+        }
         let Some(bi) = self.map.iter().find(|l| l.entity.index() == eid).map(|l| l.body) else { return };
         let b = &mut self.world.bodies[bi];
         if b.rotates && !b.lock_rot[2] {
@@ -3274,6 +3359,9 @@ impl Sim {
     }
 
     pub fn set_body_velocity(&mut self, eid: u32, vel: Vec3) {
+        if !self.usable(eid, "velocity", vel) {
+            return;
+        }
         for l in &self.map {
             if l.entity.index() == eid {
                 self.world.bodies[l.body].vel = vel;
@@ -3594,6 +3682,10 @@ impl Sim {
     /// height) leaves it alone. Re-planting the feet against a shape that had
     /// silently snapped back was a constant push along `up` every frame.
     pub fn set_body_height(&mut self, eid: u32, height: f32) {
+        if !height.is_finite() {
+            self.world.sanity.refuse(eid, "height", height);
+            return;
+        }
         for l in &mut self.map {
             if l.entity.index() == eid {
                 let b = &mut self.world.bodies[l.body];
@@ -3683,6 +3775,18 @@ impl Sim {
 /// single unit cube.
 fn is_tilemap(ecs: &World, e: Entity) -> bool {
     matches!(ecs.get::<floptle_core::Matter>(e), Some(floptle_core::Matter::Tilemap { .. }))
+}
+
+/// Most substeps one tick runs: a 1/120 s substep under a whole second's
+/// tick is 120, so this is never reached by a tick a game asks for, only by
+/// one whose length is endless or absurd, which would otherwise run billions.
+const MAX_TICK_SUBSTEPS: u32 = 1024;
+
+/// How many `fixed_dt` substeps make up a tick of `tick_dt`: at least one, at
+/// most [`MAX_TICK_SUBSTEPS`], and one for a tick that is not a number.
+fn tick_substeps(tick_dt: f32, fixed_dt: f32) -> u32 {
+    let n = (tick_dt / fixed_dt).round();
+    if n.is_nan() { 1 } else { (n.max(1.0) as u32).min(MAX_TICK_SUBSTEPS) }
 }
 
 #[cfg(test)]
@@ -4566,3 +4670,4 @@ fn has_corners(shape: &BodyShape) -> bool {
 fn turns(rb: &RigidBody) -> bool {
     rb.rotates && rb.mode != floptle_core::BodyMode::Static && !rb.pushbox_only
 }
+

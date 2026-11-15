@@ -413,6 +413,35 @@ alpha = accumulator / FIXED_DT    // render interpolates poses by alpha
   serializable state; [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §10). A reason to own
   the solver rather than inherit a third party's float ordering.
 
+### Bad numbers
+
+A game must never be able to hang the step with a bad number, so one is kept
+out three times over (`crates/floptle-physics/src/sane.rs`):
+
+1. **At the door.** `Sim`'s writes (held forces and torques, impulses,
+   velocities, spins, positions, carries, restored snapshots) refuse a value
+   that is not finite, and say so naming the node.
+2. **In the step.** `PhysicsWorld::step` checks every body and assembly before
+   any query is asked about them and again at its end, and `step_body` /
+   `step_compound` check theirs either side of the move, so a rollback replay
+   stops a body on the same step the live run did. A state that is not finite,
+   or past `MAX_SPEED` (1e9 m/s), `MAX_SPIN` (1e6 rad/s) or `MAX_REACH` (1e15 m
+   from the origin), is put back to its last finite pose, at rest and asleep.
+   The checks only read a sane state, so normal play is bit-identical with them
+   on and off (`the_checks_change_nothing_for_sane_bodies`).
+3. **In every walk.** Each loop whose length comes from geometry or time has a
+   cap of its own, whatever the first two let through: chunk and cell counts
+   are counted saturating (an infinite box saturates its corners to 2^27 chunks
+   a side, and the plain product of three of those wrapped to 0, passed the cap
+   and walked 2^81 chunks in `ChunkTerrain::mesh_ahead`: the hang that started
+   this), a march's steps are capped by the distance it covers, a mesh ray's
+   cell walk by the grid's size, a tick's substeps at 1,024, a 2D box cast's
+   points at 1,024 a side and a gather of terrain faces at 32,768 chunks.
+
+What was refused and stopped is counted (`Sanity::refused`,
+`Sanity::quarantined`) and kept for the host, which shows it in the Console
+(`Sanity::take_reports`, rate-limited like the terminal).
+
 ## Performance
 
 - **Budget asymmetry:** the renderer evaluates `f` for *millions of pixels*; physics
