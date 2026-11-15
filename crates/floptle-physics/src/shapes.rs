@@ -4003,17 +4003,31 @@ mod drawn_surface_tests {
             })
             .collect();
         let (mut new_s, mut old_s) = (f64::INFINITY, f64::INFINITY);
-        for _ in 0..5 {
+        let time_new = || {
             let t = std::time::Instant::now();
             for up in &rays {
                 std::hint::black_box(ground.ground_cast(*up * (radius + 60.0), -*up, 150.0));
             }
-            new_s = new_s.min(t.elapsed().as_secs_f64());
+            t.elapsed().as_secs_f64()
+        };
+        let time_old = || {
             let t = std::time::Instant::now();
             for up in &rays {
                 std::hint::black_box(ground_trace_by_distance_alone(&field, *up * (radius + 60.0), -*up, 150.0));
             }
-            old_s = old_s.min(t.elapsed().as_secs_f64());
+            t.elapsed().as_secs_f64()
+        };
+        // Fifteen passes, each trace first in turn, the fastest of each kept:
+        // a machine busy with other tests slows a pass, never speeds one, so
+        // the minimum is the cost and the order cannot favour either.
+        for pass in 0..15 {
+            if pass % 2 == 0 {
+                new_s = new_s.min(time_new());
+                old_s = old_s.min(time_old());
+            } else {
+                old_s = old_s.min(time_old());
+                new_s = new_s.min(time_new());
+            }
         }
         assert!(
             new_s < old_s * 1.5,
