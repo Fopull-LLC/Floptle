@@ -992,8 +992,23 @@ impl ChunkTerrain {
     /// a worker first, so laying a mark there costs the frame no meshing.
     pub fn unmeshed_in_box(&self, lo: Vec3, hi: Vec3) -> Vec<[i32; 3]> {
         let (llo, lhi) = self.local_box(lo, hi);
+        if !self.box_walkable(llo, lhi) {
+            return Vec::new();
+        }
         let s = self.surface.borrow();
         self.field.chunks_in_world_box(llo, lhi).into_iter().filter(|c| !s.chunks.contains_key(c)).collect()
+    }
+
+    /// Whether a box in the field's frame is one a gather can walk: finite,
+    /// and no more than [`MAX_GATHER_CHUNKS`] chunks. A gather meshes every
+    /// chunk in its box, so a box of endless size would never finish.
+    fn box_walkable(&self, llo: Vec3, lhi: Vec3) -> bool {
+        if !(llo.is_finite() && lhi.is_finite()) {
+            return false;
+        }
+        let side = floptle_field::CHUNK as f32 * self.field.voxel();
+        let chunks = (0..3).map(|k| (((lhi[k] - llo[k]) / side).ceil() as i64).saturating_add(1)).fold(1i64, i64::saturating_mul);
+        chunks <= MAX_GATHER_CHUNKS
     }
 
     /// An anchor-relative box, boxed again in the field's own frame.
@@ -1212,8 +1227,11 @@ impl ChunkTerrain {
             let chi = [(lhi.x / v).ceil() as i32, (lhi.y / v).ceil() as i32, (lhi.z / v).ceil() as i32].map(|i| i.div_euclid(n));
             // A box this many chunks across is a craft far too fast for the
             // ground to matter (or nowhere near it); asked about, it would
-            // queue the planet.
-            let count = (0..3).map(|k| (chi[k] - clo[k] + 1).max(0) as i64).product::<i64>();
+            // queue the planet. Counted so it cannot overflow: a box of
+            // infinite size is 2^27 chunks a side once its corners saturate,
+            // and the plain product of three of those wrapped to 0, passed
+            // this test and walked 2^81 chunks, which hung the step.
+            let count = (0..3).map(|k| (chi[k] as i64 - clo[k] as i64 + 1).max(0)).fold(1i64, i64::saturating_mul);
             if count > 64 {
                 continue;
             }
@@ -1353,7 +1371,13 @@ impl ChunkTerrain {
         const CORE: f32 = CELLS as f32 * 0.5 - 1.5;
         let voxel = self.field.voxel();
         let mut t = (t0 - 1.5 * voxel).max(0.0);
-        while t <= (t0 + 6.0 * voxel).min(tmax) {
+        // Four boxes cover the stretch; the cap holds a walk whose `t` is
+        // too large for a step to move it, which would never end.
+        for _ in 0..8 {
+            #[allow(clippy::neg_cmp_op_on_partial_ord)]
+            if !(t <= (t0 + 6.0 * voxel).min(tmax)) {
+                break;
+            }
             let p = o + d * t;
             let centre = (p / voxel).round();
             let base = [
@@ -1474,7 +1498,10 @@ impl ChunkTerrain {
         // and there is nothing for a triangle to correct. Saturated, it reads
         // the band exactly, not more, so the band itself is the test: asking
         // for more than it let every query in open air run the whole search.
-        if d.abs() >= self.field.band() {
+        // Written so a point that is not a number (`d` NaN) is rejected too:
+        // no triangle is nearest to it, and the walk only ran out its rings.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        if !(d.abs() < self.field.band()) {
             return None;
         }
         let mut s = self.surface.borrow_mut();
@@ -1871,7 +1898,13 @@ impl CollisionShape for ChunkTerrain {
         if self.mesh_accurate && self.meshed_near(at) {
             let voxel = lvoxel * scale;
             let (mut t, end) = (near * scale, (near * scale + 6.0 * voxel).min(tmax));
-            while t <= end {
+            // Each step goes at least 0.02, so this many cover the stretch
+            // twice over; the cap holds a `t` too large for a step to move.
+            for _ in 0..march_cap(end - t, 0.02) {
+                #[allow(clippy::neg_cmp_op_on_partial_ord)]
+                if !(t <= end) {
+                    break;
+                }
                 let p = o + rd * t;
                 // Every point the march asks has to be on triangles already
                 // cached. The march runs a few voxels past where it started,
@@ -1963,6 +1996,9 @@ impl CollisionShape for ChunkTerrain {
     fn triangles_in(&self, lo: Vec3, hi: Vec3, out: &mut Vec<FaceTri>) -> bool {
         let scale = self.scale.max(1e-6);
         let (llo, lhi) = self.local_box(lo, hi);
+        if !self.box_walkable(llo, lhi) {
+            return true;
+        }
         let mut s = self.surface.borrow_mut();
         let cell = self.bucket();
         for ch in self.field.chunks_in_world_box(llo, lhi) {
@@ -2021,6 +2057,21 @@ fn cell_min_dist2(p: Vec3, c: (i32, i32, i32), cell: f32) -> f32 {
     let lo = Vec3::new(c.0 as f32, c.1 as f32, c.2 as f32) * cell;
     let d = (lo - p).max(p - (lo + Vec3::splat(cell))).max(Vec3::ZERO);
     d.length_squared()
+}
+
+/// Most terrain chunks one gather of faces (a decal's) may cover: a box 32
+/// chunks a side, 380 m on 0.75 m voxels, far past any mark a game lays. A
+/// gather meshes every chunk it covers that is not meshed yet, tens of
+/// milliseconds each; past this it gives no faces rather than freeze.
+const MAX_GATHER_CHUNKS: i64 = 32 * 32 * 32;
+
+/// How many steps of at least `step` a march over `len` may take: twice what
+/// covers it, and a few, so rounding never cuts a march short, and never
+/// more than a million, whatever `len` is. A march whose position has grown
+/// past where adding a step changes it would otherwise never end.
+fn march_cap(len: f32, step: f32) -> usize {
+    let n = (len / step).ceil();
+    if n.is_finite() && n >= 0.0 { (n as usize).saturating_mul(2).saturating_add(8).min(1 << 20) } else { 8 }
 }
 
 fn cell_coord(p: Vec3, cell: f32) -> (i32, i32, i32) {
@@ -2564,7 +2615,11 @@ impl CollisionShape for TriMeshCollider {
         let (mut ty, dy) = next(c.1, st.1, o.y, rd.y);
         let (mut tz, dz) = next(c.2, st.2, o.z, rd.z);
         let mut best: Option<(f32, u32)> = None;
-        loop {
+        // Every pass but the last crosses one cell wall, so a walk visits at
+        // most the grid's cells along each axis, added up. A ray that is not
+        // a number crossed none and, under an endless `t1`, went on forever.
+        let walls: usize = [hi.0 - lo.0, hi.1 - lo.1, hi.2 - lo.2].iter().map(|&n| n.max(0) as usize).sum();
+        for _ in 0..=walls + 1 {
             if let Some(list) = self.grid.get(&c) {
                 for &ti in list {
                     let [a, b, cc] = self.tris[ti as usize];

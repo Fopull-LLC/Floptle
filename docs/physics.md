@@ -456,3 +456,33 @@ shape has no cheap bound (an infinite plane, a terrain field, a triangle mesh) i
 offered to every query, exactly as before.
 
 Nothing to configure, and nothing to opt into.
+
+### A number that is not a number
+
+A force, impulse, torque, velocity, spin or position that is not a finite
+number (NaN, or an infinity, which a script gets from a division by zero or a
+value that kept doubling) is **refused**: the body keeps what it had, and the
+Console names the node and the value. It never reaches the step.
+
+A body or an assembly can still run away on finite numbers: an uncapped drag
+torque that doubles a spin every tick passes through every finite value on its
+way to overflowing. Each step checks every body and assembly before it moves
+them and again after, and one whose state is past what an `f32` simulation can
+work from is **stopped where it last was finite**, at rest and asleep, and the
+Console says so. The bounds are far past anything a game does:
+
+| | bound | for scale |
+|---|---|---|
+| speed | 1e9 m/s (3× light) | low orbit 7.8 km/s; the fastest probe flown, under 200 km/s |
+| spin | 1e6 rad/s | a car wheel about 200 rad/s; a turbine a few thousand |
+| distance from the floating origin | 1e15 m | Neptune from the Earth, 4.5e12 m |
+
+A body with no finite pose to go back to is switched off at the origin. The
+same state is stopped on the same tick every time, so rollback and replays
+agree; a body inside the bounds is never touched, and plays to the bit as it
+did before the checks.
+
+Both are said a few times and then seldom (one line in 1,024), so a script
+writing NaN every tick does not flood the Console. Fix the script: a stopped
+body stays where it was put until something wakes it, and a force that keeps
+running away is stopped again.

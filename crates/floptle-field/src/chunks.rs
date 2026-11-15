@@ -1495,8 +1495,10 @@ impl ChunkField {
         let band = self.band();
         let (lo, hi) = (min / self.voxel, max / self.voxel);
         let lo = [lo.x.floor() as i32, lo.y.floor() as i32, lo.z.floor() as i32];
-        // A read uses the voxel at the floor and the one past it.
-        let hi = [hi.x.floor() as i32 + 1, hi.y.floor() as i32 + 1, hi.z.floor() as i32 + 1];
+        // A read uses the voxel at the floor and the one past it. Saturating:
+        // a box at the far end of what an `i32` holds (a body that ran away)
+        // has no voxel past it, and the plain add overflowed.
+        let hi = [hi.x, hi.y, hi.z].map(|v| (v.floor() as i32).saturating_add(1));
         let (c0, c1) = (chunk_of(lo), chunk_of(hi));
         if (0..3).any(|k| c1[k] - c0[k] > 3) {
             return false;
@@ -1550,7 +1552,10 @@ impl ChunkField {
         let one_chunk = b.iter().all(|&k| k.rem_euclid(CHUNK) < CHUNK - 1);
         let chunk = if one_chunk { Some(self.chunks.get(&chunk_of(b))) } else { None };
         let c = |dx: i32, dy: i32, dz: i32| {
-            let i = [b[0] + dx, b[1] + dy, b[2] + dz];
+            // Wrapping, as a release build always did: a point past what an
+            // `i32` voxel index holds (a body that ran away) reads open air
+            // either way, and a debug build no longer panics on it.
+            let i = [b[0].wrapping_add(dx), b[1].wrapping_add(dy), b[2].wrapping_add(dz)];
             match chunk {
                 Some(None) => self.band(),
                 Some(Some(Chunk::Uniform(v))) => *v,

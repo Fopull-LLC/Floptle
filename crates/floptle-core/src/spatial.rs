@@ -128,9 +128,10 @@ impl Grid {
         let (lo, hi) = self.span(centre, radius);
         // A query wider than the whole index is cheaper answered by walking the
         // occupied cells than by iterating the volume it covers.
-        let volume = (hi[0] - lo[0] + 1) as i64
-            * (hi[1] - lo[1] + 1) as i64
-            * (hi[2] - lo[2] + 1) as i64;
+        // Saturating: a query of a huge (finite) radius spans the whole clamp
+        // range on every axis, and the plain product of three such spans
+        // overflowed, wrapped below the occupied count and walked 2^93 cells.
+        let volume = (0..3).map(|k| hi[k] as i64 - lo[k] as i64 + 1).fold(1i64, i64::saturating_mul);
         if volume > self.cells.len() as i64 {
             for (c, v) in &self.cells {
                 if c[0] >= lo[0]
@@ -242,6 +243,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A query of a huge but finite radius (the swept move of a body that
+    /// has run away) spans the whole clamped range on every axis. The cell
+    /// count of three such spans overflowed, wrapped below the occupied
+    /// count and walked 2^93 cells; it walks the occupied ones instead, and
+    /// still finds every item. On its own thread against a deadline, so a
+    /// walk that never ends fails rather than hangs.
+    #[test]
+    fn a_query_of_enormous_radius_returns_everything_promptly() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let its = items(64, 2.0, 0.5);
+            let mut g = Grid::default();
+            g.rebuild(its.iter().copied());
+            let mut cand = Vec::new();
+            g.sphere(Vec3::ZERO, 1e30, &mut cand);
+            let _ = tx.send(cand.len());
+        });
+        let found = rx.recv_timeout(std::time::Duration::from_secs(20)).expect("the query did not return within 20 s");
+        assert_eq!(found, 64);
     }
 
     #[test]

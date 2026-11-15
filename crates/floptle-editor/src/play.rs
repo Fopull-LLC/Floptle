@@ -209,6 +209,23 @@ impl Editor {
         }
     }
 
+    /// What the physics refused or stopped since the last tick, in the
+    /// Console under the node's name: a script that handed a body a force
+    /// that is not a number, or a body whose speed or spin ran away. The
+    /// physics rate-limits these itself, so a script doing it every tick says
+    /// so a few times, then seldom.
+    pub(crate) fn report_physics_sanity(&mut self) {
+        let Some(sim) = self.sim.as_mut() else { return };
+        for r in sim.world.sanity.take_reports() {
+            let who = self
+                .world
+                .entity_at(r.node)
+                .and_then(|e| self.world.get::<floptle_core::Name>(e))
+                .map_or_else(|| format!("node #{}", r.node), |n| format!("\"{}\"", n.0));
+            self.console.push(floptle_script::LogLevel::Warn, format!("physics: {who}: {}", r.text), None);
+        }
+    }
+
     pub(crate) fn build_water_field(
         world: &floptle_core::World,
         origin: DVec3,

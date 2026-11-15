@@ -403,6 +403,9 @@ pub struct PhysicsWorld {
     /// times nothing, so a step costs one branch per stage for it. See
     /// [`Self::time_steps`].
     timing: Option<Box<StepTiming>>,
+    /// What was refused at the door and stopped in the step for a state the
+    /// step cannot work from; see [`crate::sane`].
+    pub sanity: crate::sane::Sanity,
 }
 
 /// Where the time of every step since the last [`PhysicsWorld::take_timing`]
@@ -491,6 +494,7 @@ impl Default for PhysicsWorld {
             resting: Vec::new(),
             resting_check_elapsed: 0.0,
             last_revalidated_collider_count: usize::MAX,
+            sanity: crate::sane::Sanity::default(),
         }
     }
 }
@@ -520,6 +524,10 @@ pub struct RayHit {
 pub fn triangles_in_box(colliders: &[AnchoredCollider], lo: Vec3, hi: Vec3, mask: u32) -> (Vec<crate::FaceTri>, usize) {
     let mut out = Vec::new();
     let mut faceless = 0;
+    // A box that is not a number holds no faces, and walking one is endless.
+    if !(lo.is_finite() && hi.is_finite()) {
+        return (out, faceless);
+    }
     for c in colliders {
         if (mask >> c.layer) & 1 == 0 || c.sensor || !c.may_reach(lo, hi, 0.0) {
             continue;
@@ -544,6 +552,9 @@ pub fn triangles_in_box(colliders: &[AnchoredCollider], lo: Vec3, hi: Vec3, mask
 /// lays its decal without meshing anything on its own thread.
 pub fn unmeshed_ground_in_box(colliders: &[AnchoredCollider], lo: Vec3, hi: Vec3, mask: u32) -> Vec<(Option<u32>, [i32; 3])> {
     let mut out = Vec::new();
+    if !(lo.is_finite() && hi.is_finite()) {
+        return out;
+    }
     for c in colliders {
         if (mask >> c.layer) & 1 == 0 || c.sensor || !c.may_reach(lo, hi, 0.0) {
             continue;
@@ -1213,11 +1224,16 @@ pub fn capsulecast(
     }
 }
 
+/// Most points a 2D box cast puts along a side: a quarter unit apart, the
+/// sides of a box 256 units across. Past that they spread out, rather than a
+/// box of endless size asking for endless points.
+const BOX_CAST_POINTS: usize = 1024;
+
 /// Points along the edges of a box in the XY plane, no more than `step` apart,
 /// pulled `inset` in from each side.
 fn box_edge_points(centre: Vec3, half: [f32; 2], inset: f32, step: f32) -> Vec<Vec3> {
     let (hx, hy) = ((half[0] - inset).max(0.0), (half[1] - inset).max(0.0));
-    let along = |len: f32| ((2.0 * len / step).ceil() as usize).max(1);
+    let along = |len: f32| ((2.0 * len / step).ceil() as usize).clamp(1, BOX_CAST_POINTS);
     let mut out = Vec::new();
     let nx = along(hx);
     for i in 0..=nx {
@@ -1281,7 +1297,8 @@ pub fn overlap_box_2d(
 ) -> Vec<ShapeHit> {
     let mut points = box_edge_points(centre, half, 0.0, 0.25);
     // …and the inside, so a box wholly within something still overlaps it.
-    let (nx, ny) = (((2.0 * half[0] / 0.25).ceil() as usize).max(1), ((2.0 * half[1] / 0.25).ceil() as usize).max(1));
+    let across = |h: f32| ((2.0 * h / 0.25).ceil() as usize).clamp(1, BOX_CAST_POINTS);
+    let (nx, ny) = (across(half[0]), across(half[1]));
     for i in 1..nx {
         for j in 1..ny {
             let x = -half[0] + 2.0 * half[0] * i as f32 / nx as f32;
@@ -1729,11 +1746,14 @@ impl PhysicsWorld {
     }
 
     pub fn step(&mut self, dt: f32) {
-        let dt = dt.clamp(0.0, 0.1); // guard against a huge stalled frame
+        let dt = sane_dt(dt); // guard against a huge stalled frame
         self.last_dt = dt;
         let timed = self.timing.is_some();
         let clock = || timed.then(floptle_core::time::Instant::now);
         let t = clock();
+        // Before anything is asked about where the bodies are going: a state
+        // the step cannot work from is stopped here, not walked.
+        self.quarantine_all();
         self.reindex_colliders();
         self.mesh_ground_ahead();
         self.release_far_ground();
@@ -1800,6 +1820,9 @@ impl PhysicsWorld {
         }
         self.settle(dt);
         self.recheck_sleeping_compounds(dt);
+        // And after: what the joints and the pairs made of the moves is what
+        // the writeback hands the game.
+        self.quarantine_all();
         let sleep = Self::lap(t);
         self.index_fresh = false;
         if let Some(tm) = self.timing.as_mut() {
@@ -1810,6 +1833,129 @@ impl PhysicsWorld {
             tm.pairs_ms += pairs;
             tm.sleep_ms += sleep;
         }
+    }
+
+    /// Every body (but those a rollback driver steps, which
+    /// [`Self::step_body`] checks itself) and every assembly, through
+    /// [`Self::quarantine_body`] and [`Self::quarantine_compound`].
+    fn quarantine_all(&mut self) {
+        for bi in 0..self.bodies.len() {
+            if !self.bodies[bi].driven {
+                self.quarantine_body(bi);
+            }
+        }
+        for ci in 0..self.compounds.len() {
+            self.quarantine_compound(ci);
+        }
+    }
+
+    /// Stop body `bi` if its state is one the step cannot work from: a
+    /// position, orientation, velocity or spin that is not finite, or past
+    /// [`crate::MAX_REACH`], [`crate::MAX_SPEED`] or [`crate::MAX_SPIN`]. It
+    /// goes back to its last pose that was (where its step began, or where
+    /// it is if that pose is still good), at rest and asleep, and the log
+    /// names it. With no such pose to go back to, it is switched off at the
+    /// origin. Deterministic, from the state alone, so a replay stops it on
+    /// the same step. A body whose state is good is not written at all.
+    /// Returns whether it was stopped.
+    pub fn quarantine_body(&mut self, bi: usize) -> bool {
+        #[cfg(test)]
+        if crate::sane::CHECKS_OFF.with(|o| o.get()) {
+            return false;
+        }
+        let b = &self.bodies[bi];
+        if !b.live() {
+            return false;
+        }
+        let Some(why) = crate::sane::fault(b.pos, b.orient, b.vel, b.ang_vel, b.hold.is_finite()) else {
+            return false;
+        };
+        let owner = b.owner;
+        let b = &mut self.bodies[bi];
+        let back = if crate::sane::pose_ok(b.pos, b.orient) {
+            true
+        } else if crate::sane::pose_ok(b.prev_pos, b.prev_orient) {
+            b.pos = b.prev_pos;
+            b.orient = b.prev_orient;
+            true
+        } else {
+            false
+        };
+        b.vel = Vec3::ZERO;
+        b.ang_vel = Vec3::ZERO;
+        b.hold = Vec3::ZERO;
+        b.owed_load = 0.0;
+        if !b.up.is_finite() || b.rotates && b.shape_is_capsule() {
+            b.up = if b.rotates { b.orient * Vec3::Y } else { Vec3::Y };
+        }
+        if !back {
+            b.pos = Vec3::ZERO;
+            b.orient = Quat::IDENTITY;
+            b.active = false;
+        }
+        b.prev_pos = b.pos;
+        b.prev_orient = b.orient;
+        let how = if !back {
+            "switched off: it had no finite pose to go back to"
+        } else if b.kinematic {
+            "stopped where it last was finite"
+        } else {
+            self.bodies[bi].asleep = false;
+            self.set_asleep(bi, true);
+            "stopped where it last was finite and put to sleep"
+        };
+        self.sanity.quarantine(owner, &why, how);
+        true
+    }
+
+    /// [`Self::quarantine_body`], for assembly `ci`: its held force and
+    /// torque must be finite too.
+    pub fn quarantine_compound(&mut self, ci: usize) -> bool {
+        #[cfg(test)]
+        if crate::sane::CHECKS_OFF.with(|o| o.get()) {
+            return false;
+        }
+        let c = &self.compounds[ci];
+        if !c.live() {
+            return false;
+        }
+        let pushes = c.force.is_finite() && c.torque.is_finite();
+        let Some(why) = crate::sane::fault(c.pos, c.orient, c.vel, c.ang_vel, pushes) else {
+            return false;
+        };
+        let owner = c.owner;
+        let c = &mut self.compounds[ci];
+        let back = if crate::sane::pose_ok(c.pos, c.orient) {
+            true
+        } else if crate::sane::pose_ok(c.prev_pos, c.prev_orient) {
+            c.pos = c.prev_pos;
+            c.orient = c.prev_orient;
+            true
+        } else {
+            false
+        };
+        c.vel = Vec3::ZERO;
+        c.ang_vel = Vec3::ZERO;
+        c.force = Vec3::ZERO;
+        c.torque = Vec3::ZERO;
+        if !back {
+            c.pos = Vec3::ZERO;
+            c.orient = Quat::IDENTITY;
+            c.active = false;
+        }
+        c.prev_pos = c.pos;
+        c.prev_orient = c.orient;
+        let how = if !back {
+            "switched off: it had no finite pose to go back to"
+        } else if c.anchored {
+            "stopped where it last was finite"
+        } else {
+            self.reindex_colliders();
+            self.put_compound_to_sleep(ci);
+            "stopped where it last was finite and put to sleep"
+        };
+        self.sanity.quarantine(owner, &why, how);
+        true
     }
 
     /// Let two owners pass through each other, a body or an assembly on each
@@ -1950,7 +2096,14 @@ impl PhysicsWorld {
     /// inverse mass `1/m + ((I⁻¹(r×n))×r)·n`, so an off-centre contact torques
     /// the body.
     pub fn step_compound(&mut self, ci: usize, dt: f32) {
-        let dt = dt.clamp(0.0, 0.1);
+        let dt = sane_dt(dt);
+        self.quarantine_compound(ci);
+        self.step_compound_move(ci, dt);
+        self.quarantine_compound(ci);
+    }
+
+    /// [`Self::step_compound`]'s move, between the checks either side of it.
+    fn step_compound_move(&mut self, ci: usize, dt: f32) {
         if !self.index_fresh {
             // Reached directly, so nothing has built the broadphase yet.
             self.reindex_colliders();
@@ -3902,10 +4055,23 @@ impl PhysicsWorld {
                     {
                         continue;
                     }
+                    // A normal that is not a number faces no way at all: it
+                    // can push nothing, and the grouping below could never
+                    // take it off the list.
+                    if !n.is_finite() {
+                        continue;
+                    }
                     hits.push((p - n * radius, n, pen));
                 }
                 while let Some(&(_, n0, _)) = hits.first() {
                     let (face, rest): (Vec<_>, Vec<_>) = hits.iter().partition(|h| h.1.dot(n0) > 0.95);
+                    // A first hit whose normal does not face its own way (one
+                    // of no length) joins no face; it goes, so every pass
+                    // shortens the list, or this never ends.
+                    if face.is_empty() {
+                        hits.remove(0);
+                        continue;
+                    }
                     hits = rest;
                     let k = face.len() as f32;
                     let cp = face.iter().fold(Vec3::ZERO, |a, h| a + h.0) / k;
@@ -4007,7 +4173,17 @@ impl PhysicsWorld {
 
 
     pub fn step_body(&mut self, bi: usize, dt: f32) {
-        let dt = dt.clamp(0.0, 0.1);
+        let dt = sane_dt(dt);
+        // Checked either side of the move, inside the per-body step, so a
+        // rollback replay (which steps a body alone) stops it on exactly the
+        // step the live run did.
+        self.quarantine_body(bi);
+        self.step_body_move(bi, dt);
+        self.quarantine_body(bi);
+    }
+
+    /// [`Self::step_body`]'s move, between the checks either side of it.
+    fn step_body_move(&mut self, bi: usize, dt: f32) {
         if !self.index_fresh {
             // Reached directly (the rollback driver), so nothing has built the
             // broadphase for this tick yet.
@@ -4659,6 +4835,12 @@ thread_local! {
 }
 
 #[inline]
+/// A step's length the step can work from: clamped to a tenth of a second
+/// (a huge stalled frame), and none at all for one that is not a number.
+fn sane_dt(dt: f32) -> f32 {
+    if dt.is_finite() { dt.clamp(0.0, 0.1) } else { 0.0 }
+}
+
 fn prefilter_on() -> bool {
     #[cfg(test)]
     {
