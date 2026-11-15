@@ -2234,6 +2234,17 @@ function terrain.paintTexture(x, y, z, radius, slot) end
 ---@param id number The terrain id (a node with that Terrain id shows the result).
 ---@param opts? table
 function terrain.generatePlanet(id, opts) end
+---What each relief layer adds to the ground's height in the direction of
+---`pos` (world) on the generated planet nearest it, in metres. `base` +
+---`mountains` + `plateau` + `terraces` + `channels` + `craters` = `height`,
+---the generated ground above the radius before any digging; `overhangs` is
+---the overhang layer's push on the surface there, `warp` how far the warp
+---moved the noise, `cell` the relief grid's spacing. `channel` is the nearest
+---river or ravine (`index` its place in `terrain.planetRivers`). nil off every
+---generated body. A debug read: it walks every channel's whole line.
+---@param pos Vec3
+---@return { height: number, base: number, mountains: number, plateau: number, terraces: number, channels: number, craters: number, overhangs: number, warp: number, cell: number, channel: { index: integer, kind: string, width: number, depth: number, distance: number, profile: number, carve: number }? }?
+function terrain.layersAt(pos) end
 ---The rivers and ravines `terrain.generatePlanet` carves with these opts,
 ---without generating: { {river=, depth=, points={x1,y1,z1, ...}, widths={...}}, ... }.
 ---Points are planet-local, on the sphere of the planet's radius. Given a

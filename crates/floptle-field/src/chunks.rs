@@ -573,6 +573,12 @@ impl WaterLevel {
 pub trait PendingSource: Send + Sync {
     /// The chunk at `c`, as the generator that deferred it would have made it.
     fn generate(&self, c: [i32; 3]) -> Generated;
+    /// What each relief layer adds to the ground's height in the direction
+    /// of `p` (field-local), for a source that generates a planet.
+    fn relief_layers(&self, p: Vec3) -> Option<crate::relief::ReliefLayers> {
+        let _ = p;
+        None
+    }
 }
 
 /// One chunk [`ChunkField::evict`] put away: what it was and what stands in
@@ -630,6 +636,10 @@ impl<S: VoxelSource + Send + Sync + 'static> PendingSource for Deferred<S> {
             return self.alone(c);
         }
         self.exact(c)
+    }
+
+    fn relief_layers(&self, p: Vec3) -> Option<crate::relief::ReliefLayers> {
+        self.src.relief_layers(p)
     }
 }
 
@@ -2074,6 +2084,13 @@ pub trait VoxelSource: Sync {
         let _ = (lo, hi, band);
         false
     }
+    /// What each relief layer adds to the ground's height in the direction
+    /// of `p`, for a source that generates a planet
+    /// ([`ChunkField::relief_layers`]). None, by default.
+    fn relief_layers(&self, p: Vec3) -> Option<crate::relief::ReliefLayers> {
+        let _ = p;
+        None
+    }
 }
 
 /// Voxels per edge of the blocks [`ChunkField::generate`] classifies.
@@ -2973,6 +2990,14 @@ impl ChunkField {
     /// hand its answers to [`Self::adopt_generated`].
     pub fn pending_source(&self) -> Option<std::sync::Arc<dyn PendingSource>> {
         self.source.as_ref().map(|s| s.0.clone())
+    }
+
+    /// What each relief layer of the generator that made this field adds to
+    /// the ground's height in the direction of `p` (field-local): the
+    /// generated ground, before any edit. None for a field no planet
+    /// generator made, or one loaded without the recipe to make it again.
+    pub fn relief_layers(&self, p: Vec3) -> Option<crate::relief::ReliefLayers> {
+        self.source.as_ref()?.0.relief_layers(p)
     }
 
     /// Give this field the source of its pending chunks: one loaded from a file

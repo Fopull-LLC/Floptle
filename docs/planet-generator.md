@@ -38,6 +38,41 @@ end
 
 The points lie on the sphere of the planet's radius; the carved bed is below the ground there.
 
+## Which layer made a place
+
+`terrain.layersAt(pos)` takes a world point over a generated planet and says how much each layer adds to the ground's height in that direction. It reads the generator's own functions, so the shares are the numbers the generator summed, not an estimate:
+
+```lua
+local l = terrain.layersAt(player.pos)
+if l then
+  print(string.format("ground %.1f m: base %.1f, mountains %.1f, terraces %.1f, channels %.1f",
+    l.height, l.base, l.mountains, l.terraces, l.channels))
+  if l.channel then
+    print(string.format("%s %d is %.1f m off, %.0f m wide, cutting %.0f%% of its %.0f m",
+      l.channel.kind, l.channel.index, l.channel.distance, l.channel.width, l.channel.profile * 100, l.channel.depth))
+  end
+end
+```
+
+| Field | Metres of |
+| --- | --- |
+| `height` | The generated ground above the radius: `base + mountains + plateau + terraces + channels + craters` |
+| `base` | The rolling relief noise (`relief`, `bumpFreq`) |
+| `mountains` | The ranges |
+| `plateau` | What rounding off the peaks took away (zero or negative) |
+| `terraces` | What stepping the ground moved it, up or down |
+| `channels` | What rivers and ravines carved (zero or negative) |
+| `craters` | What a crater took away (zero or negative) |
+| `overhangs` | How far the overhang layer moves the surface at the ground there: positive raises it. Not part of `height`, which is the ground along the direction |
+| `warp` | How far the warp moved the point the relief noise is read at |
+| `cell` | The spacing of the grid the layered ground is worked out on (0 without one) |
+
+The ground between grid corners is blended from the corners, and so are the shares. A cut steeper than a cell is spread across one: a ravine's bank falls away over a fifth of its width, so on a world whose cells are about as wide as that, the bank reads as a wall a cell or two across.
+
+`channel` is the river or ravine whose line passes nearest, on a world that has any: `index` is its place in `terrain.planetRivers` with the same opts, `kind` is `"river"` or `"ravine"`, `width` and `depth` are what it is carved at there, `distance` is how far the point is from its line, `profile` is the fraction of its depth the ground at that distance loses (1 on the line, 0 past the bank), and `carve` is `depth × profile`, the cut it makes at the point itself. A river's valley reaches four widths from its line; a ravine is full depth to two fifths of its width, then its bank drops to nothing by three fifths.
+
+The answer is the generated ground, before any digging, and `nil` for a point outside every generated body. It is a debug read: it walks every channel's whole line, about 0.1 ms on a world of a dozen ravines and rivers, so ask it for a few points, not thousands a frame.
+
 ## Lakes
 
 `terrain.planetLakes(opts)` answers where water would settle on the same planet, again without generating it. Every basin is filled to the height it spills at, and each connected stretch of water is one lake:
