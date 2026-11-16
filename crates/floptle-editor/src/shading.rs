@@ -2297,6 +2297,7 @@ mod proxy_tests {
     /// what its ceiling left out. One terrain, two blobs and a Field Shape
     /// read as just that; a seventeenth blob, or a fifth Field Shape, reads as
     /// one dropped rather than as a thing that silently is not there.
+    #[cfg(feature = "editor-ui")]
     #[test]
     fn the_field_slot_counts_are_what_the_frame_was_given() {
         use floptle_core::Transform;
