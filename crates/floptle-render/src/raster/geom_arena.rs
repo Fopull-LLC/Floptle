@@ -218,25 +218,34 @@ impl GeomArena {
         best.map(|(i, _)| i)
     }
 
-    /// Before page `victim`'s slots move out: unless the other pages
-    /// together have the room its live ranges take, start a page sized to
-    /// hold them (the next power of two, at least a first page). Growing a
-    /// first page to fit them instead doubled it past what they needed, and
-    /// left it barely over a quarter full.
-    pub(super) fn make_room_for(&mut self, gpu: &Gpu, victim: u32) {
-        let Some(v) = self.pages.get(victim as usize).and_then(Option::as_ref) else { return };
-        let (need_v, need_i) = (v.verts.used(), v.indices.used());
-        let (mut free_v, mut free_i) = (0u64, 0u64);
-        for (i, p) in self.pages.iter().enumerate() {
-            let Some(p) = p.as_ref().filter(|_| i as u32 != victim) else { continue };
-            free_v += (p.verts.size() - p.verts.used()) as u64;
-            free_i += (p.indices.size() - p.indices.used()) as u64;
+    /// Let go of every page no slot holds a range in. `free` drops a page
+    /// its last slot leaves; this also catches one that never held a slot.
+    pub(super) fn drop_empty(&mut self) {
+        for p in &mut self.pages {
+            if p.as_ref().is_some_and(|p| p.live == 0) {
+                *p = None;
+            }
         }
-        if free_v >= need_v as u64 && free_i >= need_i as u64 {
-            return;
+    }
+
+    /// Room in a page that already has it, without growing one or starting
+    /// one, leaving page `avoid` alone.
+    pub(super) fn alloc_existing(&mut self, v_cap: u32, i_cap: u32, avoid: u32) -> Option<ArenaRange> {
+        for (i, p) in self.pages.iter_mut().enumerate() {
+            let Some(p) = p.as_mut().filter(|_| i as u32 != avoid) else { continue };
+            if let Some(r) = Self::take(p, i as u32, v_cap, i_cap) {
+                return Some(r);
+            }
         }
-        let verts = need_v.next_power_of_two().max(FIRST_PAGE_VERTS).min(self.max_verts);
-        let indices = need_i.next_power_of_two().max(FIRST_PAGE_INDICES).min(self.max_indices);
+        None
+    }
+
+    /// Start a page with room for `verts` vertices and `indices` indices
+    /// (the next power of two, at least a first page, at most a page's
+    /// limit), and return it.
+    pub(super) fn new_page(&mut self, gpu: &Gpu, verts: u32, indices: u32) -> u32 {
+        let verts = verts.next_power_of_two().max(FIRST_PAGE_VERTS).min(self.max_verts);
+        let indices = indices.next_power_of_two().max(FIRST_PAGE_INDICES).min(self.max_indices);
         let p = Page {
             vbuf: page_buffer(gpu, "raster-arena-verts", verts as u64 * VERTEX_BYTES, wgpu::BufferUsages::VERTEX),
             ibuf: page_buffer(gpu, "raster-arena-indices", indices as u64 * 4, wgpu::BufferUsages::INDEX),
@@ -245,9 +254,21 @@ impl GeomArena {
             live: 0,
         };
         match self.pages.iter().position(Option::is_none) {
-            Some(at) => self.pages[at] = Some(p),
-            None => self.pages.push(Some(p)),
+            Some(at) => {
+                self.pages[at] = Some(p);
+                at as u32
+            }
+            None => {
+                self.pages.push(Some(p));
+                self.pages.len() as u32 - 1
+            }
         }
+    }
+
+    /// Room in page `page` only.
+    pub(super) fn alloc_in(&mut self, page: u32, v_cap: u32, i_cap: u32) -> Option<ArenaRange> {
+        let p = self.pages.get_mut(page as usize)?.as_mut()?;
+        Self::take(p, page, v_cap, i_cap)
     }
 
     /// Pages in use.
