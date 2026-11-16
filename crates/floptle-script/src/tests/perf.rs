@@ -246,3 +246,127 @@ fn collector_time_inside_hooks_is_counted_and_paced_steps_are_not() {
     assert_eq!(paced.gc_ms, 0.0, "the engine's paced collector steps were counted as the scripts'");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A world of `n` nodes running `kind`, then `busy` more running `"busy"`.
+fn scripted_crowd(kind: &str, n: usize, busy: usize) -> World {
+    let mut world = World::default();
+    for i in 0..n + busy {
+        let e = world.spawn();
+        world.insert(e, Transform::from_translation(glam::DVec3::new(i as f64, 0.0, 0.0)));
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: if i < n { kind.into() } else { "busy".into() },
+                enabled: true,
+                params: vec![("speed".into(), 2.0)],
+                refs: Vec::new(),
+                strs: Vec::new(),
+                pinned_bools: None,
+            }]),
+        );
+    }
+    world
+}
+
+/// One frame the way the editor runs it — the frame pass, a tick, the late
+/// pass — each timed into the scripts bucket net of the mirror, as
+/// `timed_script_pass` does, so `scriptsUnnamed` is what it is in a game.
+fn profiled_frame(host: &mut ScriptHost, world: &mut World, dir: &Path, f: usize) -> floptle_core::profile::FrameRecord {
+    use floptle_core::profile::{Bucket, Span};
+    let t = f as f32 / 60.0;
+    host.profile().borrow_mut().begin_frame();
+    for pass in 0..3 {
+        let mirror0 = host.profile().borrow().frame_total(Bucket::Mirror);
+        let span = Span::new();
+        match pass {
+            0 => host.run(world, dir, 1.0 / 60.0, t),
+            1 => host.run_fixed(world, 1.0 / 60.0, t),
+            _ => host.run_late(world, 1.0 / 60.0, t),
+        }
+        let ms = span.ms();
+        let mut p = host.profile().borrow_mut();
+        let mirror = p.frame_total(Bucket::Mirror) - mirror0;
+        p.record(Bucket::Scripts, (ms - mirror).max(0.0));
+    }
+    host.profile().borrow_mut().end_frame();
+    host.profile().borrow().recent_frames(1).next().expect("a frame").clone()
+}
+
+/// **An instance with no hook for a pass costs next to nothing in it.**
+/// The script pass's time outside every hook — `scriptsSeed`,
+/// `scriptsHookless`, `scriptsBetweenHooks` and whatever is left in
+/// `scriptsUnnamed` — for 2,000 instances of a script that does nothing per
+/// frame, beside 50 running an `update`, over the frame pass, a tick and the
+/// late pass. Two such scripts: a library with no hooks at all, and one whose
+/// only hook is `start`.
+///
+/// Held to the `update` instances' own hook time measured in the same frames,
+/// per instance, so a loaded machine stretches both sides alike: one idle
+/// instance must cost under 30% of what one running a one-line `update` does
+/// (best of three runs, since a burst of load can land on either side). It
+/// cost more than twice as much: every enabled instance was seeded every
+/// frame (two `String` keys, two registry fetches, a fresh `node` handle and
+/// registry slot), walked the whole hook road three passes a frame for hooks
+/// it does not have, and had its `node` table drained and re-stamped each
+/// time. Watched failing at 2.2 times (11.4 µs an idle instance against
+/// 5.2 µs a busy one, `scriptsSeed` 3.1 ms and `scriptsUnnamed` 18.6 ms a
+/// frame); 0.13 after (0.17 ms and none).
+#[test]
+fn an_instance_without_a_hook_costs_next_to_nothing_outside_the_hooks() {
+    let dir = std::env::temp_dir().join(format!("floptle-perf-hookless-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(&dir, "busy", "function update(node, dt) node.y = node.y + dt * params.speed end\n");
+    write_script(
+        &dir,
+        "lib",
+        "defaults = { speed = 1 }\nlocal count = 0\nfunction bump() count = count + 1 return count end\n",
+    );
+    write_script(&dir, "starter", "defaults = { speed = 1 }\nfunction start(node) node.x = node.x + 0 end\n");
+    let (idle, busy, frames) = (2000usize, 50usize, 60usize);
+    for kind in ["lib", "starter"] {
+        let mut tries = String::new();
+        let mut passed = false;
+        for _ in 0..3 {
+            let mut world = scripted_crowd(kind, idle, busy);
+            let mut host = ScriptHost::new();
+            host.profile().borrow_mut().enable(true);
+            for f in 0..5 {
+                profiled_frame(&mut host, &mut world, &dir, f);
+            }
+            assert!(host.errors().is_empty(), "{:?}", host.errors());
+            // What the engine's paced collector does in a game within a
+            // cycle: a `start`-only script's table that nobody kept goes.
+            host.gc_collect();
+            let (mut seed, mut unnamed, mut hookless, mut between, mut hooks) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            for f in 5..5 + frames {
+                let r = profiled_frame(&mut host, &mut world, &dir, f);
+                seed += r.part("scriptsSeed");
+                unnamed += r.part("scriptsUnnamed");
+                hookless += r.part("scriptsHookless");
+                between += r.part("scriptsBetweenHooks");
+                hooks += r.scripts.iter().filter(|(n, _)| n == "busy").map(|(_, ms)| *ms).sum::<f32>();
+            }
+            assert!(hooks > 0.0, "the busy instances never ran");
+            let per_idle = (seed + unnamed + hookless + between) / idle as f32;
+            let per_busy = hooks / busy as f32;
+            let ratio = per_idle / per_busy;
+            let f = frames as f32;
+            tries += &format!(
+                "\n  {ratio:.2}: an idle instance {:.3} us, a busy one {:.3} us a frame; per frame scriptsSeed {:.3} ms, \
+                 scriptsUnnamed {:.3}, scriptsHookless {:.3}, scriptsBetweenHooks {:.3}",
+                per_idle / f * 1e3,
+                per_busy / f * 1e3,
+                seed / f,
+                unnamed / f,
+                hookless / f,
+                between / f,
+            );
+            if ratio < 0.3 {
+                passed = true;
+                break;
+            }
+        }
+        assert!(passed, "2,000 idle `{kind}` instances cost too much outside the hooks:{tries}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

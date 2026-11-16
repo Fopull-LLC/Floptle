@@ -5951,11 +5951,18 @@ let script_mt = lua.create_table()?;
 }
 {
     let envs = shared.envs.clone();
+    let rebound = shared.rebound.clone();
     let newidx = lua.create_function(move |lua, (this, key, val): (Table, String, Value)| {
         let e: u32 = this.raw_get("__id")?;
         let name: String = this.raw_get("__script")?;
+        // The two globals the seed puts back, which it now puts back only
+        // for a script that might change them itself — see `Shared::rebound`.
+        let rebinds = (key == "node" || key == "params").then(|| (e, name.clone()));
         let env = envs.borrow().get(&(e, name)).and_then(|k| lua.registry_value::<Table>(k).ok());
         if let Some(env) = env {
+            if let Some(r) = rebinds {
+                rebound.borrow_mut().push(r);
+            }
             env.set(key, val)?;
         }
         Ok(())

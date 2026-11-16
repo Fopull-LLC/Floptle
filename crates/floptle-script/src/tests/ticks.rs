@@ -468,6 +468,158 @@ fn a_hookless_pass_still_drains_a_timer_write_to_the_node() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **A `start`-only script's kept `node` table outlives the collector, and
+/// stays exact.** No hook will be handed the table again after `start`, so
+/// the engine holds it only weakly from then on and stops stamping it once
+/// nobody else holds it. A script that kept it (`me = node`) holds it, so a
+/// full collection must leave it alive and live: a timer's write through it
+/// still lands, it reads the node where something else moved it, and a body
+/// field set raw on a node with no body is cleared by the next stamp, as
+/// every stamp always cleared it — even with the node at rest, where the
+/// stamp is otherwise skipped.
+#[test]
+fn a_kept_node_table_survives_the_collector_and_stays_live() {
+    let dir = std::env::temp_dir().join(format!("floptle_hookless_gc_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "keeper",
+        "function start(node)\n\
+           me = node\n\
+           after(0.01, function() me.x = 5 end)\n\
+           after(0.03, function() rawset(me, 'vx', 3) wrote = true end)\n\
+           after(0.045, function() me.z = -me.z end)\n\
+         end\n",
+    );
+    let (mut world, e) = world_with_script("keeper");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    host.run_late(&mut world, 1.0 / 60.0, 0.0);
+    host.gc_collect();
+    host.gc_collect();
+    host.run_fixed(&mut world, 1.0 / 60.0, 1.0 / 60.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(
+        world.get::<Transform>(e).unwrap().translation.x,
+        5.0,
+        "a write through a kept node table was lost after a collection"
+    );
+    // The second timer writes only a body field: nothing about the node
+    // moved, so only reading the table can tell that a stamp is owed. The
+    // late pass between finds the table untouched and skips its stamp.
+    crate::host::STAMPS_SKIPPED.with(|c| c.set(0));
+    host.run_late(&mut world, 1.0 / 60.0, 1.0 / 60.0);
+    assert_eq!(crate::host::STAMPS_SKIPPED.with(|c| c.get()), 1, "an untouched table at rest was stamped again");
+    host.run_fixed(&mut world, 1.0 / 60.0, 2.0 / 60.0);
+    let me = |host: &ScriptHost| {
+        host.instance_env(e.index(), "keeper").and_then(|env| env.get::<mlua::Table>("me").ok()).expect("me")
+    };
+    let wrote = host.instance_env(e.index(), "keeper").and_then(|env| env.get::<bool>("wrote").ok());
+    assert_eq!(wrote, Some(true), "the second timer never wrote");
+    assert!(
+        me(&host).raw_get::<Option<f64>>("vx").unwrap().is_none(),
+        "a body field written onto a node without a body survived the next stamp"
+    );
+    // `-me.z` at zero is `-0`, equal to `0` to `==`; the stamp puts `0` back.
+    host.run_fixed(&mut world, 1.0 / 60.0, 3.0 / 60.0);
+    let z = me(&host).raw_get::<f64>("z").unwrap();
+    assert!(z == 0.0 && z.is_sign_positive(), "a -0 written at rest was left for the stamp to keep: {z}");
+    world.get_mut::<Transform>(e).unwrap().translation.y = 7.0;
+    host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
+    assert_eq!(me(&host).raw_get::<f64>("y").unwrap(), 7.0, "the kept table did not follow the node");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A frozen `node` table is reported, not fatal.** The check that lets a
+/// table at rest skip its stamp sets the table's metatable aside for a moment,
+/// which a frozen table refuses; it must take the full road instead, which
+/// reports the frozen table as it always did.
+#[test]
+fn a_frozen_node_table_does_not_bring_the_host_down() {
+    let dir = std::env::temp_dir().join(format!("floptle_frozen_node_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(&dir, "freezer", "function start(node) me = node table.freeze(node) end\n");
+    let (mut world, _) = world_with_script("freezer");
+    let mut host = ScriptHost::new();
+    for f in 0..3 {
+        host.run(&mut world, &dir, 1.0 / 60.0, f as f32 / 60.0);
+        host.run_late(&mut world, 1.0 / 60.0, f as f32 / 60.0);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A script that replaces its own `node` or `params` global gets them
+/// back every frame, as every script always did.** The seed now leaves an
+/// instance alone once it is built and seeded, which is only right for a
+/// script that cannot have touched either; one that assigns them, or whose
+/// globals another script sets through its handle, is re-seeded each frame.
+#[test]
+fn a_script_that_overwrites_node_or_params_has_them_reset_each_frame() {
+    let dir = std::env::temp_dir().join(format!("floptle_rebind_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "rebinder",
+        "defaults = { step = 1 }\n\
+         function update(n, dt)\n\
+           if type(node) == 'table' then n.x = n.x + 1 end\n\
+           node = nil\n\
+         end\n",
+    );
+    write_script(
+        &dir,
+        "lib",
+        "defaults = { step = 1 }\n\
+         function poke() local had = params ~= nil params = nil return had end\n",
+    );
+    // Never assigns either itself: another script does, through its handle.
+    write_script(&dir, "quiet", "function hasNode() return type(node) == 'table' end\n");
+    write_script(
+        &dir,
+        "caller",
+        "function update(n, dt)\n\
+           if find('Lib'):getscript('lib').poke() then n.y = n.y + 1 end\n\
+           local q = find('Quiet'):getscript('quiet')\n\
+           if q.hasNode() then n.z = n.z + 1 end\n\
+           q.node = nil\n\
+         end\n",
+    );
+    let (mut world, e) = world_with_script("rebinder");
+    let lib = world.spawn();
+    world.insert(lib, Transform::IDENTITY);
+    world.insert(lib, floptle_core::Name("Lib".into()));
+    world.insert(
+        lib,
+        Scripts(vec![floptle_core::ScriptInst { kind: "lib".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
+    );
+    let quiet = world.spawn();
+    world.insert(quiet, Transform::IDENTITY);
+    world.insert(quiet, floptle_core::Name("Quiet".into()));
+    world.insert(
+        quiet,
+        Scripts(vec![floptle_core::ScriptInst { kind: "quiet".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
+    );
+    let caller = world.spawn();
+    world.insert(caller, Transform::IDENTITY);
+    world.insert(
+        caller,
+        Scripts(vec![floptle_core::ScriptInst { kind: "caller".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
+    );
+    let mut host = ScriptHost::new();
+    for f in 0..3 {
+        host.run(&mut world, &dir, 1.0 / 60.0, f as f32 / 60.0);
+    }
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 3.0, "`node` was not put back each frame");
+    assert_eq!(world.get::<Transform>(caller).unwrap().translation.y, 3.0, "`params` was not put back each frame");
+    assert_eq!(
+        world.get::<Transform>(caller).unwrap().translation.z,
+        3.0,
+        "`node` set from another script's handle was not put back each frame"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A scene of thousands of scripted nodes runs.
 ///
 /// It used to panic — `out of auxiliary stack space (used 7999 slots)` —

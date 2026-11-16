@@ -269,6 +269,105 @@ pub(crate) struct NodeStamp {
     vel: Option<[f32; 3]>,
     height: Option<f32>,
     tick_pos: Option<[f64; 3]>,
+    /// The transform the table was last stamped from, when nothing has run
+    /// on it since: the stamp was the last thing to touch it, and the node
+    /// has no body. Then the table holds exactly what [`stamp_node_table`]
+    /// writes for this transform, so a later stamp from the same transform
+    /// onto a table nobody wrote changes nothing — see [`stamp_unchanged`].
+    /// `None` after a hook, which may have written anything.
+    clean: Option<Transform>,
+}
+
+/// The stamp [`stamp_node_table`] leaves for `tr` and `body`, worked out
+/// rather than read back: right after a stamp the table holds exactly the
+/// values written from these, so reading seventeen of them back told the
+/// engine what it had just said. Marked clean (see [`NodeStamp::clean`]).
+pub(crate) fn stamp_of(tr: &Transform, body: Option<BodyState>) -> NodeStamp {
+    NodeStamp {
+        pre: node_pre(tr),
+        // f32 → f64 → f32 is exact, so these equal what a read-back gives.
+        vel: body.map(|b| b.vel),
+        height: body.map(|b| b.height),
+        tick_pos: body.map(|b| b.pos),
+        clean: body.is_none().then_some(*tr),
+    }
+}
+
+/// Bit for bit, so a stamp skipped because the transform "did not change"
+/// can never be one that would have written a different number (a `-0.0`
+/// for a `0.0`).
+fn same_transform(a: &Transform, b: &Transform) -> bool {
+    a.translation.to_array().map(f64::to_bits) == b.translation.to_array().map(f64::to_bits)
+        && a.rotation.to_array().map(f32::to_bits) == b.rotation.to_array().map(f32::to_bits)
+        && a.scale.to_array().map(f32::to_bits) == b.scale.to_array().map(f32::to_bits)
+}
+
+/// The Luau half of [`stamp_unchanged`]: a function answering whether the
+/// table is, field for field, what the last stamp left. One call that reads
+/// every field in the VM, rather than a round trip from Rust per field.
+/// Called with the table's metatable set aside, so every read is the table's
+/// own field — a field the script cleared reads nil here rather than reaching
+/// the node metatable's `__index` — at a fraction of the cost of `rawget`,
+/// which is a function call per field. A zero is compared by its sign too:
+/// `-0` and `0` are equal to `==`, and a script that wrote `me.x = -me.x` at
+/// zero has written a number the next stamp puts back.
+pub(crate) fn stamp_unchanged_lua() -> String {
+    let fields = [
+        ("x", "x"),
+        ("y", "y"),
+        ("z", "z"),
+        ("scale_x", "sx"),
+        ("scale_y", "sy"),
+        ("scale_z", "sz"),
+        ("scale", "s"),
+        ("yaw", "yaw"),
+        ("pitch", "pitch"),
+        ("roll", "roll"),
+    ];
+    let mut src = String::from("return function(t, id, x, y, z, sx, sy, sz, s, yaw, pitch, roll)\n  return t.__id == id");
+    for (k, a) in fields {
+        src += &format!("\n    and t.{k} == {a} and ({a} ~= 0 or 1 / t.{k} == 1 / {a})");
+    }
+    for k in ["vx", "vy", "vz", "up_x", "up_y", "up_z", "grounded", "height", "tickX", "tickY", "tickZ"] {
+        src += &format!("\n    and t.{k} == nil");
+    }
+    src + "\nend\n"
+}
+
+/// Would draining and re-stamping node `eid`'s table `t` for `tr` (no body)
+/// change nothing at all? True when the last stamp was the last thing to
+/// touch the table, from this same transform, and every field it wrote (and
+/// every body field it cleared) still reads as it left it — so there is no
+/// write to drain and nothing a stamp would change. `same` is
+/// [`stamp_unchanged_lua`]'s function. Any doubt answers false, and the caller drains
+/// and stamps as it always did.
+pub(crate) fn stamp_unchanged(
+    same: &Function,
+    t: &Table,
+    eid: u32,
+    stamp: &NodeStamp,
+    tr: &Transform,
+    body: Option<BodyState>,
+) -> bool {
+    // A frozen table cannot have its metatable set aside, and the full road
+    // reports the frozen table exactly as it always did.
+    if body.is_some() || !stamp.clean.is_some_and(|c| same_transform(&c, tr)) || t.is_readonly() {
+        return false;
+    }
+    let p = &stamp.pre;
+    // Set aside and put back exactly as it was, whatever it is: the call
+    // only reads.
+    let mt = t.metatable();
+    if mt.is_some() {
+        t.set_metatable(None);
+    }
+    let same = same
+        .call::<bool>((t, eid, p.x, p.y, p.z, p.sx, p.sy, p.sz, p.scale, p.yaw, p.pitch, p.roll))
+        .unwrap_or(false);
+    if mt.is_some() {
+        t.set_metatable(mt);
+    }
+    same
 }
 
 /// Snapshot the table's current values, to compare the next hook against.
@@ -312,6 +411,7 @@ pub(crate) fn node_stamp(t: &Table, tr: &Transform) -> NodeStamp {
         vel,
         height: t.raw_get::<f64>("height").ok().map(|h| h as f32),
         tick_pos,
+        clean: None,
     }
 }
 

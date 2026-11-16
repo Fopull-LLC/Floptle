@@ -2,7 +2,7 @@
 //! script) sandbox instances, the per-frame update (mirror the scene, call
 //! `start`/`update`, apply node writes), and log/error capture.
 
-use crate::{seed_fingerprint, source_writes_params, Hooks};
+use crate::{seed_fingerprint, source_may_assign_global, source_writes_params, Hooks, KindId};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -230,6 +230,17 @@ enum Pass {
     Late,
 }
 
+/// What a pass owes an instance it has no hook for — see
+/// [`ScriptHost::hookless_here`].
+enum Hookless {
+    /// It has a hook here, or it is not started: the full road.
+    No,
+    /// Nothing anyone could see.
+    Nothing,
+    /// Its kept `node` table, drained and re-stamped.
+    Refresh((u32, KindId)),
+}
+
 impl Default for ScriptHost {
     fn default() -> Self {
         Self::new()
@@ -250,6 +261,10 @@ thread_local! {
     /// Node transforms written back to the world by `flush_scene` — the
     /// guard on flushing each write once. Test-only.
     pub(crate) static FLUSHED_TRANSFORMS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Node tables handed back untouched because nothing could have changed
+    /// them (`env::stamp_unchanged`) — the guard that the check is reached.
+    /// Test-only.
+    pub(crate) static STAMPS_SKIPPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// A screen shader's name as a script writes it: the file name without its
@@ -3134,6 +3149,7 @@ impl ScriptHost {
             shader_texture_sets: Rc::new(RefCell::new(Vec::new())),
             screen_shader_toggles: Rc::new(RefCell::new(Vec::new())),
             envs: Rc::new(RefCell::new(HashMap::new())),
+            rebound: Rc::default(),
             model_changes: Rc::new(RefCell::new(HashMap::new())),
             material_changes: Rc::new(RefCell::new(HashMap::new())),
             visible_changes: Rc::new(RefCell::new(HashMap::new())),
@@ -3549,8 +3565,20 @@ impl ScriptHost {
             floptle_say::say_err!("[lua] failed to install app.openFile: {e}");
         }
 
+        let stamp_unchanged = lua
+            .load(crate::env::stamp_unchanged_lua())
+            .set_name("=stamp_unchanged")
+            .eval::<mlua::Function>()
+            .expect("the stamp check compiles");
+        let weak_nodes = lua.create_table().expect("a table");
+        let weak_mt = lua.create_table().expect("a table");
+        let _ = weak_mt.raw_set("__mode", "v");
+        weak_nodes.set_metatable(Some(weak_mt));
         Self {
             lua,
+            stamp_unchanged,
+            weak_nodes,
+            weak_next: Cell::new(0),
             extra_script_dirs: Vec::new(),
             sources: HashMap::new(),
             alloc_by_kind: RefCell::new(HashMap::new()),
@@ -3558,7 +3586,9 @@ impl ScriptHost {
             memcats,
             memcat_now: std::cell::Cell::new(0),
             running_script,
-            instances: HashMap::new(),
+            instances: Default::default(),
+            kind_ids: Default::default(),
+            kind_names: Vec::new(),
             errors: Vec::new(),
             logs,
             input,
@@ -3609,6 +3639,7 @@ impl ScriptHost {
             rich_sets: shared.rich_sets.clone(),
             scene: shared.scene.clone(),
             envs: shared.envs.clone(),
+            rebound: shared.rebound.clone(),
             broken: shared.broken.clone(),
             broken_read_warned: shared.broken_read_warned.clone(),
             find_scope_warned: shared.find_scope_warned.clone(),
@@ -3636,7 +3667,7 @@ impl ScriptHost {
             sched,
             sleepers,
             destroy_told: std::collections::HashSet::new(),
-            kinds_this_frame: HashMap::new(),
+            kinds_this_frame: Default::default(),
             last_scripts_dir: None,
             script_clock,
             space_info,
@@ -3856,6 +3887,31 @@ impl ScriptHost {
     pub fn track_alloc(&self, on: bool) {
         self.alloc_track.set(on);
         self.alloc_by_kind.borrow_mut().clear();
+    }
+
+    /// The id of script kind `name`, given one the first time it is seen —
+    /// see [`KindId`].
+    fn intern_kind(&mut self, name: &str) -> KindId {
+        if let Some(&k) = self.kind_ids.get(name) {
+            return k;
+        }
+        let k = self.kind_names.len() as KindId;
+        self.kind_names.push(name.to_string());
+        self.kind_ids.insert(name.to_string(), k);
+        k
+    }
+
+    /// The id of script kind `name` if it has one. A kind without one has
+    /// never been built, so it has no instance either.
+    fn kind_id(&self, name: &str) -> Option<KindId> {
+        self.kind_ids.get(name).copied()
+    }
+
+    /// An instance key spelled with the kind's name, for the books kept by
+    /// name (net handlers, listeners, `onDestroy`). Only on the paths that
+    /// build or drop an instance, never per pass.
+    fn named_key(&self, key: (u32, KindId)) -> (u32, String) {
+        (key.0, self.kind_names[key.1 as usize].clone())
     }
 
     /// Charge what the scripts allocate from now on to `kind`'s memory
@@ -4713,6 +4769,7 @@ impl ScriptHost {
                 continue;
             }
             let _ = self.lua.remove_registry_value(inst.env);
+            let k = self.named_key(k);
             self.drop_net_instance(&k);
         }
         self.envs.borrow_mut().retain(|(e, _), _| keep.contains(e));
@@ -5822,8 +5879,8 @@ impl ScriptHost {
         if !self.ensure_instance(e, kind, scripts_dir) {
             return false;
         }
-        let key = (eid, kind.to_string());
-        let Some(inst) = self.instances.get(&key) else { return false };
+        let Some(kid) = self.kind_id(kind) else { return false };
+        let Some(inst) = self.instances.get(&(eid, kid)) else { return false };
         let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return false };
         let Ok(Some(f)) = env.raw_get::<Option<mlua::Function>>(func) else {
             self.record_error(kind, format!("{kind}: editor action '{func}' is not defined"));
@@ -7103,10 +7160,19 @@ impl ScriptHost {
             self.last_scripts_dir = Some(scripts_dir.to_path_buf());
         }
         let seed_t = self.part_start();
+        self.mark_rebound();
         for &e in &work {
             let Some(scripts) = world.get::<Scripts>(e) else { continue };
             for inst in &scripts.0 {
                 if inst.enabled {
+                    // Built, current, published and seeded already: all this
+                    // frame asks of it is to be counted as still here. The
+                    // seed is for what changed — a new instance, a hot
+                    // reload, a node index taken by a new node, a `params`
+                    // a sleeper has not been given yet.
+                    if self.seed_is_current(e, &inst.kind, scripts_dir) {
+                        continue;
+                    }
                     self.charge_memory_to(Some(&inst.kind));
                     self.ensure_instance(e, &inst.kind, scripts_dir);
                     // A sleeper's params are seeded when it wakes, by the tick
@@ -7189,14 +7255,15 @@ impl ScriptHost {
         // deleted some way that did not call `onDestroy` first, or a script
         // taken off its node. Told now, with the environment still intact;
         // the node itself may already be gone.
-        let stale: Vec<(u32, String)> =
-            self.instances.iter().filter(|(_, i)| !i.seen).map(|(k, _)| k.clone()).collect();
+        let stale_ids: Vec<(u32, KindId)> =
+            self.instances.iter().filter(|(_, i)| !i.seen).map(|(k, _)| *k).collect();
+        let stale: Vec<(u32, String)> = stale_ids.iter().map(|k| self.named_key(*k)).collect();
         if !stale.is_empty() {
             self.call_on_destroy(world, &stale);
         }
-        for k in stale {
+        for (k, id) in stale.into_iter().zip(stale_ids) {
             self.destroy_told.remove(&k);
-            if let Some(inst) = self.instances.remove(&k) {
+            if let Some(inst) = self.instances.remove(&id) {
                 let _ = self.lua.remove_registry_value(inst.env);
             }
             self.envs.borrow_mut().remove(&k);
@@ -7463,6 +7530,10 @@ impl ScriptHost {
         // remainder is never a mystery a game cannot see into.
         let pass_t = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
         let mut in_hooks = 0.0f32;
+        // What went to instances with no hook for this pass, keeping their
+        // `node` tables current — named on its own (`scriptsHookless`), so it
+        // is neither a hook's figure nor a mystery.
+        let mut in_hookless = 0.0f32;
         for e in work {
             if self.script_skip.contains(&e.index()) {
                 continue; // networked: this node's state arrives in snapshots
@@ -7498,6 +7569,32 @@ impl ScriptHost {
                     match self.sleepers.borrow_mut().fixed_dt(e.index(), &inst.kind, dt) {
                         Some(d) => dt = d,
                         None => continue,
+                    }
+                }
+                // No hook for this pass: only what the script could notice of
+                // the walk is done, and for most such instances that is
+                // nothing — see `hookless_here`. They used to go the whole
+                // road below, a `String` key and a node stamp each, three
+                // passes a frame and every tick, in no hook's figure.
+                if inst.enabled {
+                    match self.hookless_here(e.index(), &inst.kind, pass) {
+                        Hookless::No => {}
+                        Hookless::Nothing => {
+                            ran = true;
+                            continue;
+                        }
+                        Hookless::Refresh(key) => {
+                            let span = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
+                            self.charge_memory_to(Some(&inst.kind));
+                            self.refresh_hookless(key, &inst.kind, &mut tr);
+                            if let Some(span) = span {
+                                let ms = span.ms();
+                                in_hooks += ms;
+                                in_hookless += ms;
+                            }
+                            ran = true;
+                            continue;
+                        }
                     }
                 }
                 if inst.enabled {
@@ -7559,7 +7656,11 @@ impl ScriptHost {
         }
         self.charge_memory_to(None);
         if let Some(t) = pass_t {
-            self.profile.borrow_mut().record_part("scriptsBetweenHooks", (t.ms() - in_hooks).max(0.0));
+            let mut p = self.profile.borrow_mut();
+            p.record_part("scriptsBetweenHooks", (t.ms() - in_hooks).max(0.0));
+            if in_hookless > 0.0 {
+                p.record_part("scriptsHookless", in_hookless);
+            }
         }
     }
 
@@ -8915,7 +9016,8 @@ impl ScriptHost {
                 if !(off || !s.enabled) {
                     continue;
                 }
-                if let Some(inst) = self.instances.get_mut(&(e.index(), s.kind.clone()))
+                if let Some(kid) = self.kind_id(&s.kind)
+                    && let Some(inst) = self.instances.get_mut(&(e.index(), kid))
                     && inst.entity == e
                 {
                     inst.seen = true;
@@ -8924,27 +9026,65 @@ impl ScriptHost {
         }
     }
 
-    fn ensure_instance(&mut self, e: Entity, name: &str, scripts_dir: &Path) -> bool {
-        // Where a kind's file is, and whether it changed, is asked once per
-        // kind per frame: it is three filesystem calls, and asking it for
-        // every instance made a crowd of one script cost a syscall storm.
-        let generation = match self.kinds_this_frame.get(name) {
-            Some(g) => *g,
-            None => {
-                let path = resolve_script_path(scripts_dir, &self.extra_script_dirs, name);
-                let g = self.ensure_source(name, &path);
-                self.kinds_this_frame.insert(name.to_string(), g);
-                g
+    /// Instances whose `node` or `params` another script set through a
+    /// script handle since the last frame are reset every frame from now on
+    /// — see `Shared::rebound`.
+    fn mark_rebound(&mut self) {
+        let rebound = std::mem::take(&mut *self.rebound.borrow_mut());
+        for (eid, kind) in rebound {
+            if let Some(kid) = self.kind_id(&kind)
+                && let Some(inst) = self.instances.get_mut(&(eid, kid))
+            {
+                inst.rebinds_globals = true;
             }
-        };
-        let Some(generation) = generation else {
+        }
+    }
+
+    /// Kind `kid`'s source generation this frame (`None`: no such file).
+    ///
+    /// Where a kind's file is, and whether it changed, is asked once per
+    /// kind per frame: it is three filesystem calls, and asking it for
+    /// every instance made a crowd of one script cost a syscall storm.
+    fn kind_generation(&mut self, kid: KindId, name: &str, scripts_dir: &Path) -> Option<u64> {
+        if let Some(g) = self.kinds_this_frame.get(&kid) {
+            return *g;
+        }
+        let path = resolve_script_path(scripts_dir, &self.extra_script_dirs, name);
+        let g = self.ensure_source(name, &path);
+        self.kinds_this_frame.insert(kid, g);
+        g
+    }
+
+    /// Whether the seed has nothing to do for this enabled instance this
+    /// frame — built from the current source for this very node, published,
+    /// its `params` given, and nothing in its source that could have undone
+    /// either — marking it seen if so. What [`Self::ensure_instance`] and
+    /// [`Self::seed_params`] would do for it puts back what is already there,
+    /// and doing that for every instance every frame was most of
+    /// `scriptsSeed`: two `String` keys, two registry fetches, a fresh `node`
+    /// handle and a fresh registry slot each, per instance per frame.
+    fn seed_is_current(&mut self, e: Entity, name: &str, scripts_dir: &Path) -> bool {
+        let kid = self.intern_kind(name);
+        let Some(generation) = self.kind_generation(kid, name, scripts_dir) else { return false };
+        let Some(inst) = self.instances.get_mut(&(e.index(), kid)) else { return false };
+        if inst.generation != generation || inst.entity != e || !inst.seeded || inst.rebinds_globals {
+            return false;
+        }
+        inst.seen = true;
+        true
+    }
+
+    fn ensure_instance(&mut self, e: Entity, name: &str, scripts_dir: &Path) -> bool {
+        let kid = self.intern_kind(name);
+        let Some(generation) = self.kind_generation(kid, name, scripts_dir) else {
             let path = resolve_script_path(scripts_dir, &self.extra_script_dirs, name);
             self.record_error(name, format!("{name}: script not found ({})", path.display()));
             return false;
         };
-        let key = (e.index(), name.to_string());
-        let needs_build = self.instances.get(&key).is_none_or(|i| i.generation != generation || i.entity != e);
+        let id = (e.index(), kid);
+        let needs_build = self.instances.get(&id).is_none_or(|i| i.generation != generation || i.entity != e);
         if needs_build {
+            let key = (e.index(), name.to_string());
             let path = resolve_script_path(scripts_dir, &self.extra_script_dirs, name);
             // Don't recompile a known-broken generation every frame; re-emit it
             // to the Scripting tab, which is a live list of what is wrong right
@@ -8980,7 +9120,7 @@ impl ScriptHost {
                     }
                     self.stopped.remove(name);
                     self.warn_upvalue_pressure(name, generation, &src);
-                    if let Some(old) = self.instances.remove(&key) {
+                    if let Some(old) = self.instances.remove(&id) {
                         let _ = self.lua.remove_registry_value(old.env);
                     }
                     // A rebuild (hot reload) drops the old generation's net
@@ -8995,13 +9135,15 @@ impl ScriptHost {
                     self.setup_synced(&env, &key);
                     let hooks = Hooks::of(&env);
                     let writes_params = source_writes_params(&src);
+                    let rebinds_globals =
+                        source_may_assign_global(&src, "node") || source_may_assign_global(&src, "params");
                     // A fresh instance has told nobody anything yet, even
                     // under an entity index a destroyed node used to hold.
                     self.destroy_told.remove(&key);
                     match self.lua.create_registry_value(env) {
                         Ok(reg) => {
                             self.instances.insert(
-                                key.clone(),
+                                id,
                                 Instance {
                                     env: reg,
                                     entity: e,
@@ -9009,10 +9151,13 @@ impl ScriptHost {
                                     started: false,
                                     seen: true,
                                     node: None,
+                                    node_weak: None,
                                     hooks,
                                     writes_params,
                                     seed_fp: 0,
                                     params_dirty: false,
+                                    seeded: false,
+                                    rebinds_globals,
                                 },
                             );
                         }
@@ -9031,8 +9176,13 @@ impl ScriptHost {
                 }
             }
         }
-        let Some(inst) = self.instances.get_mut(&key) else { return false };
+        let Some(inst) = self.instances.get_mut(&id) else { return false };
         inst.seen = true;
+        // Published, with its `node` handle, when it was built: both are
+        // still there unless the script itself may have replaced its `node`.
+        if !needs_build && !inst.rebinds_globals {
+            return true;
+        }
         let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return false };
         // A persistent `node` handle for this script's own entity, so methods called from
         // other scripts (which don't get the per-call `node` argument) can still reach it.
@@ -9091,28 +9241,36 @@ impl ScriptHost {
     /// Only when unset: once an instance has ticked, `tick`'s table is the live
     /// one, carrying the resolved reference params (which need the world) and
     /// the two-way param writes, which re-seeding would discard.
+    ///
+    /// Once it is set the instance is marked [`Instance::seeded`], and the
+    /// frame's seed passes it by from then on ([`Self::seed_is_current`]).
     fn seed_params(
-        &self,
+        &mut self,
         e: Entity,
         name: &str,
         params: &[(String, f64)],
         refs: &[(String, String)],
         strs: &[(String, String)],
     ) {
-        let Some(inst) = self.instances.get(&(e.index(), name.to_string())) else { return };
+        let Some(id) = self.kind_id(name).map(|k| (e.index(), k)) else { return };
+        let Some(inst) = self.instances.get(&id) else { return };
         let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return };
         // `raw_get`, so an env whose metatable reaches the globals cannot answer
         // this with somebody else's `params`.
-        if env.raw_get::<Value>("params").is_ok_and(|v| !v.is_nil()) {
-            return;
+        let mut set = env.raw_get::<Value>("params").is_ok_and(|v| !v.is_nil());
+        if !set {
+            // Reference params too, resolved the same way every other caller
+            // resolves them. Seeding without them looked harmless — the tick
+            // would fill them in — but a hookless library script never ticks,
+            // so its wired-up node reference would have been nil for the
+            // entire session.
+            let resolved = self.resolve_refs(&env, refs);
+            if let Ok(t) = crate::env::params_table(&self.lua, &env, params, &resolved, strs) {
+                set = env.set("params", t).is_ok();
+            }
         }
-        // Reference params too, resolved the same way every other caller
-        // resolves them. Seeding without them looked harmless — the tick would
-        // fill them in — but a hookless library script never ticks, so its
-        // wired-up node reference would have been nil for the entire session.
-        let resolved = self.resolve_refs(&env, refs);
-        if let Ok(t) = crate::env::params_table(&self.lua, &env, params, &resolved, strs) {
-            let _ = env.set("params", t);
+        if set && let Some(inst) = self.instances.get_mut(&id) {
+            inst.seeded = true;
         }
     }
 
@@ -9305,6 +9463,111 @@ impl ScriptHost {
         }
     }
 
+    /// For a pass this instance has no hook for, what of the pass is still
+    /// owed to it — asked by `run_pass` before anything else is done for it.
+    ///
+    /// A pass is the hook, plus whatever the script could notice of the walk
+    /// around it. Without a hook that is only its `node` table — the one its
+    /// hooks are handed, which a script may keep (`me = node` in `start`):
+    /// kept, it must go on reading the live transform, and a write made to it
+    /// from outside a hook must reach the world, so it is drained and
+    /// re-stamped every pass as it always was. A table no hook was ever
+    /// handed is one no script holds, and stamping it is work nobody can see —
+    /// so a hookless library script, or a `fixedUpdate`-only one on the frame
+    /// pass before its first tick, costs two hash lookups a pass.
+    ///
+    /// Not for a first frame pass (`start` and the first-pass warnings belong
+    /// to `tick_instance`), nor a missing instance or kind (nothing to skip).
+    fn hookless_here(&self, eid: u32, name: &str, pass: Pass) -> Hookless {
+        let Some(kid) = self.kind_id(name) else { return Hookless::No };
+        let Some(inst) = self.instances.get(&(eid, kid)) else { return Hookless::No };
+        if !inst.started {
+            // Never called outside the frame pass before `start`.
+            return if pass == Pass::Frame { Hookless::No } else { Hookless::Nothing };
+        }
+        let wants = match pass {
+            Pass::Frame => inst.hooks.update,
+            Pass::Fixed => inst.hooks.fixed,
+            Pass::Late => inst.hooks.late,
+        };
+        if wants {
+            Hookless::No
+        } else if (inst.node.is_none() && inst.node_weak.is_none())
+            || (!self.stopped.is_empty() && self.stopped.contains(name))
+        {
+            Hookless::Nothing
+        } else {
+            Hookless::Refresh((eid, kid))
+        }
+    }
+
+    /// Drain and re-stamp the `node` table of an instance with no hook for
+    /// this pass — see [`Self::hookless_here`]. Nothing at all for a table no
+    /// hook has been handed yet.
+    fn refresh_hookless(&mut self, key: (u32, KindId), name: &str, tr: &mut Transform) {
+        let Some(inst) = self.instances.get_mut(&key) else { return };
+        let weak = inst.node_weak;
+        let mut slot = match (inst.node.take(), weak) {
+            (Some(slot), _) => Some(slot),
+            (None, None) => return,
+            // Held weakly: refreshed through a key made for the moment, if
+            // the collector has not taken it — and if it has, nobody holds
+            // it, and there is nothing left to do for it ever.
+            (None, Some((i, stamp))) => match self.weak_nodes.raw_get::<Option<Table>>(i) {
+                Ok(Some(t)) => match self.lua.create_registry_value(&t) {
+                    Ok(k) => Some((k, stamp)),
+                    Err(_) => return,
+                },
+                _ => {
+                    inst.node_weak = None;
+                    return;
+                }
+            },
+        };
+        let id0 = slot.as_ref().map(|(k, _)| k.id());
+        let body = self.bodies.borrow().get(&key.0).copied();
+        let r = self.refresh_node(key.0, tr, body, &mut slot);
+        if let Some(inst) = self.instances.get_mut(&key) {
+            match (weak, slot) {
+                (None, slot) => inst.node = slot,
+                // Still the table it held weakly: keep holding it weakly. A
+                // fresh one (`__id` overwritten) is a table no script has.
+                (Some((i, _)), Some((k, stamp))) if Some(k.id()) == id0 => {
+                    inst.node_weak = Some((i, stamp));
+                    let _ = self.lua.remove_registry_value(k);
+                }
+                (Some((i, _)), _) => {
+                    inst.node_weak = None;
+                    let _ = self.weak_nodes.raw_set(i, Value::Nil);
+                }
+            }
+        }
+        if let Err(err) = r {
+            self.fail(name, format!("{name}: {err}"));
+        }
+    }
+
+    /// Hold this instance's `node` table weakly from now on, if no hook will
+    /// ever be handed it again — see [`Instance::node_weak`].
+    fn hold_node_weakly_if_done(&mut self, key: (u32, KindId)) {
+        let Some(inst) = self.instances.get_mut(&key) else { return };
+        let h = inst.hooks;
+        if !inst.started || h.update || h.fixed || h.late || inst.node.is_none() {
+            return;
+        }
+        let Some((k, stamp)) = inst.node.take() else { return };
+        let i = self.weak_next.get();
+        self.weak_next.set(i.wrapping_add(1));
+        if let Ok(t) = self.lua.registry_value::<Table>(&k)
+            && self.weak_nodes.raw_set(i, t).is_ok()
+        {
+            inst.node_weak = Some((i, stamp));
+            let _ = self.lua.remove_registry_value(k);
+        } else {
+            inst.node = Some((k, stamp));
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn tick_instance(
         &mut self,
@@ -9319,22 +9582,14 @@ impl ScriptHost {
         time: f32,
         pass: Pass,
     ) -> bool {
-        let key = (e.index(), name.to_string());
         let eid = e.index();
-        // The seed the table is built from — and, for a script with reference
-        // params, the shape of the scene too. A ref resolves by name against the
-        // live scene, so a target that spawns, despawns or is renamed mid-play
-        // must rebind although the wire itself never changed. The mirror
-        // already knows when the scene's structure last moved (the revision
-        // `sync_scene` rebuilt at); folding it in rebuilds the table exactly
-        // then, and a script with no refs never pays for it.
-        let structure = if refs.is_empty() { 0 } else { self.scene.borrow().structure_rev };
-        let fp = seed_fingerprint(params, refs, strs, structure);
+        // No id: never built, so no instance to tick.
+        let Some(key) = self.kind_id(name).map(|k| (eid, k)) else { return false };
         // A script that ran past its budget waits for an edit — see `fail`.
         if self.stopped.contains(name) {
             return false;
         }
-        let (first, env, mut node_slot, rebuild, writes_params) = {
+        let (first, env, mut node_slot, rebuild, writes_params, fp) = {
             let Some(inst) = self.instances.get_mut(&key) else { return false };
             // `fixedUpdate`/`lateUpdate` never run before `start` — a brand-new
             // instance waits for the next frame pass to start it first.
@@ -9352,7 +9607,9 @@ impl ScriptHost {
             // world. So the node is stamped and drained exactly as before, and
             // the rest — the params table, the refs, the write scan — is not
             // done for a hook that is not there. With three passes a frame this
-            // was most of what a scripted node cost.
+            // was most of what a scripted node cost. (`run_pass` takes the same
+            // road for a started instance without coming here at all — see
+            // [`Self::hookless_here`].)
             let wants = match pass {
                 Pass::Frame => inst.hooks.update || (first && inst.hooks.start),
                 Pass::Fixed => inst.hooks.fixed,
@@ -9367,15 +9624,7 @@ impl ScriptHost {
             // env is resolved here on that one pass only.
             let first_env = if first { self.lua.registry_value::<Table>(&inst.env).ok() } else { None };
             if !wants {
-                let body = self.bodies.borrow().get(&eid).copied();
-                let mut slot = inst.node.take();
-                let r = self.refresh_node(eid, tr, body, &mut slot);
-                if let Some(inst) = self.instances.get_mut(&key) {
-                    inst.node = slot;
-                }
-                if let Err(err) = r {
-                    self.fail(name, format!("{name}: {err}"));
-                }
+                self.refresh_hookless(key, name, tr);
                 if let Some(env) = first_env.as_ref() {
                     self.warn_unread_params(eid, name, params, strs, pinned_bools, env);
                     self.warn_shadowed_handle_keys(name, env);
@@ -9389,9 +9638,19 @@ impl ScriptHost {
                     Err(_) => return false,
                 },
             };
+            // The seed the table is built from — and, for a script with
+            // reference params, the shape of the scene too. A ref resolves by
+            // name against the live scene, so a target that spawns, despawns or
+            // is renamed mid-play must rebind although the wire itself never
+            // changed. The mirror already knows when the scene's structure last
+            // moved (the revision `sync_scene` rebuilt at); folding it in
+            // rebuilds the table exactly then, and a script with no refs never
+            // pays for it. Only for a hook that is there: nothing else reads it.
+            let structure = if refs.is_empty() { 0 } else { self.scene.borrow().structure_rev };
+            let fp = seed_fingerprint(params, refs, strs, structure);
             let rebuild = inst.seed_fp != fp || inst.params_dirty;
             // Taken out and put back, because `tick` borrows `self` while it runs.
-            (first, env, inst.node.take(), rebuild, inst.writes_params)
+            (first, env, inst.node.take(), rebuild, inst.writes_params, fp)
         };
         if first {
             self.warn_unread_params(eid, name, params, strs, pinned_bools, &env);
@@ -9466,6 +9725,10 @@ impl ScriptHost {
                 inst.params_dirty = false;
             }
         }
+        // A `start`-only script's table is handed out once, here.
+        if first {
+            self.hold_node_weakly_if_done(key);
+        }
         match result {
             // Only a hook that ran can have written into `params`, and only a
             // script whose source assigns into it at all; a pass whose hook
@@ -9502,12 +9765,29 @@ impl ScriptHost {
         mut body: Option<BodyState>,
         slot: &mut Option<(RegistryKey, crate::env::NodeStamp)>,
     ) -> mlua::Result<Table> {
-        let cached =
-            slot.as_ref().and_then(|(k, _)| self.lua.registry_value::<Table>(k).ok()).filter(
-                // Entity indices are reused after a despawn; a table tagged with a
-                // different one is not this node's, so start over.
-                |t| t.raw_get::<u32>("__id").ok() == Some(eid),
-            );
+        let fetched = slot.as_ref().and_then(|(k, _)| self.lua.registry_value::<Table>(k).ok());
+        // Stamped last from this same transform, and untouched since: there
+        // is no write to drain and nothing a stamp would change, so the table
+        // is handed back as it is. A node at rest whose script has no hook
+        // this pass — or whose last hook was a pass ago — was paying a full
+        // drain and stamp, some fifty table reads and writes, to learn that.
+        if let Some(t) = fetched
+            .as_ref()
+            .zip(slot.as_ref())
+            .filter(|(t, (_, stamp))| {
+                crate::env::stamp_unchanged(&self.stamp_unchanged, t, eid, stamp, tr, body)
+            })
+            .map(|(t, _)| t.clone())
+        {
+            #[cfg(test)]
+            STAMPS_SKIPPED.with(|c| c.set(c.get() + 1));
+            return Ok(t);
+        }
+        let cached = fetched.filter(
+            // Entity indices are reused after a despawn; a table tagged with a
+            // different one is not this node's, so start over.
+            |t| t.raw_get::<u32>("__id").ok() == Some(eid),
+        );
         let node = match cached {
             Some(t) => t,
             None => {
@@ -9554,7 +9834,7 @@ impl ScriptHost {
         }
         crate::env::stamp_node_table(&node, tr, body)?;
         if let Some((_, stamp)) = slot.as_mut() {
-            *stamp = crate::env::node_stamp(&node, tr);
+            *stamp = crate::env::stamp_of(tr, body);
         }
         Ok(node)
     }
