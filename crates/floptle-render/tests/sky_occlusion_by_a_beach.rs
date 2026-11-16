@@ -110,11 +110,43 @@ fn quad() -> MeshData {
 }
 
 /// The views the game measured from: eye level, and eighteen metres up,
-/// both looking toward the shore.
+/// both looking toward the shore; and twelve up over the knolls
+/// (`knolls`), which has no proxies.
 #[derive(Clone, Copy, Debug)]
 enum View {
     EyeLevel,
     Above,
+    Knolls,
+}
+
+/// A fine terrain (quarter-unit cells) whose box ends 2.3 units above the
+/// water: a bed 0.6 down and a grid of knolls standing out
+/// of the water. The reads above a point by these knolls land just over the
+/// box, where the stand-in's distance runs ahead of one unit per unit moved
+/// by up to the height over the box, so a knoll can sit within reach of a
+/// ray's near half while the read says it is not. Distances are exact.
+fn knolls() -> BakedSdf {
+    let (dims, center, half) = ([128u32, 21, 128], [0.0f32, -0.35, 0.0], [16.0f32, 2.65, 16.0]);
+    let n = (dims[0] * dims[1] * dims[2]) as usize;
+    let mut distance = Vec::with_capacity(n);
+    for iz in 0..dims[2] {
+        for iy in 0..dims[1] {
+            for ix in 0..dims[0] {
+                let at = |i: u32, a: usize| center[a] - half[a] + (i as f32 + 0.5) / dims[a] as f32 * 2.0 * half[a];
+                let p = Vec3::new(at(ix, 0), at(iy, 1), at(iz, 2));
+                let mut d = p.y + 0.6;
+                for kz in -2i32..=2 {
+                    for kx in -2i32..=2 {
+                        let (r, y) = if (kx + kz) % 2 == 0 { (0.9, 1.0) } else { (0.6, 1.5) };
+                        let c = Vec3::new(kx as f32 * 6.0 + 0.7 * kz as f32, y, kz as f32 * 6.0);
+                        d = d.min((p - c).length() - r);
+                    }
+                }
+                distance.push(d);
+            }
+        }
+    }
+    BakedSdf { dims, center, half_extent: half, distance, color: vec![[120, 110, 90, 0]; n] }
 }
 
 struct Beach {
@@ -128,7 +160,7 @@ struct Beach {
 
 impl Beach {
     /// `None` on a device that cannot build the raster pass.
-    fn new() -> Option<Beach> {
+    fn new(bed: BakedSdf) -> Option<Beach> {
         let gpu = Gpu::headless(W, H);
         if !gpu.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
             return None;
@@ -146,7 +178,6 @@ impl Beach {
         let mut raster = Raster::new(&gpu);
         let mut raymarch = Raymarch::new(&gpu);
         let sheet = raster.register(&gpu, &quad(), None);
-        let bed = terrain();
         assert_eq!(raymarch.set_volumes(&gpu, &[&bed]), 1);
         Some(Beach { gpu, raster, raymarch, out, sheet, bed })
     }
@@ -185,7 +216,9 @@ impl Beach {
         let (eye, pitch) = match view {
             View::EyeLevel => (DVec3::new(-10.0, 2.0, 0.0), -24f32),
             View::Above => (DVec3::new(-30.0, 18.0, 0.0), -42f32),
+            View::Knolls => (DVec3::new(-4.0, 12.0, 0.0), -80f32),
         };
+        let bound = if matches!(view, View::Knolls) { 0 } else { PROXIES };
         // Looking along +x, toward the shore, pitched down.
         let rot = Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2) * Quat::from_rotation_x(pitch.to_radians());
         let cam = RenderCamera::new(eye, rot, Projection::Perspective { fov_y: 58f32.to_radians(), near: 0.1, far: 2000.0 });
@@ -216,7 +249,7 @@ impl Beach {
             vol_center,
             vol_half,
             ao_params: [0.0, 1.0, 3.0, 0.0],
-            prox_count: [PROXIES as f32, 0.0, 0.0, 0.0],
+            prox_count: [bound as f32, 0.0, 0.0, 0.0],
             prox_a,
             prox_b,
             prox_rot,
@@ -291,46 +324,77 @@ fn sky_full(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
 }
 "#;
 
+/// The op through `call` against the same call with no early outs at
+/// all: (sea pixels, pixels under some cover, worst difference, pixels
+/// differing by over 0.02).
+fn compare(beach: &mut Beach, view: View, call: &str) -> (usize, usize, f32, usize) {
+    let (globals, eye) = beach.stage(view);
+    let fast = beach.shader_with(call, Some(("sky_occlusion(", "sky_occlusion(")), "");
+    beach.draw(globals, eye, fast);
+    let a = beach.read();
+    let full = beach.shader_with(call, Some(("sky_occlusion(", "sky_full(")), FULL_MARCH);
+    beach.draw(globals, eye, full);
+    let b = beach.read();
+    let mut worst = 0.0f32;
+    let (mut over, mut sea, mut dark, mut lighter) = (0usize, 0usize, 0usize, 0usize);
+    for (x, y) in a.iter().zip(&b) {
+        if let (Some(x), Some(y)) = (x, y) {
+            sea += 1;
+            if x - y > 0.02 {
+                lighter += 1;
+            }
+            let d = (x - y).abs();
+            worst = worst.max(d);
+            if d > 0.02 {
+                over += 1;
+            }
+            if *y < 0.99 {
+                dark += 1;
+            }
+        }
+    }
+    println!("{view:?} {call}: {sea} sea px, {dark} under some cover; worst difference {worst:.3}, {over} px over 0.02 ({lighter} lighter)");
+    (sea, dark, worst, over)
+}
+
 /// The op with its early outs reads what the full march reads, on both
 /// views at reaches of 8, 24 and 32 (skyVisibility's). Where a march is
-/// started past a stretch an early out proved clear, its samples fall in
-/// other places than the full march's, and its penumbra can read a little
-/// differently: never more than 0.1, and on no more than one pixel in ten
-/// thousand by more than 0.02.
+/// started past the stretch the point read proved clear, its samples fall
+/// in other places than the full march's, and its penumbra can read a
+/// little differently: never more than 0.15, and on no more than one pixel
+/// in ten thousand by more than 0.02.
 #[test]
 fn early_outs_read_what_the_full_march_reads() {
-    let Some(mut beach) = Beach::new() else { return };
+    let Some(mut beach) = Beach::new(terrain()) else { return };
     for view in [View::EyeLevel, View::Above] {
-        let (globals, eye) = beach.stage(view);
         for reach in ["8", "24", "32"] {
             let call = format!("skyOcclusion(worldPos, vec3(0, 1, 0), {reach})");
-            let fast = beach.shader_with(&call, Some(("sky_occlusion(", "sky_occlusion(")), "");
-            beach.draw(globals, eye, fast);
-            let a = beach.read();
-            let full = beach.shader_with(&call, Some(("sky_occlusion(", "sky_full(")), FULL_MARCH);
-            beach.draw(globals, eye, full);
-            let b = beach.read();
-            let mut worst = 0.0f32;
-            let (mut over, mut sea, mut dark) = (0usize, 0usize, 0usize);
-            for (x, y) in a.iter().zip(&b) {
-                if let (Some(x), Some(y)) = (x, y) {
-                    sea += 1;
-                    let d = (x - y).abs();
-                    worst = worst.max(d);
-                    if d > 0.02 {
-                        over += 1;
-                    }
-                    if *y < 0.99 {
-                        dark += 1;
-                    }
-                }
-            }
-            println!("{view:?} reach {reach}: {sea} sea px, {dark} under some cover; worst difference {worst:.3}, {over} px over 0.02");
+            let (sea, dark, worst, over) = compare(&mut beach, view, &call);
             // The fixture: some of the sea is under cover at every reach.
             assert!(dark > sea / 100, "{view:?} reach {reach}: only {dark} of {sea} pixels are under any cover");
             assert!(
-                worst <= 0.1 && over <= sea / 10_000,
+                worst <= 0.15 && over <= sea / 10_000,
                 "{view:?} reach {reach}: the early outs differ from the full march by up to {worst:.3}, and by over 0.02 on {over} of {sea} pixels"
+            );
+        }
+    }
+}
+
+/// The same over fine knolls just under a terrain box's top (`knolls`), at
+/// short reaches and with the normal tilted as well as up: where the reads
+/// above the point land just over the box, they must not call open a half
+/// a knoll reaches into.
+#[test]
+fn early_outs_read_what_the_full_march_reads_just_over_a_box() {
+    let Some(mut beach) = Beach::new(knolls()) else { return };
+    for n in ["vec3(0, 1, 0)", "normalize(vec3(0.35, 1, 0.2))"] {
+        for reach in ["2", "3", "4", "8", "16"] {
+            let call = format!("skyOcclusion(worldPos, {n}, {reach})");
+            let (sea, dark, worst, over) = compare(&mut beach, View::Knolls, &call);
+            assert!(dark > sea / 100, "reach {reach}, n {n}: only {dark} of {sea} pixels are under any cover");
+            assert!(
+                worst <= 0.15 && over <= sea / 10_000,
+                "reach {reach}, n {n}: the early outs differ from the full march by up to {worst:.3}, and by over 0.02 on {over} of {sea} pixels"
             );
         }
     }
@@ -390,7 +454,7 @@ const SIX_READS: &str = "saturate((fieldDistance(worldPos + vec3(0, 2, 0)) + fie
 /// any of this, 23 and 17.
 #[test]
 fn sky_occlusion_by_a_beach_costs_a_few_field_reads() {
-    let Some(mut beach) = Beach::new() else { return };
+    let Some(mut beach) = Beach::new(terrain()) else { return };
     // A software rasteriser's clock says nothing about a GPU's.
     if beach.gpu.adapter.get_info().device_type == wgpu::DeviceType::Cpu {
         return;

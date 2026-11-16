@@ -2196,8 +2196,8 @@ fn field_set_d(p: vec3<f32>, pieces: FieldSet, skip: u32) -> f32 {
 // much in the field.
 //
 // The sweep and the march are separate functions so `sky_occlusion` can
-// narrow its four rays' sweeps to one shared set first; the march is the
-// same code either way.
+// sweep for its four rays in one pass (`sky_sweep`); the march is the same
+// code either way.
 fn field_vis(ro: vec3<f32>, l: vec3<f32>, max_d: f32, k: f32, pen_t0: f32, lift: f32, steps: i32) -> f32 {
     return field_march(ro, l, k, pen_t0, lift, lift, steps, field_sweep(ro, l, max_d, k, FIELD_ALL));
 }
@@ -2586,14 +2586,16 @@ fn sky_occlusion(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
     // Open water by a beach: the bed is a few units down and the sky is
     // clear. Two reads above the point settle it (`sky_open_above`), one
     // for the near half of every ray and one for the far half. They read
-    // the volumes, blobs and Field Shapes only: a ray with no collider proxy
-    // in its sweep is then open if both halves are, and needs marching only
-    // over a half that is not. A ray that passes near a proxy is marched
-    // whole, as before.
+    // the volumes, blobs and Field Shapes only: if both halves are open, a
+    // ray with no collider proxy in its sweep is open, and only a ray that
+    // passes near a proxy is marched.
+    //
+    // Only both halves open counts. Starting or ending a march at a half
+    // that read open would move all its later samples, and its penumbra
+    // read up to 0.1 differently on fine terrain.
     var ground = felt;
     ground.pmask = 0u;
-    let halves = sky_open_above(p, n, base, far, ground);
-    let open = halves.x && halves.y;
+    let open = sky_open_above(p, n, base, far, ground);
     if (open && felt.pmask == 0u) {
         return 1.0;
     }
@@ -2603,17 +2605,10 @@ fn sky_occlusion(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
         // The same read says how far along this ray is certainly clear: a
         // sample at range t is at most lift + t from `p`, so while
         // d0 - lift - t stays over t/K it can neither hit nor dim. The march
-        // starts there (or past the near half, if that read open), ends at
-        // the far half if that read open, and a ray clear past its end needs
-        // no march at all.
-        var clear = max(lift, (d0 - lift) / (1.0 + 1.0 / K));
-        var mine = sky_sweep_set(w, i);
-        if (mine.pmask == 0u) {
-            let half = 0.5 * max(lift, far);
-            if (halves.x) { clear = max(clear, half); }
-            if (halves.y) { mine.t_end = min(mine.t_end, half); }
-        }
-        if (clear > max(lift, mine.t_end)) {
+        // starts there, and a ray clear past its end needs no march at all.
+        let clear = max(lift, (d0 - lift) / (1.0 + 1.0 / K));
+        let mine = sky_sweep_set(w, i);
+        if ((open && mine.pmask == 0u) || clear > max(lift, mine.t_end)) {
             vis = vis + 1.0;
             continue;
         }
@@ -2655,7 +2650,7 @@ const SKY_ABOVE_FLOAT: f32 = 0.5;
 // half of all four is held in one sphere centred on the line up from `p`
 // (`sky_slice_open`). The spheres sit above the point, where the rays go,
 // so the bed under shallow water is outside them however near it is.
-fn sky_open_above(p: vec3<f32>, n: vec3<f32>, base: f32, far: f32, pieces: FieldSet) -> vec2<bool> {
+fn sky_open_above(p: vec3<f32>, n: vec3<f32>, base: f32, far: f32, pieces: FieldSet) -> bool {
     var cell = 0.0;
     let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
@@ -2664,7 +2659,8 @@ fn sky_open_above(p: vec3<f32>, n: vec3<f32>, base: f32, far: f32, pieces: Field
         cell = max(cell, max(v.x, max(v.y, v.z)));
     }
     let margin = SKY_ABOVE_CELLS * cell + 0.002;
-    return vec2<bool>(sky_slice_open(p, n, base, far, 0.0, 0.5, pieces, margin), sky_slice_open(p, n, base, far, 0.5, 1.0, pieces, margin));
+    return sky_slice_open(p, n, base, far, 0.0, 0.5, pieces, margin)
+        && sky_slice_open(p, n, base, far, 0.5, 1.0, pieces, margin);
 }
 
 // One read at a point `h` up the normal from `p`, for the stretch of every
@@ -2709,7 +2705,26 @@ fn sky_slice_open(p: vec3<f32>, n: vec3<f32>, base: f32, far: f32, fa: f32, fb: 
         r = max(r, length(vec2<f32>(l + ta * c - h, ta * s)) + ta / K);
         r = max(r, length(vec2<f32>(l + tb * c - h, tb * s)) + tb / K);
     }
-    return field_set_d(p + n * h, pieces, 0u) > r + margin;
+    // Just over a volume's box, `volume_d` reads the box distance plus the
+    // field at the face below: step down and sideways at once and both
+    // fall, so it can drop by up to the height over the box more than the
+    // distance moved. Read from there, the centre is worth only what it
+    // promises everything inside the box: the field at the face (that
+    // reading less the height) less the height again to get back to the
+    // centre. Further than `volume_d` reads into the box it is the box
+    // distance alone, which runs ahead of nothing.
+    let at = p + n * h;
+    var over = 0.0;
+    let vols = min(u32(G.params.w), 32u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if ((pieces.vmask & (1u << i)) == 0u) { continue; }
+        let q = abs(at - G.vol_center[i].xyz) - G.vol_half[i].xyz;
+        let box_d = length(max(q, vec3<f32>(0.0)));
+        if (box_d <= 4.0 + 2.0 * G.vol_half[i].w) {
+            over = max(over, box_d);
+        }
+    }
+    return field_set_d(at, pieces, 0u) - 2.0 * over > r + margin;
 }
 
 // How far `sky_visibility` looks for cover when it falls back to
