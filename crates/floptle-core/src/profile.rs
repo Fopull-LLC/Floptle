@@ -488,6 +488,20 @@ pub struct Counts {
     /// Bytes every picture on the GPU holds, mip chains included, each
     /// counted once: what a texture-quality setting saves.
     pub texture_bytes: u64,
+    /// What the raster passes recorded for the last view drawn: render
+    /// passes, draw calls, pipeline sets, bind group sets, vertex buffer
+    /// sets, index buffer sets, the sets left out because the same object
+    /// was already bound, and queue submits. Recording a state set costs CPU
+    /// time, so a pass whose sets run close to its draws is paying per draw
+    /// for state it could share.
+    pub encode_passes: u32,
+    pub encode_draws: u32,
+    pub encode_pipeline_sets: u32,
+    pub encode_bind_sets: u32,
+    pub encode_vertex_sets: u32,
+    pub encode_index_sets: u32,
+    pub encode_skipped: u32,
+    pub encode_submits: u32,
     /// Draw calls that carried a single instance, and why each did not share
     /// a draw with another. `draws` far above the number of distinct meshes
     /// is the symptom; this is the cause.

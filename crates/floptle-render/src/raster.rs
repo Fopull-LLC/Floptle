@@ -190,7 +190,8 @@ fn sun_depth_texture(device: &wgpu::Device, label: &str, size: u32, cascades: u3
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: Gpu::DEPTH_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        // COPY_SRC so a test can read the map back.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     })
 }
@@ -919,6 +920,159 @@ struct DynSlot {
     tpaint_cap: u32,
 }
 
+/// What the raster passes put into their command encoders: draws, the state
+/// commands around them, and the CPU time spent getting there.
+///
+/// Recording a command is not free on the CPU. Each bind group or buffer set
+/// in a pass is validated and tracked when the pass ends, so a pass of a
+/// thousand terrain chunks, each binding its own objects, paid for three
+/// state commands per draw. These numbers say how many a pass really issued,
+/// and how many it skipped because the same object was already bound.
+///
+/// [`Raster::take_encode_stats`] returns the totals since the last call (a
+/// frame, for a caller that takes them once a frame);
+/// [`Raster::last_pass_encode`] returns the last render pass alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EncodeStats {
+    /// Render passes recorded.
+    pub passes: u32,
+    /// Draw calls (`draw_indexed` and `draw`).
+    pub draws: u32,
+    /// Pipeline sets issued.
+    pub pipeline_sets: u32,
+    /// Bind group sets issued, every slot.
+    pub bind_sets: u32,
+    /// Vertex buffer sets issued, every slot.
+    pub vertex_sets: u32,
+    /// Index buffer sets issued.
+    pub index_sets: u32,
+    /// State sets left out because the same object was already bound in
+    /// that slot of the pass.
+    pub skipped: u32,
+    /// Queue submits.
+    pub submits: u32,
+    /// Milliseconds spent sorting the draws into buckets and uploading their
+    /// instances, before a pass is recorded.
+    pub bucket_ms: f32,
+    /// Milliseconds spent recording render passes.
+    pub record_ms: f32,
+    /// Milliseconds spent finishing encoders and submitting them.
+    pub submit_ms: f32,
+}
+
+impl EncodeStats {
+    fn add(&mut self, o: &EncodeStats) {
+        self.passes += o.passes;
+        self.draws += o.draws;
+        self.pipeline_sets += o.pipeline_sets;
+        self.bind_sets += o.bind_sets;
+        self.vertex_sets += o.vertex_sets;
+        self.index_sets += o.index_sets;
+        self.skipped += o.skipped;
+        self.submits += o.submits;
+        self.bucket_ms += o.bucket_ms;
+        self.record_ms += o.record_ms;
+        self.submit_ms += o.submit_ms;
+    }
+}
+
+/// What one render pass has bound so far, so its draw loops issue only the
+/// state that changes.
+///
+/// Every draw loop in the raster goes through this. A set is skipped when the
+/// very same object (compared as a handle, not by contents) is already bound
+/// in that slot of this pass: terrain chunks sharing one bind group then bind
+/// it once for the run, not once a chunk.
+///
+/// Skipping is sound under WebGPU's rules, which wgpu follows on every
+/// backend: bind groups and vertex/index buffers stay bound for the life of
+/// the pass, across pipeline changes, until set again. One is made for each
+/// render pass and dropped with it, so nothing carries over between passes.
+/// Nothing may bind a pipeline, bind group or buffer on a pass directly
+/// while one is in use: it would bind behind the tracker's back, and a later
+/// set the tracker thinks redundant would be skipped. Viewport and scissor
+/// are not bindings and are set on the pass as before.
+struct Bound<'a> {
+    elide: bool,
+    pipeline: Option<&'a wgpu::RenderPipeline>,
+    groups: [Option<&'a wgpu::BindGroup>; 4],
+    vertex: [Option<&'a wgpu::Buffer>; 2],
+    index: Option<&'a wgpu::Buffer>,
+    n: EncodeStats,
+}
+
+impl<'a> Bound<'a> {
+    fn new(elide: bool) -> Self {
+        Bound { elide, pipeline: None, groups: [None; 4], vertex: [None; 2], index: None, n: EncodeStats { passes: 1, ..Default::default() } }
+    }
+
+    fn pipeline(&mut self, rp: &mut wgpu::RenderPass<'_>, p: &'a wgpu::RenderPipeline) {
+        if self.elide && self.pipeline == Some(p) {
+            self.n.skipped += 1;
+            return;
+        }
+        rp.set_pipeline(p);
+        self.pipeline = Some(p);
+        self.n.pipeline_sets += 1;
+    }
+
+    fn group(&mut self, rp: &mut wgpu::RenderPass<'_>, slot: u32, g: &'a wgpu::BindGroup) {
+        let at = &mut self.groups[slot as usize];
+        if self.elide && *at == Some(g) {
+            self.n.skipped += 1;
+            return;
+        }
+        rp.set_bind_group(slot, g, &[]);
+        *at = Some(g);
+        self.n.bind_sets += 1;
+    }
+
+    /// Bind the whole of `b` to vertex slot `slot`.
+    fn vertex(&mut self, rp: &mut wgpu::RenderPass<'_>, slot: u32, b: &'a wgpu::Buffer) {
+        let at = &mut self.vertex[slot as usize];
+        if self.elide && *at == Some(b) {
+            self.n.skipped += 1;
+            return;
+        }
+        rp.set_vertex_buffer(slot, b.slice(..));
+        *at = Some(b);
+        self.n.vertex_sets += 1;
+    }
+
+    /// Bind the whole of `b` as the index buffer (32-bit indices).
+    fn index(&mut self, rp: &mut wgpu::RenderPass<'_>, b: &'a wgpu::Buffer) {
+        if self.elide && self.index == Some(b) {
+            self.n.skipped += 1;
+            return;
+        }
+        rp.set_index_buffer(b.slice(..), wgpu::IndexFormat::Uint32);
+        self.index = Some(b);
+        self.n.index_sets += 1;
+    }
+
+    /// One bucket: `mesh` drawn with `bind` in group 1, instances
+    /// `start..start + count` of the instance buffer.
+    fn mesh(&mut self, rp: &mut wgpu::RenderPass<'_>, mesh: &'a GpuMesh, bind: &'a wgpu::BindGroup, start: u32, count: u32) {
+        self.group(rp, 1, bind);
+        self.geometry(rp, mesh, start, count);
+    }
+
+    /// [`Self::mesh`] with group 1 left as it is, for a pass that binds no
+    /// picture.
+    fn geometry(&mut self, rp: &mut wgpu::RenderPass<'_>, mesh: &'a GpuMesh, start: u32, count: u32) {
+        self.vertex(rp, 0, &mesh.vbuf);
+        self.index(rp, &mesh.ibuf);
+        rp.draw_indexed(0..mesh.index_count, 0, start..(start + count));
+        self.n.draws += 1;
+    }
+
+    /// A non-indexed draw.
+    fn draw(&mut self, rp: &mut wgpu::RenderPass<'_>, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>) {
+        rp.draw(vertices, instances);
+        self.n.draws += 1;
+    }
+}
+
 /// Group draw items by key in one pass, preserving first-appearance order
 /// (transparent draw order and bucket determinism both ride on it). Every
 /// draw-list bucketization must use this: chunk-meshed terrain hands the
@@ -1261,6 +1415,19 @@ pub struct Raster {
     sun_near_casts: (usize, usize),
     /// Leave out of the sun map what lies outside its box (the default).
     sun_map_cull: bool,
+    /// Skip a state set in a pass when the same object is already bound
+    /// there (the default; see [`Bound`]). Off is a debug switch for a test
+    /// that compares the two pictures.
+    elide_state: bool,
+    /// What the passes encoded since the last [`Raster::take_encode_stats`].
+    encode_frame: EncodeStats,
+    /// What the last render pass encoded.
+    encode_last: EncodeStats,
+    /// The group(1) bind of the default white picture under the default
+    /// sampling: what every mesh without a picture of its own binds. One
+    /// shared bind, made on first use, so a run of terrain chunks binds it
+    /// once rather than once a chunk.
+    default_surface_bind: Option<wgpu::BindGroup>,
     /// Every model picture on the GPU, by its pixels, so a picture is put
     /// there once however many meshes wear it. Models often embed one picture
     /// per file and one material per part: a ragdoll of eleven parts, each
@@ -2364,6 +2531,10 @@ impl Raster {
             sun_map_casts: (0, 0),
             sun_near_casts: (0, 0),
             sun_map_cull: true,
+            elide_state: true,
+            encode_frame: EncodeStats::default(),
+            encode_last: EncodeStats::default(),
+            default_surface_bind: None,
             mesh_textures: HashMap::new(),
             texture_drop: 0,
             scene_readers_deferred: false,
@@ -3663,6 +3834,12 @@ impl Raster {
         &self.sun_map_view
     }
 
+    /// The texture behind [`Self::sun_map_view`], for a probe that reads
+    /// the map back.
+    pub fn sun_map_texture(&self) -> &wgpu::Texture {
+        &self._sun_map
+    }
+
     pub fn texture_size(&self, id: TexId) -> Option<[f32; 2]> {
         self.textures.get(id.0 as usize).map(|t| {
             let s = t._texture.size();
@@ -4465,6 +4642,22 @@ impl Raster {
         base
     }
 
+    /// The group(1) bind every mesh without a picture of its own shares:
+    /// the default white picture, crisp sampling and the neutral maps. Made
+    /// once. Nothing it holds is ever replaced (the default picture lives as
+    /// long as the raster, and crisp sampling is not one anisotropy remakes),
+    /// so one bind stays right for every such mesh.
+    fn default_surface_bind(&mut self, gpu: &Gpu) -> wgpu::BindGroup {
+        if let Some(b) = &self.default_surface_bind {
+            return b.clone();
+        }
+        let view = self.default_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = self.sampler_for(gpu, TexSampling::default());
+        let b = self.plain_surface_bind(gpu, "raster-default-tex", &view, &sampler);
+        self.default_surface_bind = Some(b.clone());
+        b
+    }
+
     /// Create a dynamic mesh slot sized for `verts`/`indices` (with headroom) and, when
     /// `colored`, its paired terrain-color block. The slot draws nothing until
     /// [`replace_dynamic`](Self::replace_dynamic) fills it.
@@ -4482,9 +4675,9 @@ impl Raster {
         let gpu_mesh = GpuMesh::with_capacity(gpu, cap_verts, cap_indices);
         let slot = DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap };
 
-        let view = self.default_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = self.sampler_for(gpu, TexSampling::default());
-        let tex_bind = self.plain_surface_bind(gpu, "raster-dyn-tex", &view, &sampler);
+        // Every slot binds the same white picture the same way, so they all
+        // share one bind: a run of chunks then binds it once, not per chunk.
+        let tex_bind = self.default_surface_bind(gpu);
         let mesh = RegisteredMesh {
             gpu_mesh,
             tex_bind,
@@ -4686,15 +4879,18 @@ impl Raster {
 
         let mips = matches!(sampling.filter, TexFilter::SmoothMipmaps);
         let owned = texture.map(|t| self.mesh_texture(gpu, t, mips, sampling.coverage));
-        let view = owned
-            .as_ref()
-            .unwrap_or(&self.default_tex)
-            .create_view(&wgpu::TextureViewDescriptor::default());
         // A mesh with no texture of its own keeps the shared default's crisp
-        // sampling, as `set_mesh_sampling` always left it.
+        // sampling, as `set_mesh_sampling` always left it, and so binds
+        // exactly what every other such mesh binds: the one shared bind.
         let sampling = if owned.is_some() { sampling } else { TexSampling::default() };
-        let sampler = self.sampler_for(gpu, sampling);
-        let tex_bind = self.plain_surface_bind(gpu, "raster-mesh-tex", &view, &sampler);
+        let tex_bind = match owned.as_ref() {
+            Some(tex) => {
+                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                let sampler = self.sampler_for(gpu, sampling);
+                self.plain_surface_bind(gpu, "raster-mesh-tex", &view, &sampler)
+            }
+            None => self.default_surface_bind(gpu),
+        };
 
         self.meshes.push(RegisteredMesh {
             gpu_mesh,
@@ -4982,6 +5178,7 @@ impl Raster {
         instances: &[(MeshId, InstanceRaw)],
         skins: &[SkinDraw],
     ) {
+        let bucket_t = floptle_core::profile::Span::new();
         self.begin_pass(gpu, globals);
 
         let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
@@ -5001,10 +5198,13 @@ impl Raster {
         if !raws.is_empty() {
             gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
         }
+        self.note_bucket(bucket_t);
 
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-mask") });
+        let rec = floptle_core::profile::Span::new();
+        let counts;
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("raster-mask"),
@@ -5022,26 +5222,24 @@ impl Raster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_pipeline(&self.mask_pipeline);
-            rp.set_bind_group(0, &self.globals_bind, &[]);
-            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
+            let mut b = Bound::new(self.elide_state);
+            b.pipeline(&mut rp, &self.mask_pipeline);
+            b.group(&mut rp, 0, &self.globals_bind);
+            b.vertex(&mut rp, 1, &self.instance_buf);
+            // The silhouette binds no picture, so only the geometry is set.
             for (mesh_idx, start, count) in buckets {
-                let mesh = &self.meshes[mesh_idx];
-                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+                b.geometry(&mut rp, &self.meshes[mesh_idx].gpu_mesh, start, count);
             }
             if !skin_buckets.is_empty() {
-                rp.set_pipeline(&self.skin_mask_pipeline);
+                b.pipeline(&mut rp, &self.skin_mask_pipeline);
                 for (mesh_idx, _, start, count) in skin_buckets {
-                    let mesh = &self.meshes[mesh_idx];
-                    rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                    rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+                    b.geometry(&mut rp, &self.meshes[mesh_idx].gpu_mesh, start, count);
                 }
             }
+            counts = b.n;
         }
-        gpu.queue.submit([encoder.finish()]);
+        self.note_pass(counts, rec);
+        self.submit(gpu, encoder);
     }
 
     /// Clear the given color + depth targets and draw every instance, bucketed by
@@ -5083,6 +5281,7 @@ impl Raster {
         clear: Option<[f64; 4]>,
         field: Option<&wgpu::BindGroup>,
     ) {
+        let bucket_t = floptle_core::profile::Span::new();
         self.begin_pass(gpu, globals);
 
         // Clear when we own the frame; Load when a prior pass (raymarch) already
@@ -5189,11 +5388,14 @@ impl Raster {
         if !raws.is_empty() {
             gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
         }
+        self.note_bucket(bucket_t);
 
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster") });
         let mut equal_buckets;
+        let rec = floptle_core::profile::Span::new();
+        let counts;
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("raster"),
@@ -5212,42 +5414,11 @@ impl Raster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_bind_group(0, &self.globals_bind, &[]);
-            rp.set_bind_group(2, field.unwrap_or(&self.empty_field_bind), &[]);
-            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
-            let draw = |rp: &mut wgpu::RenderPass<'_>, buckets: &[(usize, Option<u32>, u32, u32)]| {
-                for &(mesh_idx, tex_key, start, count) in buckets {
-                    let mesh = &self.meshes[mesh_idx];
-                    // A material texture overrides the mesh's own base-color texture.
-                    let bind = match tex_key {
-                        Some(t) => &self.textures[t as usize].bind,
-                        None => &mesh.tex_bind,
-                    };
-                    rp.set_bind_group(1, bind, &[]);
-                    rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                    rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
-                }
-            };
+            let mut b = Bound::new(self.elide_state);
+            b.group(&mut rp, 0, &self.globals_bind);
+            b.group(&mut rp, 2, field.unwrap_or(&self.empty_field_bind));
+            b.vertex(&mut rp, 1, &self.instance_buf);
             let array_passes = want_arrays.then(|| self.array_passes(gpu));
-            let draw_flsl =
-                |rp: &mut wgpu::RenderPass<'_>, buckets: &[FlslBucket]| {
-                    for &(mesh_idx, tex_key, bind_id, skinned, start, count) in buckets {
-                        let binding = &self.flsl_bindings[bind_id as usize];
-                        let shader = &self.flsl_shaders[binding.shader.0 as usize];
-                        let mesh = &self.meshes[mesh_idx];
-                        let bind = match tex_key {
-                            Some(t) => &self.textures[t as usize].bind,
-                            None => &mesh.tex_bind,
-                        };
-                        rp.set_pipeline(if skinned { shader.skin_pipeline() } else { &shader.pipeline });
-                        rp.set_bind_group(1, bind, &[]);
-                        rp.set_bind_group(3, &binding.bind, &[]);
-                        rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                        rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                        rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
-                    }
-                };
             // The opaque buckets are exactly those the prepass drew
             // (`upload_opaque_depth_draws` keeps the same instances by the
             // same rule), so once it primed this depth they draw where it
@@ -5269,49 +5440,51 @@ impl Raster {
             if equal && !owns {
                 let (ground, rest): (Vec<_>, Vec<_>) =
                     opaque_buckets.iter().partition(|&&(_, _, start, _)| raws.get(start as usize).is_some_and(is_terrain));
-                rp.set_pipeline(&self.pipeline);
-                draw(&mut rp, &ground);
-                rp.set_pipeline(&self.primed_pipeline);
-                draw(&mut rp, &rest);
+                b.pipeline(&mut rp, &self.pipeline);
+                self.draw_buckets(&mut rp, &mut b, &ground);
+                b.pipeline(&mut rp, &self.primed_pipeline);
+                self.draw_buckets(&mut rp, &mut b, &rest);
                 equal_buckets = rest.len();
             } else {
-                rp.set_pipeline(if equal { &self.primed_pipeline } else { &self.pipeline });
-                draw(&mut rp, &opaque_buckets);
+                b.pipeline(&mut rp, if equal { &self.primed_pipeline } else { &self.pipeline });
+                self.draw_buckets(&mut rp, &mut b, &opaque_buckets);
                 equal_buckets = if equal { opaque_buckets.len() } else { 0 };
             }
             if !skin_opaque.is_empty() {
-                rp.set_pipeline(if equal { &self.skin_primed_pipeline } else { &self.skin_pipeline });
-                draw(&mut rp, &skin_opaque);
+                b.pipeline(&mut rp, if equal { &self.skin_primed_pipeline } else { &self.skin_pipeline });
+                self.draw_buckets(&mut rp, &mut b, &skin_opaque);
             }
             if let Some(ap) = array_passes.filter(|_| !array_opaque.is_empty()) {
-                rp.set_pipeline(if equal { &ap.primed } else { &ap.pipeline });
-                draw(&mut rp, &array_opaque);
+                b.pipeline(&mut rp, if equal { &ap.primed } else { &ap.pipeline });
+                self.draw_buckets(&mut rp, &mut b, &array_opaque);
                 if equal {
                     equal_buckets += array_opaque.len();
                 }
             }
-            draw_flsl(&mut rp, &flsl_opaque);
+            self.draw_flsl_buckets(&mut rp, &mut b, &flsl_opaque);
             if !transparent_buckets.is_empty() {
                 let mut bound: Option<bool> = None;
-                for b in &transparent_buckets {
-                    let a = in_array(b);
+                for t in &transparent_buckets {
+                    let a = in_array(t);
                     if bound != Some(a) {
                         match (a, array_passes) {
-                            (true, Some(ap)) => rp.set_pipeline(&ap.transparent),
-                            _ => rp.set_pipeline(&self.transparent_pipeline),
+                            (true, Some(ap)) => b.pipeline(&mut rp, &ap.transparent),
+                            _ => b.pipeline(&mut rp, &self.transparent_pipeline),
                         }
                         bound = Some(a);
                     }
-                    draw(&mut rp, std::slice::from_ref(b));
+                    self.draw_buckets(&mut rp, &mut b, std::slice::from_ref(t));
                 }
             }
             if !skin_blended.is_empty() {
-                rp.set_pipeline(&self.skin_transparent_pipeline);
-                draw(&mut rp, &skin_blended);
+                b.pipeline(&mut rp, &self.skin_transparent_pipeline);
+                self.draw_buckets(&mut rp, &mut b, &skin_blended);
             }
-            draw_flsl(&mut rp, &flsl_blended);
+            self.draw_flsl_buckets(&mut rp, &mut b, &flsl_blended);
+            counts = b.n;
         }
-        gpu.queue.submit([encoder.finish()]);
+        self.note_pass(counts, rec);
+        self.submit(gpu, encoder);
         self.last_pass_equal_buckets = equal_buckets;
     }
 
@@ -5331,6 +5504,7 @@ impl Raster {
         skins: &[SkinDraw],
         field: Option<&wgpu::BindGroup>,
     ) {
+        let bucket_t = floptle_core::profile::Span::new();
         let mut raws: Vec<InstanceRaw> = Vec::new();
         let opaque = self.bucket_flsl(flsl, skins, &mut raws, |sh| sh.reads_scene_color && sh.opaque);
         let blended = self.bucket_flsl(flsl, skins, &mut raws, |sh| sh.reads_scene_color && !sh.opaque);
@@ -5340,9 +5514,12 @@ impl Raster {
         self.begin_pass(gpu, globals);
         self.ensure_instances(gpu, raws.len() as u32);
         gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
+        self.note_bucket(bucket_t);
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-scene-readers") });
+        let rec = floptle_core::profile::Span::new();
+        let counts;
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("raster-scene-readers"),
@@ -5361,26 +5538,16 @@ impl Raster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_bind_group(0, &self.globals_bind, &[]);
-            rp.set_bind_group(2, field.unwrap_or(&self.empty_field_bind), &[]);
-            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
-            for &(mesh_idx, tex_key, bind_id, skinned, start, count) in opaque.iter().chain(&blended) {
-                let binding = &self.flsl_bindings[bind_id as usize];
-                let shader = &self.flsl_shaders[binding.shader.0 as usize];
-                let mesh = &self.meshes[mesh_idx];
-                let bind = match tex_key {
-                    Some(t) => &self.textures[t as usize].bind,
-                    None => &mesh.tex_bind,
-                };
-                rp.set_pipeline(if skinned { shader.skin_pipeline() } else { &shader.pipeline });
-                rp.set_bind_group(1, bind, &[]);
-                rp.set_bind_group(3, &binding.bind, &[]);
-                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
-            }
+            let mut b = Bound::new(self.elide_state);
+            b.group(&mut rp, 0, &self.globals_bind);
+            b.group(&mut rp, 2, field.unwrap_or(&self.empty_field_bind));
+            b.vertex(&mut rp, 1, &self.instance_buf);
+            self.draw_flsl_buckets(&mut rp, &mut b, &opaque);
+            self.draw_flsl_buckets(&mut rp, &mut b, &blended);
+            counts = b.n;
         }
-        gpu.queue.submit([encoder.finish()]);
+        self.note_pass(counts, rec);
+        self.submit(gpu, encoder);
     }
 
     /// **The refraction pass**: draw only the surfaces light passes through.
@@ -5414,6 +5581,7 @@ impl Raster {
         cuts: &[f32],
         layer: usize,
     ) {
+        let bucket_t = floptle_core::profile::Span::new();
         self.begin_pass(gpu, globals);
         let glassy = self.transmissive_extras();
         let is_glass = |raw: &InstanceRaw| {
@@ -5439,10 +5607,13 @@ impl Raster {
         }
         self.ensure_instances(gpu, raws.len() as u32);
         gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
+        self.note_bucket(bucket_t);
 
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-glass") });
+        let rec = floptle_core::profile::Span::new();
+        let counts;
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("raster-glass"),
@@ -5467,49 +5638,34 @@ impl Raster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_bind_group(0, &self.globals_bind, &[]);
-            rp.set_bind_group(2, field.unwrap_or(&self.empty_field_bind), &[]);
-            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
+            let mut b = Bound::new(self.elide_state);
+            b.group(&mut rp, 0, &self.globals_bind);
+            b.group(&mut rp, 2, field.unwrap_or(&self.empty_field_bind));
+            b.vertex(&mut rp, 1, &self.instance_buf);
             // The OPAQUE pipeline: glass composites the scene
             // behind it itself, through `transmission`. Blending it as well
             // would mix the same background in twice and make every pane read as
             // washed out — and would drop the depth write that lets one piece of
             // glass sit in front of another.
-            rp.set_pipeline(&self.pipeline);
+            b.pipeline(&mut rp, &self.pipeline);
             let mut arrayed = false;
-            for &(mesh_idx, tex_key, start, count) in &buckets {
-                let mesh = &self.meshes[mesh_idx];
-                let bind = match tex_key {
-                    Some(t) => &self.textures[t as usize].bind,
-                    None => &mesh.tex_bind,
-                };
+            for bucket in &buckets {
                 // A texture-array set binds only the array build's pipeline.
-                let a = tex_key.is_some_and(|t| self.pools.array_ids.contains(&t));
+                let a = bucket.1.is_some_and(|t| self.pools.array_ids.contains(&t));
                 if a != arrayed {
-                    rp.set_pipeline(if a { &self.array_passes(gpu).pipeline } else { &self.pipeline });
+                    b.pipeline(&mut rp, if a { &self.array_passes(gpu).pipeline } else { &self.pipeline });
                     arrayed = a;
                 }
-                rp.set_bind_group(1, bind, &[]);
-                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+                self.draw_buckets(&mut rp, &mut b, std::slice::from_ref(bucket));
             }
             if !skin_buckets.is_empty() {
-                rp.set_pipeline(&self.skin_pipeline);
-                for &(mesh_idx, tex_key, start, count) in &skin_buckets {
-                    let mesh = &self.meshes[mesh_idx];
-                    let bind = match tex_key {
-                        Some(t) => &self.textures[t as usize].bind,
-                        None => &mesh.tex_bind,
-                    };
-                    rp.set_bind_group(1, bind, &[]);
-                    rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                    rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
-                }
+                b.pipeline(&mut rp, &self.skin_pipeline);
+                self.draw_buckets(&mut rp, &mut b, &skin_buckets);
             }
+            counts = b.n;
         }
-        gpu.queue.submit([encoder.finish()]);
+        self.note_pass(counts, rec);
+        self.submit(gpu, encoder);
     }
 
     /// The depth target the last prepass wrote (valid once one has run) — what
@@ -5665,6 +5821,8 @@ impl Raster {
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("light2d") });
+        let rec = floptle_core::profile::Span::new();
+        let mut counts = EncodeStats::default();
         {
             fn attach(view: &wgpu::TextureView) -> Option<wgpu::RenderPassColorAttachment<'_>> {
                 Some(wgpu::RenderPassColorAttachment {
@@ -5697,8 +5855,9 @@ impl Raster {
             // G-buffer texel (0,0) and the accumulation's integer reads line up
             // whatever size the buffer happens to have grown to.
             rp.set_viewport(0.0, 0.0, size.0.max(1) as f32, size.1.max(1) as f32, 0.0, 1.0);
-            rp.set_bind_group(0, &self.light2d.fill_bind, &[]);
-            rp.set_vertex_buffer(1, self.light2d.instance_slice());
+            let mut b = Bound::new(self.elide_state);
+            b.group(&mut rp, 0, &self.light2d.fill_bind);
+            b.vertex(&mut rp, 1, self.light2d.instance_buffer());
             for (pipeline, list) in [
                 (&self.light2d.fill_pipeline, &buckets),
                 (&self.light2d.occlude_pipeline, &occluder_buckets),
@@ -5706,7 +5865,7 @@ impl Raster {
                 if list.is_empty() {
                     continue;
                 }
-                rp.set_pipeline(pipeline);
+                b.pipeline(&mut rp, pipeline);
                 for &(mesh_idx, tex_key, start, count) in list {
                     let mesh = &self.meshes[mesh_idx];
                     // The material texture when one overrides, else the mesh's
@@ -5716,12 +5875,10 @@ impl Raster {
                         .and_then(|t| self.textures.get(t as usize))
                         .map(|t| &t.bind)
                         .unwrap_or(&mesh.tex_bind);
-                    rp.set_bind_group(1, bind, &[]);
-                    rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                    rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+                    b.mesh(&mut rp, &mesh.gpu_mesh, bind, start, count);
                 }
             }
+            counts.add(&b.n);
         }
         {
             let Some(read) = self.light2d.read_bind() else { return };
@@ -5750,18 +5907,21 @@ impl Raster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_bind_group(0, &self.light2d.lights_bind, &[]);
-            rp.set_bind_group(1, read, &[]);
+            let mut b = Bound::new(self.elide_state);
+            b.group(&mut rp, 0, &self.light2d.lights_bind);
+            b.group(&mut rp, 1, read);
             // The signed correction, in its two non-negative halves.
             // Same attachments, same bind groups, same
             // fullscreen triangle — only the blend operation differs, so this is
             // two draws rather than two passes.
-            rp.set_pipeline(&self.light2d.darken_pipeline);
-            rp.draw(0..3, 0..1);
-            rp.set_pipeline(&self.light2d.brighten_pipeline);
-            rp.draw(0..3, 0..1);
+            b.pipeline(&mut rp, &self.light2d.darken_pipeline);
+            b.draw(&mut rp, 0..3, 0..1);
+            b.pipeline(&mut rp, &self.light2d.brighten_pipeline);
+            b.draw(&mut rp, 0..3, 0..1);
+            counts.add(&b.n);
         }
-        gpu.queue.submit([encoder.finish()]);
+        self.note_pass(counts, rec);
+        self.submit(gpu, encoder);
     }
 
     /// Bucket and upload the draws a depth-only pass renders: opaque instances,
@@ -5872,23 +6032,16 @@ impl Raster {
 
     /// Depth for the surfaces of shaders with `output offset`, where they
     /// have moved to. The pass's group(0) is already bound.
-    fn draw_displaced_depth(&self, rp: &mut wgpu::RenderPass<'_>, buckets: &[FlslBucket]) {
+    fn draw_displaced_depth<'a>(&'a self, rp: &mut wgpu::RenderPass<'_>, b: &mut Bound<'a>, buckets: &[FlslBucket]) {
         for &(mesh_idx, tex_key, bind_id, skinned, start, count) in buckets {
             let binding = &self.flsl_bindings[bind_id as usize];
             let Some(pipeline) = self.flsl_shaders[binding.shader.0 as usize].displaced_depth(skinned) else {
                 continue;
             };
             let mesh = &self.meshes[mesh_idx];
-            let bind = match tex_key {
-                Some(t) => &self.textures[t as usize].bind,
-                None => &mesh.tex_bind,
-            };
-            rp.set_pipeline(pipeline);
-            rp.set_bind_group(1, bind, &[]);
-            rp.set_bind_group(3, &binding.bind, &[]);
-            rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-            rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+            b.pipeline(rp, pipeline);
+            b.group(rp, 3, &binding.bind);
+            b.mesh(rp, &mesh.gpu_mesh, self.bucket_bind(mesh, tex_key), start, count);
         }
     }
 
@@ -5972,6 +6125,7 @@ impl Raster {
         if globals.sun_map[0] < 0.5 {
             return;
         }
+        let bucket_t = floptle_core::profile::Span::new();
         let globals = self.sun_map_lanes_for_texture(globals);
         let size = self.sun_map_size;
         let mut far = globals;
@@ -5989,9 +6143,12 @@ impl Raster {
         if let Some(g) = &near {
             gpu.queue.write_buffer(&self.sun_near_globals_buf, 0, bytemuck::bytes_of(g));
         }
+        self.note_bucket(bucket_t);
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-sun-map") });
+        let rec = floptle_core::profile::Span::new();
+        let counts;
         {
             // One render pass for both, cleared once: the near cascade as a
             // second pass that loaded the cleared texture cost three to four
@@ -6008,13 +6165,16 @@ impl Raster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
-            self.record_sun_cascade(gpu, &mut rp, &far_buckets, [0, size], &self.globals_bind_sunpass);
+            let mut b = Bound::new(self.elide_state);
+            b.vertex(&mut rp, 1, &self.instance_buf);
+            self.record_sun_cascade(gpu, &mut rp, &mut b, &far_buckets, [0, size], &self.globals_bind_sunpass);
             if let Some((buckets, _)) = &near_buckets {
-                self.record_sun_cascade(gpu, &mut rp, buckets, [size, size], &self.globals_bind_sunpass_near);
+                self.record_sun_cascade(gpu, &mut rp, &mut b, buckets, [size, size], &self.globals_bind_sunpass_near);
             }
+            counts = b.n;
         }
-        gpu.queue.submit([encoder.finish()]);
+        self.note_pass(counts, rec);
+        self.submit(gpu, encoder);
         if let Some((_, counts)) = near_buckets {
             self.sun_near_casts = counts;
         }
@@ -6048,10 +6208,12 @@ impl Raster {
     /// starts `x` texels across the texture (`at` = [x, size]), through
     /// `globals` (the far cascade's group over the frame's globals, or the
     /// near one's over its own).
+    #[allow(clippy::too_many_arguments)]
     fn record_sun_cascade<'a>(
         &'a self,
         gpu: &Gpu,
-        rp: &mut wgpu::RenderPass<'a>,
+        rp: &mut wgpu::RenderPass<'_>,
+        b: &mut Bound<'a>,
         (buckets, skin_buckets, displaced): &DepthBuckets,
         at: [u32; 2],
         globals: &'a wgpu::BindGroup,
@@ -6061,34 +6223,23 @@ impl Raster {
             buckets.iter().copied().partition(|b| b.1.is_some_and(|t| self.pools.array_ids.contains(&t)));
         let array_prepass = (!array_buckets.is_empty()).then(|| &self.array_passes(gpu).prepass);
         let [x, size] = at;
+        // Viewport and scissor are pass state the tracker does not hold;
+        // they leave every binding as it was.
         rp.set_viewport(x as f32, 0.0, size as f32, size as f32, 0.0, 1.0);
         rp.set_scissor_rect(x, 0, size, size);
-        rp.set_pipeline(&self.prepass_pipeline);
-        rp.set_bind_group(0, globals, &[]);
-        let draw = |rp: &mut wgpu::RenderPass<'a>, bs: &[(usize, Option<u32>, u32, u32)]| {
-            for &(mesh_idx, tex_key, start, count) in bs {
-                let mesh = &self.meshes[mesh_idx];
-                let bind = match tex_key {
-                    Some(t) => &self.textures[t as usize].bind,
-                    None => &mesh.tex_bind,
-                };
-                rp.set_bind_group(1, bind, &[]);
-                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
-            }
-        };
-        draw(rp, &buckets);
+        b.pipeline(rp, &self.prepass_pipeline);
+        b.group(rp, 0, globals);
+        self.draw_buckets(rp, b, &buckets);
         if let Some(pipeline) = array_prepass {
-            rp.set_pipeline(pipeline);
-            draw(rp, &array_buckets);
-            rp.set_pipeline(&self.prepass_pipeline);
+            b.pipeline(rp, pipeline);
+            self.draw_buckets(rp, b, &array_buckets);
+            b.pipeline(rp, &self.prepass_pipeline);
         }
         if !skin_buckets.is_empty() {
-            rp.set_pipeline(&self.skin_prepass_pipeline);
-            draw(rp, skin_buckets);
+            b.pipeline(rp, &self.skin_prepass_pipeline);
+            self.draw_buckets(rp, b, skin_buckets);
         }
-        self.draw_displaced_depth(rp, displaced);
+        self.draw_displaced_depth(rp, b, displaced);
     }
 
     /// Returns nothing. "Was the target reallocated?" is not "does the bind
@@ -6107,11 +6258,13 @@ impl Raster {
         skins: &[SkinDraw],
         main_depth: &wgpu::Texture,
     ) {
+        let bucket_t = floptle_core::profile::Span::new();
         let size = main_depth.size();
         self.claim_prepass(gpu, size);
         self.begin_pass(gpu, globals);
 
         let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, instances, &|_| true, flsl, skins);
+        self.note_bucket(bucket_t);
         // Buckets bound to a texture-array set draw through the array build.
         let (array_buckets, buckets): (Vec<_>, Vec<_>) =
             buckets.into_iter().partition(|b| b.1.is_some_and(|t| self.pools.array_ids.contains(&t)));
@@ -6121,6 +6274,8 @@ impl Raster {
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-prepass") });
+        let rec = floptle_core::profile::Span::new();
+        let counts;
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("raster-prepass"),
@@ -6137,33 +6292,22 @@ impl Raster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_pipeline(&self.prepass_pipeline);
-            rp.set_bind_group(0, &self.globals_bind, &[]);
-            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
-            let draw = |rp: &mut wgpu::RenderPass<'_>, bs: &[(usize, Option<u32>, u32, u32)]| {
-                for &(mesh_idx, tex_key, start, count) in bs {
-                    let mesh = &self.meshes[mesh_idx];
-                    let bind = match tex_key {
-                        Some(t) => &self.textures[t as usize].bind,
-                        None => &mesh.tex_bind,
-                    };
-                    rp.set_bind_group(1, bind, &[]);
-                    rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                    rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
-                }
-            };
-            draw(&mut rp, &buckets);
+            let mut b = Bound::new(self.elide_state);
+            b.pipeline(&mut rp, &self.prepass_pipeline);
+            b.group(&mut rp, 0, &self.globals_bind);
+            b.vertex(&mut rp, 1, &self.instance_buf);
+            self.draw_buckets(&mut rp, &mut b, &buckets);
             if !array_buckets.is_empty() {
-                rp.set_pipeline(&self.array_passes(gpu).prepass);
-                draw(&mut rp, &array_buckets);
-                rp.set_pipeline(&self.prepass_pipeline);
+                b.pipeline(&mut rp, &self.array_passes(gpu).prepass);
+                self.draw_buckets(&mut rp, &mut b, &array_buckets);
+                b.pipeline(&mut rp, &self.prepass_pipeline);
             }
             if !skin_buckets.is_empty() {
-                rp.set_pipeline(&self.skin_prepass_pipeline);
-                draw(&mut rp, &skin_buckets);
+                b.pipeline(&mut rp, &self.skin_prepass_pipeline);
+                self.draw_buckets(&mut rp, &mut b, &skin_buckets);
             }
-            self.draw_displaced_depth(&mut rp, &displaced);
+            self.draw_displaced_depth(&mut rp, &mut b, &displaced);
+            counts = b.n;
         }
         // Prime the frame's depth buffer with the prepass result.
         encoder.copy_texture_to_texture(
@@ -6181,7 +6325,8 @@ impl Raster {
             },
             size,
         );
-        gpu.queue.submit([encoder.finish()]);
+        self.note_pass(counts, rec);
+        self.submit(gpu, encoder);
         self.depth_primed = true;
     }
 
@@ -6241,6 +6386,7 @@ impl Raster {
         size: wgpu::Extent3d,
     ) {
         self.surface_active = None;
+        let bucket_t = floptle_core::profile::Span::new();
         const OPAQUE_CUTOFF: f32 = 0.999;
         // The colour pass's own split (`draw_scene_with`), from the other side.
         let flags: Vec<u32> = self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| c[1][0] as u32).collect();
@@ -6289,11 +6435,14 @@ impl Raster {
         gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
         let (array_buckets, buckets): (Vec<_>, Vec<_>) =
             buckets.into_iter().partition(|b| b.1.is_some_and(|t| self.pools.array_ids.contains(&t)));
+        self.note_bucket(bucket_t);
         let (plain, skinned) = self.surface_pipelines(gpu);
 
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-surface-depth") });
+        let rec = floptle_core::profile::Span::new();
+        let counts;
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("raster-surface-depth"),
@@ -6310,56 +6459,41 @@ impl Raster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_bind_group(0, &self.globals_bind, &[]);
-            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
-            let draw = |rp: &mut wgpu::RenderPass<'_>, mesh_idx: usize, tex_key: Option<u32>, start: u32, count: u32| {
-                let mesh = &self.meshes[mesh_idx];
-                let bind = match tex_key {
-                    Some(t) => &self.textures[t as usize].bind,
-                    None => &mesh.tex_bind,
-                };
-                rp.set_bind_group(1, bind, &[]);
-                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+            let mut b = Bound::new(self.elide_state);
+            b.group(&mut rp, 0, &self.globals_bind);
+            b.vertex(&mut rp, 1, &self.instance_buf);
+            let flsl_as_plain = |skinned: bool| {
+                flsl_plain
+                    .iter()
+                    .filter(move |d| d.3 == skinned)
+                    .map(|&(mesh_idx, tex_key, _, _, start, count)| (mesh_idx, tex_key, start, count))
+                    .collect::<Vec<_>>()
             };
             // Unmoved surfaces, shader-drawn or not, through the built-in
             // vertex stage: plain, then skinned, then the array build's.
-            rp.set_pipeline(plain);
-            for &(mesh_idx, tex_key, start, count) in &buckets {
-                draw(&mut rp, mesh_idx, tex_key, start, count);
-            }
-            for &(mesh_idx, tex_key, _, is_skinned, start, count) in &flsl_plain {
-                if !is_skinned {
-                    draw(&mut rp, mesh_idx, tex_key, start, count);
-                }
-            }
-            rp.set_pipeline(skinned);
-            for &(mesh_idx, tex_key, start, count) in &skin_buckets {
-                draw(&mut rp, mesh_idx, tex_key, start, count);
-            }
-            for &(mesh_idx, tex_key, _, is_skinned, start, count) in &flsl_plain {
-                if is_skinned {
-                    draw(&mut rp, mesh_idx, tex_key, start, count);
-                }
-            }
+            b.pipeline(&mut rp, plain);
+            self.draw_buckets(&mut rp, &mut b, &buckets);
+            self.draw_buckets(&mut rp, &mut b, &flsl_as_plain(false));
+            b.pipeline(&mut rp, skinned);
+            self.draw_buckets(&mut rp, &mut b, &skin_buckets);
+            self.draw_buckets(&mut rp, &mut b, &flsl_as_plain(true));
             if !array_buckets.is_empty() {
-                rp.set_pipeline(self.surface_array_pipeline(gpu));
-                for &(mesh_idx, tex_key, start, count) in &array_buckets {
-                    draw(&mut rp, mesh_idx, tex_key, start, count);
-                }
+                b.pipeline(&mut rp, self.surface_array_pipeline(gpu));
+                self.draw_buckets(&mut rp, &mut b, &array_buckets);
             }
             for &(mesh_idx, tex_key, bind_id, is_skinned, start, count) in &flsl_moved {
                 let binding = &self.flsl_bindings[bind_id as usize];
                 let Some(pipeline) = self.flsl_shaders[binding.shader.0 as usize].displaced_surface(is_skinned) else {
                     continue;
                 };
-                rp.set_pipeline(pipeline);
-                rp.set_bind_group(3, &binding.bind, &[]);
-                draw(&mut rp, mesh_idx, tex_key, start, count);
+                b.pipeline(&mut rp, pipeline);
+                b.group(&mut rp, 3, &binding.bind);
+                self.draw_buckets(&mut rp, &mut b, &[(mesh_idx, tex_key, start, count)]);
             }
+            counts = b.n;
         }
-        gpu.queue.submit([encoder.finish()]);
+        self.note_pass(counts, rec);
+        self.submit(gpu, encoder);
     }
 
     /// The target the last [`Self::surface_depth_pass`] wrote, or `None` when
@@ -6411,6 +6545,78 @@ impl Raster {
     /// default), or draw every opaque one the frame gives it, as before.
     pub fn set_sun_map_cull(&mut self, on: bool) {
         self.sun_map_cull = on;
+    }
+
+    /// Skip a state set in a render pass when the same object is already
+    /// bound in that slot (the default), or issue every one as before. The
+    /// same picture either way, which is what a test compares; only the
+    /// commands recorded differ ([`Self::last_pass_encode`]).
+    pub fn set_state_elision(&mut self, on: bool) {
+        self.elide_state = on;
+    }
+
+    /// What the last render pass recorded: its draws and the state sets
+    /// issued and skipped around them.
+    pub fn last_pass_encode(&self) -> EncodeStats {
+        self.encode_last
+    }
+
+    /// What every pass encoded since the last call, CPU times included, and
+    /// start counting again. A caller that takes these once a frame reads a
+    /// frame's worth.
+    pub fn take_encode_stats(&mut self) -> EncodeStats {
+        std::mem::take(&mut self.encode_frame)
+    }
+
+    /// A render pass is done: its counts become the last pass's and join the
+    /// totals. `rec` is when its recording began.
+    fn note_pass(&mut self, mut n: EncodeStats, rec: floptle_core::profile::Span) {
+        n.record_ms = rec.ms();
+        self.encode_last = n;
+        self.encode_frame.add(&n);
+    }
+
+    /// Bucketing and uploads for a pass took the time since `t`.
+    fn note_bucket(&mut self, t: floptle_core::profile::Span) {
+        self.encode_frame.bucket_ms += t.ms();
+    }
+
+    /// Finish `encoder` and submit it, timed and counted.
+    fn submit(&mut self, gpu: &Gpu, encoder: wgpu::CommandEncoder) {
+        let t = floptle_core::profile::Span::new();
+        gpu.queue.submit([encoder.finish()]);
+        self.encode_frame.submits += 1;
+        self.encode_frame.submit_ms += t.ms();
+    }
+
+    /// The group(1) bind a bucket draws with: the material picture when one
+    /// overrides, else the mesh's own.
+    fn bucket_bind<'a>(&'a self, mesh: &'a RegisteredMesh, tex_key: Option<u32>) -> &'a wgpu::BindGroup {
+        match tex_key {
+            Some(t) => &self.textures[t as usize].bind,
+            None => &mesh.tex_bind,
+        }
+    }
+
+    /// Draw `buckets` (mesh, texture, start, count) through `b` with
+    /// whatever pipeline is bound.
+    fn draw_buckets<'a>(&'a self, rp: &mut wgpu::RenderPass<'_>, b: &mut Bound<'a>, buckets: &[(usize, Option<u32>, u32, u32)]) {
+        for &(mesh_idx, tex_key, start, count) in buckets {
+            let mesh = &self.meshes[mesh_idx];
+            b.mesh(rp, &mesh.gpu_mesh, self.bucket_bind(mesh, tex_key), start, count);
+        }
+    }
+
+    /// Draw `.flsl` buckets through their own pipelines and group(3).
+    fn draw_flsl_buckets<'a>(&'a self, rp: &mut wgpu::RenderPass<'_>, b: &mut Bound<'a>, buckets: &[FlslBucket]) {
+        for &(mesh_idx, tex_key, bind_id, skinned, start, count) in buckets {
+            let binding = &self.flsl_bindings[bind_id as usize];
+            let shader = &self.flsl_shaders[binding.shader.0 as usize];
+            let mesh = &self.meshes[mesh_idx];
+            b.pipeline(rp, if skinned { shader.skin_pipeline() } else { &shader.pipeline });
+            b.group(rp, 3, &binding.bind);
+            b.mesh(rp, &mesh.gpu_mesh, self.bucket_bind(mesh, tex_key), start, count);
+        }
     }
 }
 

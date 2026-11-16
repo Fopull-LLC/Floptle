@@ -796,13 +796,16 @@ impl Editor {
                 // The sun's shadow map first: the volumetric fog marched with
                 // the prepass reads it for its shafts.
                 gpu_mark!("sun shadow map");
+                let sun_t = floptle_core::profile::Span::new();
                 let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
                 if raster.set_sun_map_layout(gpu, sun_map_size, globals.sun_near[0] > 0.5) {
                     raymarch.set_sun_map(gpu, Some(raster.sun_map_view()));
                 }
                 raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
+                let sun_ms = sun_t.ms();
                 crate::shading::note_raster_counts(&mut profile.borrow_mut(), raster, &instances, &flsl_draws, &skin_draws);
                 let depth_wanted = raster.flsl_draws_want_depth(&flsl_draws);
+                let mut prepass_ms = 0.0;
                 let raster_clear = if rm_draw
                     || wants_prepass(
                         depth_wanted,
@@ -820,10 +823,12 @@ impl Editor {
                         if lowres { retro.depth_texture() } else { gpu.depth_texture() };
                     let hist = scene_history.as_ref().map(|h| (h.view(), h.sampler()));
                     gpu_mark!("depth prepass + volumetric fog");
+                    let prepass_t = floptle_core::profile::Span::new();
                     prepass_and_bind(
                         gpu, raster, raymarch, globals, &instances, &flsl_draws, &skin_draws,
                         depth_tex, hist, rm,
                     );
+                    prepass_ms = prepass_t.ms();
                     if rm_draw {
                         gpu_mark!("matter / terrain");
                         raymarch.draw_into_primed(gpu, color, depth, rm);
@@ -844,10 +849,12 @@ impl Editor {
                 // The surfaces that show the scene behind them wait for the
                 // capture the glass takes below, when there is one to take.
                 raster.defer_scene_readers(glass && scene_history.is_some());
+                let opaque_t = floptle_core::profile::Span::new();
                 raster.draw_scene_with(
                     gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,
                     raster_clear, Some(raymarch.field_bind()),
                 );
+                let opaque_ms = opaque_t.ms();
                 let composited = {
                     let d = if lowres {
                         retro.depth_texture()
@@ -887,6 +894,7 @@ impl Editor {
                 // frame's — which has the glass in it. Its tint would deepen
                 // every frame it stayed on screen.
                 gpu_mark!("glass");
+                let glass_t = floptle_core::profile::Span::new();
                 if glass && let Some(h) = scene_history.as_mut() {
                     // The stored picture is this frame's, taken from this
                     // camera, so the reprojection is the identity — say so, or
@@ -931,6 +939,7 @@ impl Editor {
                         );
                     }
                 }
+                let glass_ms = if glass && scene_history.is_some() { glass_t.ms() } else { 0.0 };
                 // Script-drawn 3D lines (draw.line — the map's orbit conics).
                 if !self.script_lines.is_empty() && !defer_lines {
                     let (through, tested) =
@@ -1129,6 +1138,7 @@ impl Editor {
                         uir.clear_backdrop();
                     }
                 }
+                let post_t = floptle_core::profile::Span::new();
                 {
                     let proj = cam.proj_matrix(aspect);
                     let (fog, water_depth) = crate::shading::ao_fog_and_water_depth(
@@ -1193,6 +1203,7 @@ impl Editor {
                     let timer = if timing { gpu_timer.as_deref_mut() } else { None };
                     post.run_timed(gpu, &ps, Some(&ssao_frame), out, post_shaders, any_after.then_some(&after as &dyn Fn(&wgpu::TextureView)), timer);
                 }
+                let post_ms = post_t.ms();
                 if lowres {
                     // Its own region: FSR 1 here runs at the window's full
                     // size, and would otherwise read as the post's finish.
@@ -1223,6 +1234,7 @@ impl Editor {
                     let mut p = profile.borrow_mut();
                     p.record(floptle_core::profile::Bucket::Render, ms);
                     p.record_part("renderPasses", ms);
+                    crate::shading::note_render_parts(&mut p, raster, [sun_ms, prepass_ms, opaque_ms, glass_ms, post_ms]);
                 }
 
                 // Named inside `untimed`: what the frame spends with nothing

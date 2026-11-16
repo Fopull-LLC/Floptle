@@ -1354,6 +1354,38 @@ pub(crate) fn note_raster_counts(
     prof.set_counts(c);
 }
 
+/// The renderPasses span's own pieces, as parts a game reads in
+/// `perf.parts()`, and what the raster passes encoded, into `perf.counts()`.
+/// `phases` is the CPU time of the sun map, the depth prepass, the opaque
+/// pass, the glass and the post chain, 0 for one that did not run. Takes the
+/// raster's encode totals, so they start again from here.
+pub(crate) fn note_render_parts(
+    prof: &mut floptle_core::profile::FrameProfile,
+    raster: &mut floptle_render::Raster,
+    phases: [f32; 5],
+) {
+    let e = raster.take_encode_stats();
+    let names = ["renderSunMap", "renderPrepass", "renderOpaque", "renderGlass", "renderPost"];
+    for (name, ms) in names.into_iter().zip(phases) {
+        if ms > 0.0 {
+            prof.record_part(name, ms);
+        }
+    }
+    prof.record_part("renderBucket", e.bucket_ms);
+    prof.record_part("renderRecord", e.record_ms);
+    prof.record_part("renderSubmit", e.submit_ms);
+    let mut c = prof.counts();
+    c.encode_passes = e.passes;
+    c.encode_draws = e.draws;
+    c.encode_pipeline_sets = e.pipeline_sets;
+    c.encode_bind_sets = e.bind_sets;
+    c.encode_vertex_sets = e.vertex_sets;
+    c.encode_index_sets = e.index_sets;
+    c.encode_skipped = e.skipped;
+    c.encode_submits = e.submits;
+    prof.set_counts(c);
+}
+
 /// Cache key for a mesh shadow-occluder bake: the asset path + the node's world
 /// rotation and scale quantized to 1e-3. Translation is absent —
 /// the volume anchors on the node's f64 translation per frame, so moving a map

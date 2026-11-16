@@ -1498,12 +1498,15 @@ impl Editor {
             // The sun's shadow map first: the volumetric fog marched with the
             // prepass reads it for its shafts.
             headless_mark!("sun shadow map");
+            let sun_t = floptle_core::profile::Span::new();
             let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
             if raster.set_sun_map_layout(gpu, light_node.shadow_map_size, globals.sun_near[0] > 0.5) {
                 raymarch.set_sun_map(gpu, Some(raster.sun_map_view()));
             }
             raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
+            let sun_ms = sun_t.ms();
             crate::shading::note_raster_counts(&mut self.script_host.profile().borrow_mut(), raster, &instances, &flsl_draws, &skin_draws);
+            let mut prepass_ms = 0.0;
             let wants_depth = wants_prepass(
                 raster.flsl_draws_want_depth(&flsl_draws),
                 ssr[0] > 0.5,
@@ -1516,10 +1519,12 @@ impl Editor {
             if let Some(dtex) = opts.depth_tex.filter(|_| wants_depth || rm_draw) {
                 let hist = history_bind.as_ref().map(|(v, s)| (v, s));
                 headless_mark!("depth prepass");
+                let prepass_t = floptle_core::profile::Span::new();
                 prepass_and_bind(
                     gpu, raster, raymarch, globals, &instances, &flsl_draws, &skin_draws,
                     dtex, hist, rm,
                 );
+                prepass_ms = prepass_t.ms();
             } else {
                 // No prepass this view: unbind, or this render would march the
                 // last view's depth buffer — a different camera at a different
@@ -1549,10 +1554,13 @@ impl Editor {
             };
             headless_mark!("opaque + lighting");
             raster.defer_scene_readers(glass);
+            let opaque_t = floptle_core::profile::Span::new();
             raster.draw_scene_with(
                 gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,
                 raster_clear, Some(raymarch.field_bind()),
             );
+            let opaque_ms = opaque_t.ms();
+            let mut glass_ms = 0.0;
             // The palette quantize, before the light — the same order the surface
             // path uses, and it has to be the same or a docked Game view would
             // posterize its lighting while the Scene view did not; the two
@@ -1582,6 +1590,7 @@ impl Editor {
                     HistorySlot::GamePanel => self.game_scene_history.as_mut(),
                 }
             {
+                let glass_t = floptle_core::profile::Span::new();
                 let mut glass_rm = rm;
                 glass_rm.ssr_prev_vp = view_proj.to_cols_array_2d();
                 raymarch.upload_globals(gpu, glass_rm);
@@ -1612,6 +1621,7 @@ impl Editor {
                         Some(raymarch.field_bind()),
                     );
                 }
+                glass_ms = glass_t.ms();
             }
             // Script-drawn 3D lines (draw.line — the map's orbit conics).
             let shapes = !opts.overlay;
@@ -1672,6 +1682,10 @@ impl Editor {
             }
             if offscreen_timed && let Some(t) = self.gpu_timer.as_mut() {
                 t.mark_gap(gpu);
+            }
+            if timing {
+                let phases = [sun_ms, prepass_ms, opaque_ms, glass_ms, 0.0];
+                crate::shading::note_render_parts(&mut self.script_host.profile().borrow_mut(), raster, phases);
             }
         } else {
             // **A view that cannot draw says so.** This binds six pieces of the
