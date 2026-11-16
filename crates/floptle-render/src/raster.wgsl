@@ -185,7 +185,9 @@ fn fog_sun_tap(p: vec3<f32>) -> f32 {
 // buffer + a per-instance base offset lets painted nodes stay in their instanced
 // batches. Index 0 is a reserved dummy: paint_base == 0 means "unpainted".
 @group(0) @binding(1) var<storage, read> vpaint: array<u32>;
-// Terrain chunk colors, read as `tpaint[n0.w + vertex_index]`. Its own store rather
+// Terrain chunk colors, read as `tpaint[n0.w + vertex_index - tpaint[n0.w - 1]]`
+// (the word before a block holds the slot's first vertex in the geometry arena,
+// which `vertex_index` counts from). Its own store rather
 // than a region of `vpaint` because chunk meshes are re-extracted constantly (every
 // sculpt dab, every LOD change): their blocks must be freeable, and `vpaint`'s never
 // are. See `Raster::tpaint_buf`. Index 0 is the reserved dummy = "no terrain color".
@@ -1142,7 +1144,9 @@ fn flsl_local_light(pos_rel: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f3
 struct VsIn {
     // Indexes this vertex's slot in the mesh's `vpaint` block. Under an indexed draw
     // with base_vertex = 0 (what this pass issues) this is the index-buffer value —
-    // i.e. the same index the paint block was built against at import.
+    // i.e. the same index the paint block was built against at import. A terrain
+    // chunk in the shared geometry arena is the one exception: its indices count
+    // from the page, and `build_vs` takes its first vertex off for `tpaint`.
     @builtin(vertex_index) vid: u32,
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -1471,7 +1475,16 @@ fn build_vs(in: VsIn, pos: vec3<f32>, normal: vec3<f32>, tbase_in: u32, tsplat_i
     // the lane is not shared with anything). An instance never has both bases, so the
     // order of these two only decides which wins in a case that cannot arise.
     let tbase = tbase_in;
-    let tidx = min(tbase + in.vid, arrayLength(&tpaint) - 1u);
+    // A slot in the shared geometry arena (`geom_arena.rs`) has its indices
+    // offset by its first vertex there, so `vid` counts from the page, not
+    // the chunk. The word before every colour block holds that first vertex
+    // (0 for a mesh with buffers of its own), and the block is read from its
+    // own first vertex all the same. Unsigned arithmetic wraps, and the
+    // index is clamped: an uncoloured instance (tbase 0) reads a word it
+    // never uses.
+    let tlast = arrayLength(&tpaint) - 1u;
+    let tfirst = tpaint[min(max(tbase, 1u) - 1u, tlast)];
+    let tidx = min(tbase + in.vid - tfirst, tlast);
     out.vcolor = select(vc, unpack4x8unorm(tpaint[tidx]), tbase != 0u);
     // A vertex of a triangle where three materials meet: its edge lane points
     // at the triangle's three words in the same store and says which corner

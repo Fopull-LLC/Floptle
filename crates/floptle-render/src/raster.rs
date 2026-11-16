@@ -16,9 +16,11 @@ use crate::device::Gpu;
 use crate::mesh::{GpuMesh, MeshData, MeshId, TextureData, Vertex};
 
 mod texture_pool;
+mod geom_arena;
 mod view_plan;
 
 pub use view_plan::ViewPlan;
+use geom_arena::{ArenaRange, GeomArena};
 use view_plan::{ExtFlags, FlslClass};
 pub use texture_pool::{sizes_share_an_array, PoolLayer};
 
@@ -922,6 +924,9 @@ struct DynSlot {
     tpaint_base: u32,
     /// Always == `cap_verts` when `tpaint_base != 0` (the block is sized to the slot).
     tpaint_cap: u32,
+    /// Its range in the shared geometry arena; `None` for a slot with
+    /// buffers of its own (the arena off, or a mesh too big for a page).
+    arena: Option<ArenaRange>,
 }
 
 /// What the raster passes put into their command encoders: draws, the state
@@ -1073,7 +1078,7 @@ impl<'a> Bound<'a> {
     fn geometry(&mut self, rp: &mut wgpu::RenderPass<'_>, mesh: &'a GpuMesh, start: u32, count: u32) {
         self.vertex(rp, 0, &mesh.vbuf);
         self.index(rp, &mesh.ibuf);
-        rp.draw_indexed(0..mesh.index_count, 0, start..(start + count));
+        rp.draw_indexed(mesh.first_index..(mesh.first_index + mesh.index_count), 0, start..(start + count));
         self.n.draws += 1;
     }
 
@@ -1421,6 +1426,16 @@ pub struct Raster {
     /// Bumped whenever the start of `instance_buf` is written or the buffer
     /// is made again, so a [`ViewPlan`] can tell it is no longer there.
     instances_gen: u64,
+    /// The shared vertex and index buffers coloured dynamic slots take their
+    /// ranges from ([`geom_arena`]), so a run of terrain chunks binds them once.
+    arena: GeomArena,
+    /// Put new coloured dynamic slots in the arena (the default). Off gives
+    /// each its own buffers, as before: a debug switch for tests that compare
+    /// the two.
+    use_arena: bool,
+    /// One-element buffers a freed arena slot points at, so it holds no
+    /// page alive.
+    empty_geom: Option<(wgpu::Buffer, wgpu::Buffer)>,
     meshes: Vec<RegisteredMesh>,
     /// The last sun shadow map's opaque instances: how many it drew, and how
     /// many it was given ([`sun_map_draws`](Raster::sun_map_draws)).
@@ -2542,6 +2557,9 @@ impl Raster {
             instance_buf,
             instance_cap,
             instances_gen: 1,
+            arena: GeomArena::new(gpu),
+            use_arena: true,
+            empty_geom: None,
             meshes: Vec::new(),
             sun_map_casts: (0, 0),
             sun_near_casts: (0, 0),
@@ -4579,6 +4597,10 @@ impl Raster {
     /// Allocate (or re-use) a terrain-color block of exactly `cap` vertices, returning
     /// its base. Growth copies the live prefix on the GPU, so nothing is mirrored on
     /// the CPU. Returns 0 if `cap` is 0 or the store's f32-exact range is exhausted.
+    ///
+    /// Every block has one more word in front of it, at `base - 1`: the first
+    /// vertex of its slot's range in the geometry arena, which the shader takes
+    /// off `vertex_index` ([`Self::write_tpaint_first`]).
     fn tpaint_alloc(&mut self, gpu: &Gpu, cap: u32) -> u32 {
         if cap == 0 {
             return 0;
@@ -4590,7 +4612,8 @@ impl Raster {
         {
             return base;
         }
-        let base = self.tpaint_len;
+        // The word in front of the block, then the block.
+        let base = self.tpaint_len + 1;
         // The base rides `n0.w` as a plain f32 — exact only to 2^24. Refuse rather than
         // silently decode to a neighbouring block's colors (the vpaint rule, same reason).
         if base as u64 + cap as u64 > (1 << 24) {
@@ -4600,7 +4623,7 @@ impl Raster {
             );
             return 0;
         }
-        self.tpaint_len += cap;
+        self.tpaint_len += cap + 1;
 
         let needed = (self.tpaint_len as u64) * 4;
         if needed > self.tpaint_buf.size() {
@@ -4639,6 +4662,74 @@ impl Raster {
         b
     }
 
+    /// Write the word in front of colour block `tpaint_base`: the first vertex
+    /// of the slot's arena range (0 for a slot with buffers of its own), which
+    /// `vertex_index` counts from and the shader takes off it.
+    fn write_tpaint_first(gpu: &Gpu, tpaint: &wgpu::Buffer, tpaint_base: u32, arena: Option<&ArenaRange>) {
+        if tpaint_base == 0 {
+            return;
+        }
+        let first = arena.map_or(0, |r| r.v_off);
+        gpu.queue.write_buffer(tpaint, (tpaint_base as u64 - 1) * 4, bytemuck::bytes_of(&first));
+    }
+
+    /// Geometry for a dynamic slot of `cap_verts`/`cap_indices`: a range in
+    /// the shared arena when it is on, the slot has a colour block
+    /// (`tpaint_base`) and a page can hold it, else buffers of its own. When
+    /// a page had to grow, every slot on it takes up the page's new buffers
+    /// here.
+    ///
+    /// Only a slot with a colour block goes in: in the arena `vertex_index`
+    /// counts from the page, and the word in front of the colour block is
+    /// how the shader counts from the slot again. A slot without one (a
+    /// sprite, a tile map, a painted blockout's atlas) may be drawn with
+    /// vertex paint, read by `vertex_index` with nothing to correct it, so
+    /// it keeps buffers of its own. Terrain chunks and decals all have one.
+    fn place_dynamic(&mut self, gpu: &Gpu, cap_verts: u32, cap_indices: u32, tpaint_base: u32) -> (GpuMesh, Option<ArenaRange>) {
+        if self.empty_geom.is_none() {
+            let mesh = GpuMesh::with_capacity(gpu, 1, 1);
+            self.empty_geom = Some((mesh.vbuf, mesh.ibuf));
+        }
+        let (range, grown) =
+            if self.use_arena && tpaint_base != 0 { self.arena.alloc(gpu, cap_verts, cap_indices) } else { (None, None) };
+        if let Some(page) = grown {
+            let (vbuf, ibuf) = self.arena.buffers(page);
+            for m in &mut self.meshes {
+                if m.dynamic.as_ref().and_then(|d| d.arena).is_some_and(|r| r.page == page) {
+                    m.gpu_mesh.vbuf = vbuf.clone();
+                    m.gpu_mesh.ibuf = ibuf.clone();
+                }
+            }
+        }
+        let Some(range) = range else {
+            return (GpuMesh::with_capacity(gpu, cap_verts, cap_indices), None);
+        };
+        let (vbuf, ibuf) = self.arena.buffers(range.page);
+        (GpuMesh { vbuf: vbuf.clone(), ibuf: ibuf.clone(), index_count: 0, first_index: range.i_off }, Some(range))
+    }
+
+    /// What a dynamic slot draws with once its arena range is gone: nothing,
+    /// through buffers that hold no page alive.
+    fn empty_geometry(&self) -> GpuMesh {
+        let (vbuf, ibuf) = self.empty_geom.as_ref().expect("made with the first dynamic slot");
+        GpuMesh { vbuf: vbuf.clone(), ibuf: ibuf.clone(), index_count: 0, first_index: 0 }
+    }
+
+    /// Put new coloured dynamic slots (terrain chunks, decals) in the shared
+    /// geometry arena (on by default), or give each buffers of its own as
+    /// before. Slots made earlier keep what they have until they are resized.
+    /// A debug switch, for tests that compare the two.
+    pub fn set_geometry_arena(&mut self, on: bool) {
+        self.use_arena = on;
+    }
+
+    /// The shared geometry arena: pages in use, bytes they hold on the GPU,
+    /// and bytes written into them so far (slot writes and the copies a page
+    /// makes when it grows).
+    pub fn geometry_arena_stats(&self) -> (usize, u64, u64) {
+        (self.arena.pages(), self.arena.bytes(), self.arena.written)
+    }
+
     /// Create a dynamic mesh slot sized for `verts`/`indices` (with headroom) and, when
     /// `colored`, its paired terrain-color block. The slot draws nothing until
     /// [`replace_dynamic`](Self::replace_dynamic) fills it.
@@ -4653,8 +4744,8 @@ impl Raster {
         let cap_indices = slot_cap(indices);
         let tpaint_cap = if colored { cap_verts } else { 0 };
         let tpaint_base = self.tpaint_alloc(gpu, tpaint_cap);
-        let gpu_mesh = GpuMesh::with_capacity(gpu, cap_verts, cap_indices);
-        let slot = DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap };
+        let (gpu_mesh, arena) = self.place_dynamic(gpu, cap_verts, cap_indices, tpaint_base);
+        let slot = DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap, arena };
 
         // Every slot binds the same white picture the same way, so they all
         // share one bind: a run of chunks then binds it once, not per chunk.
@@ -4712,24 +4803,42 @@ impl Raster {
             // The color block is sized to the slot, so it regrows with it: hand the old
             // one back to the free-list (it is re-usable at its own capacity) and take a
             // new one. Skipping this is exactly the leak the separate store exists to stop.
-            let (old_base, old_cap, colored) =
-                (slot.tpaint_base, slot.tpaint_cap, slot.tpaint_base != 0);
+            let (old_base, old_cap, colored, old_arena) =
+                (slot.tpaint_base, slot.tpaint_cap, slot.tpaint_base != 0, slot.arena);
             if old_base != 0 {
                 self.tpaint_free.entry(old_cap).or_default().push(old_base);
             }
             let tpaint_cap = if colored { cap_verts } else { 0 };
             let tpaint_base = self.tpaint_alloc(gpu, tpaint_cap);
+            // Its old range goes back first, so the new one can take its place.
+            if let Some(r) = old_arena {
+                self.arena.free(r);
+            }
+            let (gpu_mesh, arena) = self.place_dynamic(gpu, cap_verts, cap_indices, tpaint_base);
             let m = &mut self.meshes[id.0 as usize];
-            m.gpu_mesh = GpuMesh::with_capacity(gpu, cap_verts, cap_indices);
-            m.dynamic = Some(DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap });
+            m.gpu_mesh = gpu_mesh;
+            m.dynamic = Some(DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap, arena });
         }
 
         let m = &mut self.meshes[id.0 as usize];
-        if !m.gpu_mesh.write(gpu, data) {
-            return false;
+        let arena = m.dynamic.as_ref().and_then(|d| d.arena);
+        match &arena {
+            // Only this slot's range is written: nothing else in the page moves.
+            Some(r) => {
+                if !self.arena.write(gpu, r, data) {
+                    return false;
+                }
+                m.gpu_mesh.index_count = data.indices.len() as u32;
+            }
+            None => {
+                if !m.gpu_mesh.write(gpu, data) {
+                    return false;
+                }
+            }
         }
         m.reach = mesh_reach(&data.vertices);
         let slot = m.dynamic.as_ref().expect("dynamic slot");
+        Self::write_tpaint_first(gpu, &self.tpaint_buf, slot.tpaint_base, arena.as_ref());
         if slot.tpaint_base != 0
             && let Some(colors) = data.colors.as_ref()
         {
@@ -4761,6 +4870,14 @@ impl Raster {
         if slot.tpaint_base != 0 {
             self.tpaint_free.entry(slot.tpaint_cap).or_default().push(slot.tpaint_base);
         }
+        if let Some(r) = slot.arena {
+            // Its range goes back, and it lets go of the page, so a page
+            // emptied by a planet unloading is freed.
+            self.arena.free(r);
+            let empty = self.empty_geometry();
+            self.meshes[id.0 as usize].gpu_mesh = empty;
+        }
+        let m = &mut self.meshes[id.0 as usize];
         m.gpu_mesh.index_count = 0; // stop drawing immediately, even before re-use
         if !self.dyn_free.contains(&id.0) {
             self.dyn_free.push(id.0);
@@ -4793,7 +4910,11 @@ impl Raster {
     /// capacity, which for a dynamic slot is more than it draws. 0 for a mesh
     /// that is not there.
     pub fn mesh_gpu_bytes(&self, id: MeshId) -> u64 {
-        self.meshes.get(id.0 as usize).map_or(0, |m| m.gpu_mesh.vbuf.size() + m.gpu_mesh.ibuf.size())
+        self.meshes.get(id.0 as usize).map_or(0, |m| match m.dynamic.as_ref().and_then(|d| d.arena) {
+            // Its share of the arena: the range it holds.
+            Some(r) => r.v_cap as u64 * std::mem::size_of::<Vertex>() as u64 + r.i_cap as u64 * 4,
+            None => m.gpu_mesh.vbuf.size() + m.gpu_mesh.ibuf.size(),
+        })
     }
 
     /// Bytes the terrain color store currently holds on the GPU (for budget probes).
@@ -5017,6 +5138,11 @@ impl Raster {
     /// `update_mesh_vertices` before the first draw (skinning does, every frame).
     pub fn clone_mesh(&mut self, gpu: &Gpu, src: MeshId) -> Option<MeshId> {
         let m = self.meshes.get(src.0 as usize)?;
+        // A slot in the shared arena has no buffer of its own to copy the
+        // size of; nothing clones one (skinned parts are upload-once meshes).
+        if m.dynamic.as_ref().is_some_and(|d| d.arena.is_some()) {
+            return None;
+        }
         let vbuf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mesh-verts-skin-variant"),
             size: m.gpu_mesh.vbuf.size(),
@@ -5028,6 +5154,7 @@ impl Raster {
                 vbuf,
                 ibuf: m.gpu_mesh.ibuf.clone(),
                 index_count: m.gpu_mesh.index_count,
+                first_index: m.gpu_mesh.first_index,
             },
             tex_bind: m.tex_bind.clone(),
             sampling: m.sampling,
@@ -5069,6 +5196,10 @@ impl Raster {
         let Some(m) = self.meshes.get(id.0 as usize) else {
             return Err("there is no such mesh".into());
         };
+        // A slot in the shared arena would be written over its page's start.
+        if m.dynamic.as_ref().is_some_and(|d| d.arena.is_some()) {
+            return Err("a terrain chunk slot is rewritten with replace_dynamic".into());
+        }
         let held = (m.gpu_mesh.vbuf.size() / std::mem::size_of::<Vertex>() as u64) as usize;
         if let Some(v) = vertices
             && v.len() != held
@@ -5129,7 +5260,8 @@ impl Raster {
     /// have the same length the mesh was registered with (the index buffer is unchanged);
     /// a mismatch or unknown id is ignored.
     pub fn update_mesh_vertices(&self, gpu: &Gpu, id: MeshId, verts: &[Vertex]) {
-        if let Some(m) = self.meshes.get(id.0 as usize) {
+        // A slot in the shared arena would be written over its page's start.
+        if let Some(m) = self.meshes.get(id.0 as usize).filter(|m| m.dynamic.as_ref().is_none_or(|d| d.arena.is_none())) {
             gpu.queue.write_buffer(&m.gpu_mesh.vbuf, 0, bytemuck::cast_slice(verts));
         }
     }

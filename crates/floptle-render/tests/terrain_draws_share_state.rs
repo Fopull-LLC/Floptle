@@ -21,7 +21,7 @@
 
 use floptle_core::{Material, Shading};
 use floptle_render::{
-    cube, instance_of, set_ext_index, EncodeStats, Globals, Gpu, InstanceRaw, MeshData, MeshId, Raster, SurfaceExtras,
+    cube, instance_of, instance_of_mat, set_ext_index, EncodeStats, Globals, Gpu, InstanceRaw, MaterialParams, MeshData, MeshId, Raster, SurfaceExtras,
     TexId, TexSampling, TextureData, ViewPlan,
 };
 use glam::{Mat4, Vec3};
@@ -343,4 +343,153 @@ fn the_passes_share_one_plan_a_view_and_draw_the_same_frame() {
             "the {what} differs in {differ} bytes when another view drew between the sun map and the prepass"
         );
     }
+}
+
+/// A chunk's mesh: a small box nudged in depth, a terrain colour for every
+/// vertex (so a colour read one vertex off shows), `grow` boxes of it.
+fn chunk_mesh(i: usize, half: f32, grow: usize, tint: u8) -> MeshData {
+    let mut data: MeshData = cube(half);
+    let one = data.clone();
+    for k in 1..grow {
+        let base = data.vertices.len() as u32;
+        data.vertices.extend(one.vertices.iter().map(|v| {
+            let mut v = *v;
+            v.pos[0] += k as f32 * half * 0.1;
+            v
+        }));
+        data.indices.extend(one.indices.iter().map(|&x| x + base));
+    }
+    for v in &mut data.vertices {
+        v.pos[2] += (i % 7) as f32 * 0.01;
+    }
+    let n = data.vertices.len();
+    data.colors = Some((0..n).map(|v| [(v * 37 % 256) as u8, (255 - v * 11 % 256) as u8, tint.wrapping_add((i * 13) as u8), 255]).collect());
+    data
+}
+
+/// 512 coloured chunk slots (each with its own block in the terrain colour
+/// store, read by vertex) and a textured cube among them, as `scene` lays
+/// them out.
+fn coloured_scene(gpu: &Gpu, raster: &mut Raster) -> (Scene, Vec<MeshId>, f32) {
+    let side = (CHUNKS as f32).sqrt().ceil() as usize;
+    let step = 2.0 / side as f32;
+    let mut instances = Vec::new();
+    let mut chunks = Vec::new();
+    for i in 0..CHUNKS {
+        let data = chunk_mesh(i, step * 0.4, 1, 0);
+        let id = raster.register_dynamic(gpu, data.vertices.len() as u32, data.indices.len() as u32, true);
+        assert!(raster.replace_dynamic(gpu, id, &data), "slot {i} took its mesh");
+        let (x, y) = ((i % side) as f32, (i / side) as f32);
+        let at = Vec3::new(-1.0 + step * (x + 0.5), -1.0 + step * (y + 0.5), 0.5);
+        let mut mp = MaterialParams::flat([1.0; 3]);
+        mp.terrain_paint_base = raster.dyn_paint_base(id);
+        chunks.push(id);
+        instances.push((id, None, instance_of_mat(Mat4::from_translation(at), &mp)));
+    }
+    let pixels = (0..16).flat_map(|i| if i % 2 == 0 { [255, 64, 0, 255] } else { [0, 64, 255, 255] }).collect();
+    let tex = raster.register_texture(gpu, &TextureData { pixels, width: 4, height: 4 }, TexSampling::default());
+    let boxy = raster.register(gpu, &cube(0.2), None);
+    instances.insert(CHUNKS / 2, (boxy, Some(tex), instance_of(Mat4::from_translation(Vec3::new(0.1, 0.1, 0.3)), [1.0; 3])));
+    (Scene { instances, mask: Vec::new() }, chunks, step * 0.4)
+}
+
+/// Each pass's encode counts and the colour frame and sun map, from one plan.
+fn planned_frame(gpu: &Gpu, raster: &mut Raster, s: &Scene, colour: &wgpu::Texture) -> ([EncodeStats; 3], [Vec<u8>; 2]) {
+    let view = colour.create_view(&wgpu::TextureViewDescriptor::default());
+    let globals = sun_globals();
+    let mut plan = raster.plan_view(&s.instances, &[], &[]);
+    raster.sun_shadow_pass_planned(gpu, globals, &mut plan, &[]);
+    let sun = raster.last_pass_encode();
+    raster.depth_prepass_planned(gpu, globals, &mut plan, gpu.depth_texture());
+    let prepass = raster.last_pass_encode();
+    raster.draw_scene_planned(gpu, &view, gpu.depth_view(), globals, &mut plan, Some([0.05, 0.05, 0.1, 1.0]), None);
+    let col = raster.last_pass_encode();
+    ([sun, prepass, col], [read(gpu, colour), read(gpu, raster.sun_map_texture())])
+}
+
+fn same(what: &str, a: &[u8], b: &[u8]) {
+    let first = &a[..4];
+    assert!(a.chunks(4).any(|c| c != first), "the {what} is one flat value: nothing drew");
+    let differ = a.iter().zip(b).filter(|(x, y)| x != y).count();
+    assert!(a == b, "the {what} differs in {differ} bytes between the shared arena and buffers of their own");
+}
+
+#[test]
+fn chunk_slots_share_their_buffers_and_draw_the_same_frame() {
+    let gpu = Gpu::headless(SIZE, SIZE);
+    if !gpu.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
+        // CI's OpenGL cannot build the raster pass.
+        return;
+    }
+    let colour = target(&gpu, "arena-colour", gpu.scene_format());
+    let raster_with = |arena: bool| {
+        let mut r = Raster::new(&gpu);
+        r.set_sun_map_layout(&gpu, 512, true);
+        r.set_geometry_arena(arena);
+        let (s, chunks, half) = coloured_scene(&gpu, &mut r);
+        (r, s, chunks, half)
+    };
+    let (mut on, mut s_on, chunks_on, half) = raster_with(true);
+    let (mut off, mut s_off, chunks_off, _) = raster_with(false);
+    let (pages, _, _) = on.geometry_arena_stats();
+
+    let (n_on, px_on) = planned_frame(&gpu, &mut on, &s_on, &colour);
+    let (n_off, px_off) = planned_frame(&gpu, &mut off, &s_off, &colour);
+    if let Ok(dir) = std::env::var("FLOPTLE_KEEP_SHOTS") {
+        std::fs::create_dir_all(&dir).ok();
+        floptle_render::probe::save_png(&gpu, &colour, &format!("{dir}/arena-off.png"));
+    }
+    for (pass, a, b) in [("sun map", n_on[0], n_off[0]), ("prepass", n_on[1], n_off[1]), ("colour", n_on[2], n_off[2])] {
+        assert_eq!(a.draws, b.draws, "the {pass} pass drew a different number of buckets from the arena");
+        assert!(a.draws as usize >= CHUNKS, "the {pass} pass drew {} buckets for {CHUNKS} chunks", a.draws);
+        // Buffers of their own: every chunk binds its own vertex and index
+        // buffer (the counter can see them).
+        assert!(b.vertex_sets as usize > CHUNKS && b.index_sets as usize > CHUNKS, "the {pass} pass with buffers of their own set {} vertex and {} index buffers", b.vertex_sets, b.index_sets);
+        // The arena: the instance buffer, a page, the cube's own and the
+        // page again after it, a few times at most.
+        let most = 2 * pages as u32 + 8;
+        assert!(a.vertex_sets <= most, "the {pass} pass set {} vertex buffers for {} draws from the arena", a.vertex_sets, a.draws);
+        assert!(a.index_sets <= most, "the {pass} pass set {} index buffers for {} draws from the arena", a.index_sets, a.draws);
+    }
+    assert!(pages >= 1, "the chunks went into no arena page");
+    same("colour", &px_on[0], &px_off[0]);
+    same("sun map", &px_on[1], &px_off[1]);
+    let undug = px_on[0].clone();
+
+    // A dig remeshes one chunk at the same size: only its own range is
+    // written, nothing else in the page, and the picture follows it.
+    let k = 100;
+    let dug = chunk_mesh(k, half * 0.7, 1, 90);
+    let (_, bytes, before) = on.geometry_arena_stats();
+    assert!(on.replace_dynamic(&gpu, chunks_on[k], &dug));
+    let (_, _, after) = on.geometry_arena_stats();
+    let own = (dug.vertices.len() * std::mem::size_of::<floptle_render::Vertex>() + dug.indices.len() * 4) as u64;
+    assert_eq!(after - before, own, "remeshing one chunk wrote {} bytes of an arena of {bytes}; its mesh is {own}", after - before);
+    assert!(off.replace_dynamic(&gpu, chunks_off[k], &dug));
+    // And one grows past its slot, so its range moves (and its colour block
+    // with it).
+    let big = chunk_mesh(k + 1, half, 60, 150);
+    assert!(on.replace_dynamic(&gpu, chunks_on[k + 1], &big));
+    assert!(off.replace_dynamic(&gpu, chunks_off[k + 1], &big));
+    // A resized slot has a new colour block: its instance says so, as the
+    // terrain's does when it is gathered again each frame.
+    for (raster, scene, id) in [(&on, &mut s_on, chunks_on[k + 1]), (&off, &mut s_off, chunks_off[k + 1])] {
+        let at = scene.instances.iter_mut().find(|(m, _, _)| *m == id).expect("the chunk's instance");
+        at.2.normal_mat[0][3] = raster.dyn_paint_base(id) as f32;
+    }
+    let (_, px_on) = planned_frame(&gpu, &mut on, &s_on, &colour);
+    if let Ok(dir) = std::env::var("FLOPTLE_KEEP_SHOTS") {
+        floptle_render::probe::save_png(&gpu, &colour, &format!("{dir}/arena-dug.png"));
+    }
+    let (_, px_off) = planned_frame(&gpu, &mut off, &s_off, &colour);
+    assert!(px_on[0] != undug, "the dig changed nothing in the picture");
+    same("colour after a dig", &px_on[0], &px_off[0]);
+    same("sun map after a dig", &px_on[1], &px_off[1]);
+
+    // A planet unloading lets go of every chunk: the pages go with them.
+    for id in chunks_on {
+        on.free_dynamic(id);
+    }
+    let (pages, bytes, _) = on.geometry_arena_stats();
+    assert_eq!((pages, bytes), (0, 0), "with every chunk freed the arena still holds {pages} pages, {bytes} bytes");
 }
