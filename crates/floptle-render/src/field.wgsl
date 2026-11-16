@@ -2053,6 +2053,10 @@ fn field_sweep(ro: vec3<f32>, l: vec3<f32>, max_d: f32, k: f32, within: FieldSet
 // The volumes get only that check here (`vnear`); their ray tests wait
 // for `sky_sweep_vols`, after the point read, which settles open water over
 // a deep bed without them.
+//
+// Only the pieces in `within` are looked at: everything for the op itself,
+// a subset where part of the field is answered some other way (the sky
+// cache bakes the still world and leaves the rest to the rays).
 struct SkySweep {
     vnear: u32,
     vmask: vec4<u32>,
@@ -2062,12 +2066,12 @@ struct SkySweep {
     t_end: vec4<f32>,
 };
 
-fn sky_sweep(ro: array<vec3<f32>, 4>, l: array<vec3<f32>, 4>, p: vec3<f32>, r: f32, lift: f32, max_d: f32, k: f32) -> SkySweep {
+fn sky_sweep(ro: array<vec3<f32>, 4>, l: array<vec3<f32>, 4>, p: vec3<f32>, r: f32, lift: f32, max_d: f32, k: f32, within: FieldSet) -> SkySweep {
     let pen_k = max(k, 1.0);
     var out = SkySweep(0u, vec4<u32>(0u), vec4<u32>(0u), vec4<bool>(false), vec4<bool>(false), vec4<f32>(0.0));
     let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (vol_absent(i)) { continue; }
+        if (vol_absent(i) || (within.vmask & (1u << i)) == 0u) { continue; }
         let c = G.vol_tight_c[i].xyz;
         let pen = (length(c - p) + lift) / pen_k;
         let q = max(abs(p - c) - G.vol_tight_h[i].xyz - vec3<f32>(vol_pad(i) + pen), vec3<f32>(0.0));
@@ -2080,7 +2084,7 @@ fn sky_sweep(ro: array<vec3<f32>, 4>, l: array<vec3<f32>, 4>, p: vec3<f32>, r: f
     // d < (s + lift/k + r) / (1 - 1/k), compared squared.
     let grow = 1.0 / (1.0 - 1.0 / pen_k);
     let reach = (lift / pen_k + r) * grow;
-    let bc = min(u32(G.params.y), 16u);
+    let bc = select(0u, min(u32(G.params.y), 16u), within.blobs);
     for (var i = 0u; i < bc; i = i + 1u) {
         let c = G.blobs[i].xyz;
         let keep = blob_bound(i) * grow + reach;
@@ -2096,6 +2100,7 @@ fn sky_sweep(ro: array<vec3<f32>, 4>, l: array<vec3<f32>, 4>, p: vec3<f32>, r: f
     }
     let pc = min(u32(G.prox_count.x), 32u);
     for (var i = 0u; i < pc; i = i + 1u) {
+        if ((within.pmask & (1u << i)) == 0u) { continue; }
         let bnd = prox_bound(i);
         let keep = bnd.w * grow + reach;
         if (dot(bnd.xyz - p, bnd.xyz - p) >= keep * keep) { continue; }
@@ -2108,7 +2113,7 @@ fn sky_sweep(ro: array<vec3<f32>, 4>, l: array<vec3<f32>, 4>, p: vec3<f32>, r: f
             }
         }
     }
-    let sc = min(u32(G.shape_meta.x), 4u);
+    let sc = select(0u, min(u32(G.shape_meta.x), 4u), within.shapes);
     for (var i = 0u; i < sc; i = i + 1u) {
         let c = G.shape_pos[i].xyz;
         let keep = G.shape_aux[i].x * grow + reach;
@@ -2524,6 +2529,13 @@ fn sky_ray_lift(i: u32, base: f32) -> f32 {
 // (k = 8), so a ray skimming flat open ground at the cone's widest angle
 // still counts as open.
 fn sky_occlusion(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
+    return sky_cone(p, n, reach, FIELD_ALL);
+}
+
+// `sky_occlusion`'s cone over only the pieces in `within`: what the four
+// rays from `p` would see if the field held nothing else. `FIELD_ALL` is
+// the op itself.
+fn sky_cone(p: vec3<f32>, n: vec3<f32>, reach: f32, within: FieldSet) -> f32 {
     const K: f32 = 8.0;
     let far = max(reach, 0.01);
     // How far from `p` anything can matter to a ray. It starts `lift` off
@@ -2546,7 +2558,7 @@ fn sky_occlusion(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
         ro[i] = p + n * sky_ray_lift(i, base);
         dir[i] = sky_ray_dir(i, t, b, n);
     }
-    var w = sky_sweep(ro, dir, p, SKY_LIFT_CAP + max(SKY_LIFT_CAP, far) * (1.0 + 1.0 / K), SKY_LIFT_CAP, far, K);
+    var w = sky_sweep(ro, dir, p, SKY_LIFT_CAP + max(SKY_LIFT_CAP, far) * (1.0 + 1.0 / K), SKY_LIFT_CAP, far, K, within);
     var near = FieldSet(w.vnear, 0u, false, false, 0.0);
     for (var i = 0u; i < 4u; i = i + 1u) {
         near = field_set_union(near, sky_sweep_set(w, i));
