@@ -2490,12 +2490,16 @@ fn sky_occlusion(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
     let base = near.base;
     let lift_max = sky_ray_lift(3u, base);
     let r = lift_max + max(lift_max, far) * (1.0 + 1.0 / K);
-    // One read of the same field at `p` itself. The stored field never reads
-    // further than the true surface (a generated one reads nearer), so if it
-    // says the nearest matter is further than any ray can feel, nothing is in
-    // reach: open sea over a deep bed inside the terrain's bound, which the
-    // sweep alone cannot tell from a cave pool. This is the common case for
-    // a short reach, and it costs one sample instead of four marches.
+    // One read of the same field at `p` itself. Down to its cell size the
+    // stored field never reads further than the true surface (a generated one
+    // reads nearer), so if it says the nearest matter is further than any ray
+    // can feel, nothing is in reach: open sea over a deep bed inside the
+    // terrain's bound, which the sweep alone cannot tell from a cave pool.
+    // Matter thinner than a cell can vanish from the stored field, but the
+    // marches below read that same field and miss it too, so this read never
+    // disagrees with them. Inside solid d0 is negative and never exits here.
+    // This is the common case for a short reach, and it costs one sample
+    // instead of four marches.
     let d0 = field_set_d(p, pieces, 0u);
     if (d0 > r) {
         return 1.0;
