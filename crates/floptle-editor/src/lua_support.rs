@@ -2695,7 +2695,8 @@ save = {}
 ---@param key string
 ---@param value any
 function save.set(key, value) end
----The stored value, else `default`, else nil.
+---The stored value, else `default`, else nil. A table is a fresh copy every
+---call; `save.peek` or `save.version` read one often without that copy.
 ---@param key string
 ---@param default? any
 ---@return any
@@ -2707,6 +2708,13 @@ function save.get(key, default) end
 ---@param default? any
 ---@return any
 function save.peek(key, default) end
+---A number that moves every time what `save.get(key)` returns may have
+---changed (a set or delete from any script, a slot load, a copy onto the
+---active slot). Keep your own copy and read again only when it moved. Never
+---0; compare only with a number from the same Play session.
+---@param key string
+---@return integer
+function save.version(key) end
 ---Remove a key. Returns true if something was removed.
 ---@param key string
 ---@return boolean

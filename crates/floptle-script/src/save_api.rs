@@ -74,6 +74,16 @@ pub(crate) struct SaveState {
     /// written over it this session.
     blocked: bool,
     writer: Writer,
+    /// The last number handed out by [`SaveState::stamp`]: one counter for
+    /// the session, so a number never comes round again.
+    clock: u64,
+    /// What `save.version` says for a key not in `versions`: stamped each
+    /// time the whole store is replaced (a load, a slot switch, a copy onto
+    /// the active slot, deleting it), so every key moves at once.
+    base: u64,
+    /// The stamp of each key set or deleted since the store was last
+    /// replaced.
+    versions: HashMap<String, u64>,
 }
 
 impl Default for SaveState {
@@ -88,6 +98,9 @@ impl Default for SaveState {
             whole: true,
             blocked: false,
             writer: Writer::default(),
+            clock: 1,
+            base: 1,
+            versions: HashMap::new(),
         }
     }
 }
@@ -117,6 +130,8 @@ impl SaveState {
             ));
         }
         self.store.insert(key.clone(), Entry { value: Arc::new(nv), bytes: incoming });
+        let stamp = self.stamp();
+        self.versions.insert(key.clone(), stamp);
         self.changed.insert(key);
         self.bytes = bytes_after;
         self.dirty = true;
@@ -127,14 +142,32 @@ impl SaveState {
     pub(crate) fn remove(&mut self, key: &str) -> Option<Entry> {
         let gone = self.store.remove(key)?;
         self.bytes = self.bytes.saturating_sub(gone.bytes);
+        let stamp = self.stamp();
+        self.versions.insert(key.to_string(), stamp);
         self.changed.insert(key.to_string());
         self.dirty = true;
         Some(gone)
     }
 
+    /// A number no earlier call returned: what a write leaves as the key's
+    /// version.
+    fn stamp(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock
+    }
+
+    /// `save.version`: a number that moves whenever what `save.get(key)`
+    /// returns may have changed. A key never set has one too, which moves
+    /// when it is set.
+    pub(crate) fn version(&self, key: &str) -> u64 {
+        self.versions.get(key).copied().unwrap_or(self.base)
+    }
+
     /// Forget the slot in memory: what is on disk is read again on the next
     /// touch (`fresh == false`), or the slot is known empty (`fresh`).
     fn reset(&mut self, fresh: bool) {
+        self.base = self.stamp();
+        self.versions.clear();
         self.store.clear();
         self.changed.clear();
         self.bytes = 0;
@@ -627,8 +660,9 @@ pub(crate) fn install_save_api(
     // shared between calls: no copy. save.get copies the stored value into
     // fresh tables on every call, a few milliseconds for a large one; peek
     // makes that copy once per change of the key, freezes it, and hands the
-    // same table back until the key changes. A write to it is an error that
-    // says to take save.get's copy instead.
+    // same table back until the key changes (save.version says when). A
+    // write to it, at any depth, is Luau's read-only table error; save.get's
+    // copy is the one to change.
     {
         let state = state.clone();
         let paths = paths.clone();
@@ -659,6 +693,26 @@ pub(crate) fn install_save_api(
             Ok(v)
         }) {
             let _ = t.set("peek", f);
+        }
+    }
+
+    // save.version(key) — a number that moves on every change to what
+    // save.get(key) returns, from any script or from the engine: a set or a
+    // delete of the key, a load of the slot, a switch of slot, a copy onto
+    // the active slot, deleting the active slot. A script keeps its own copy
+    // of a record with the number it was read at, and reads again only when
+    // the number moved: one lookup, no copy. The slot is loaded first, as a
+    // get would, so the number is the one of the store a get reads.
+    {
+        let state = state.clone();
+        let paths = paths.clone();
+        let logs = logs.clone();
+        if let Ok(f) = lua.create_function(move |_, key: String| {
+            let mut s = state.borrow_mut();
+            ensure_loaded(&mut s, &paths.runtime_base(), &logs);
+            Ok(s.version(&key))
+        }) {
+            let _ = t.set("version", f);
         }
     }
 
@@ -868,11 +922,6 @@ mod tests {
         (lua, state)
     }
 
-    /// **A save keeps nested data, and reads it back from disk.** The wire's
-    /// depth-4 rule used to apply here, so a craft with parts with modules with
-    /// state was refused. The deepest table allowed must also survive the
-    /// write and a fresh read of the file, or a save would load as empty; one
-    /// level deeper (or a cycle) is still refused, loudly.
     /// **`save.peek` shares one read-only copy until the key changes.** Two
     /// peeks of a large saved table are the same table, and writing to it (at
     /// any depth) is an error; after `save.set` the next peek is a new table
@@ -914,6 +963,117 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **`save.version` moves on every write to a key, and on nothing else.**
+    /// A read (get, peek, version) leaves it; a set, a delete, a copy onto
+    /// the active slot, a switch away and back, and deleting the active slot
+    /// each move it. A write to one key leaves another key's number alone,
+    /// or a script's copy of every record would be read again on every set.
+    /// A key never set has a number too, which moves when it is set.
+    #[test]
+    fn version_moves_on_every_write_and_not_on_a_read() {
+        let root = std::env::temp_dir().join(format!("floptle-saveversion-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (lua, _state) = lua_with_save(&root);
+        let v = |key: &str| -> i64 { lua.load(format!("return save.version('{key}')")).eval().unwrap() };
+        let run = |code: &str| lua.load(code).exec().unwrap();
+        let never = v("crew");
+        assert!(never > 0, "a key never set had version {never}");
+        run("save.set('crew', { hp = 1 }) save.set('other', 1)");
+        let set = v("crew");
+        assert_ne!(set, never, "save.set did not move a key never set before");
+        run("local _ = save.get('crew') local _ = save.peek('crew') local _ = save.version('crew')");
+        assert_eq!(v("crew"), set, "a read moved the version");
+        let other = v("other");
+        run("save.set('crew', { hp = 2 })");
+        let again = v("crew");
+        assert_ne!(again, set, "save.set did not move the version");
+        assert_eq!(v("other"), other, "a set of one key moved another key's version");
+        run("save.delete('crew')");
+        let deleted = v("crew");
+        assert_ne!(deleted, again, "save.delete did not move the version");
+        run("save.delete('crew')");
+        assert_eq!(v("crew"), deleted, "deleting a key already gone moved the version");
+        // A checkpoint, then a restore of it onto the active slot: a load.
+        run("save.set('crew', { hp = 3 }) assert(save.copySlot('main', 'cp')) save.set('crew', { hp = 4 })");
+        let before = v("crew");
+        run("assert(save.copySlot('cp', 'main'))");
+        let restored = v("crew");
+        assert_ne!(restored, before, "a copy onto the active slot did not move the version");
+        assert_eq!(lua.load("return save.get('crew').hp").eval::<i64>().unwrap(), 3);
+        // A switch away and back reads the slot from disk again.
+        run("save.slot('other') save.slot('main')");
+        let reloaded = v("crew");
+        assert_ne!(reloaded, restored, "loading the slot again did not move the version");
+        run("save.deleteSlot('main')");
+        assert_ne!(v("crew"), reloaded, "deleting the active slot did not move the version");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A peek after a load is the loaded value, and its tables are Luau's
+    /// read-only ones.** The peek cache must notice a copy onto the active
+    /// slot as surely as a set, and a write to the view must be the error a
+    /// Luau script knows, at the top and nested.
+    #[test]
+    fn peek_after_a_load_is_the_loaded_value() {
+        let root = std::env::temp_dir().join(format!("floptle-savepeekload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (lua, _state) = lua_with_save(&root);
+        let (fresh, hp, top, deep, frozen): (bool, i64, String, String, bool) = lua
+            .load(
+                "save.set('crew', { hp = 3, bag = { 1, 2 } }) assert(save.copySlot('main', 'cp'))\n\
+                 save.set('crew', { hp = 4, bag = { 1 } })\n\
+                 local a = save.peek('crew')\n\
+                 assert(save.copySlot('cp', 'main'))\n\
+                 local b = save.peek('crew')\n\
+                 local _, top = pcall(function() b.hp = 0 end)\n\
+                 local _, deep = pcall(function() b.bag[3] = 0 end)\n\
+                 return not rawequal(a, b), b.hp, tostring(top), tostring(deep), table.isfrozen(b.bag)",
+            )
+            .eval()
+            .unwrap();
+        assert!(fresh, "after a copy onto the active slot the peek was the old table");
+        assert_eq!(hp, 3, "after a copy onto the active slot the peek held the old value");
+        assert!(top.contains("readonly") && deep.contains("readonly"), "top: {top}; nested: {deep}");
+        assert!(frozen, "a nested table of the peek was not frozen");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A hundred peeks of a table cost far less than a hundred gets.**
+    /// The point of peek is that a record read by many scripts a frame is
+    /// copied once, not once a read. A ratio, best of a few runs, so a loaded
+    /// machine slows both sides alike.
+    #[test]
+    fn a_hundred_peeks_cost_far_less_than_a_hundred_gets() {
+        let root = std::env::temp_dir().join(format!("floptle-savepeekcost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (lua, _state) = lua_with_save(&root);
+        lua.load(
+            "local bag = {} for i = 1, 40 do bag[i] = { item = 'part' .. i, n = i, worn = i % 2 == 0 } end\n\
+             save.set('bag', { owner = 'crew', slots = 40, items = bag })\n\
+             function timeReads(read)\n\
+               local t0 = os.clock()\n\
+               for _ = 1, 100 do local r = read('bag') end\n\
+               return os.clock() - t0\n\
+             end",
+        )
+        .exec()
+        .unwrap();
+        let (mut get, mut peek) = (f64::MAX, f64::MAX);
+        for _ in 0..5 {
+            let (g, p): (f64, f64) = lua.load("return timeReads(save.get), timeReads(save.peek)").eval().unwrap();
+            get = get.min(g);
+            peek = peek.min(p);
+        }
+        let ratio = get / peek.max(1e-9);
+        assert!(ratio > 5.0, "100 gets took {:.1} us, 100 peeks {:.1} us: only {ratio:.1}x", get * 1e6, peek * 1e6);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A save keeps nested data, and reads it back from disk.** The wire's
+    /// depth-4 rule used to apply here, so a craft with parts with modules with
+    /// state was refused. The deepest table allowed must also survive the
+    /// write and a fresh read of the file, or a save would load as empty; one
+    /// level deeper (or a cycle) is still refused, loudly.
     #[test]
     fn a_deeply_nested_table_saves_and_loads_back_from_disk() {
         let root = std::env::temp_dir().join(format!("floptle-savedeep-{}", std::process::id()));
