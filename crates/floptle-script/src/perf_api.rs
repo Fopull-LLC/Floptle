@@ -590,6 +590,17 @@ fn counts_table(lua: &Lua, c: &Counts) -> mlua::Result<Table> {
     // What the pictures on the GPU hold: the number a texture-quality
     // setting moves (`app.setTextureQuality`).
     out.set("textureBytes", c.texture_bytes)?;
+    // What the raster passes put into their command encoders: draws, and
+    // the state sets around them, issued and skipped. Sets close to the
+    // draws mean every draw binds its own objects.
+    out.set("encodePasses", c.encode_passes)?;
+    out.set("encodeDraws", c.encode_draws)?;
+    out.set("encodePipelineSets", c.encode_pipeline_sets)?;
+    out.set("encodeBindSets", c.encode_bind_sets)?;
+    out.set("encodeVertexSets", c.encode_vertex_sets)?;
+    out.set("encodeIndexSets", c.encode_index_sets)?;
+    out.set("encodeSkipped", c.encode_skipped)?;
+    out.set("encodeSubmits", c.encode_submits)?;
     Ok(out)
 }
 

@@ -649,8 +649,9 @@ impl Light2d {
         }
     }
 
-    pub(crate) fn instance_slice(&self) -> wgpu::BufferSlice<'_> {
-        self.instances.slice(..)
+    /// The instance buffer, bound whole.
+    pub(crate) fn instance_buffer(&self) -> &wgpu::Buffer {
+        &self.instances
     }
 
     pub(crate) fn views(&self) -> Option<(&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView)> {

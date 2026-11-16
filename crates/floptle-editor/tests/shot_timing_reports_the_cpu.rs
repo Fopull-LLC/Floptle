@@ -55,7 +55,9 @@ fn a_timed_shot_says_what_building_the_frame_cost() {
     let total = cpu["cpu_ms"].as_f64().unwrap_or_else(|| panic!("no CPU report under timing: {v}"));
     assert!(total > 0.0, "the CPU report says the frames cost nothing: {cpu}");
     let parts: Vec<&str> = cpu["parts"].as_array().unwrap().iter().filter_map(|p| p["label"].as_str()).collect();
-    for want in ["render", "renderCull", "renderInstancing", "renderPasses"] {
+    // renderPasses' own pieces: the colour pass, and across the raster
+    // passes, bucketing, recording and submitting.
+    for want in ["render", "renderCull", "renderInstancing", "renderPasses", "renderOpaque", "renderBucket", "renderRecord", "renderSubmit"] {
         assert!(parts.contains(&want), "the CPU report has no `{want}`: {parts:?}");
     }
 }
