@@ -2219,19 +2219,6 @@ fn shadow_instance(model: floptle_core::math::Mat4, mat: Option<&floptle_core::M
     floptle_render::instance_of_mat(model, &mp)
 }
 
-/// What the sun shadow map draws: the camera's opaque list, and the casters
-/// it culled ([`Editor::shadow_map_casters`]). Borrowed when there are none.
-pub(crate) fn with_shadow_casters<'a>(
-    instances: &'a [ShadowDraw],
-    casters: &[ShadowDraw],
-) -> std::borrow::Cow<'a, [ShadowDraw]> {
-    if casters.is_empty() {
-        std::borrow::Cow::Borrowed(instances)
-    } else {
-        std::borrow::Cow::Owned(instances.iter().chain(casters).copied().collect())
-    }
-}
-
 /// One raster draw: mesh, texture, instance.
 pub(crate) type ShadowDraw = (floptle_render::MeshId, Option<floptle_render::TexId>, floptle_render::InstanceRaw);
 

@@ -13,11 +13,16 @@
 //! drawing every chunk; and the pictures must be byte for byte the ones the
 //! raster draws with every set issued (`Raster::set_state_elision(false)`).
 //! Set `FLOPTLE_KEEP_SHOTS=<dir>` to keep the colour frames as PNGs.
+//!
+//! The same scene also holds the frame's bucketing to once a view: the sun
+//! map, the prepass and the colour pass draw from one [`ViewPlan`], sorted
+//! and uploaded once, and draw the same pictures as each pass sorting and
+//! uploading for itself, even with another view drawn in between.
 
 use floptle_core::{Material, Shading};
 use floptle_render::{
     cube, instance_of, set_ext_index, EncodeStats, Globals, Gpu, InstanceRaw, MeshData, MeshId, Raster, SurfaceExtras,
-    TexId, TexSampling, TextureData,
+    TexId, TexSampling, TextureData, ViewPlan,
 };
 use glam::{Mat4, Vec3};
 
@@ -235,5 +240,107 @@ fn chunk_slots_bind_their_picture_once_a_run_and_draw_the_same_frame() {
         assert!(a.chunks(px).any(|c| c != first), "the {what} is one flat value: nothing drew");
         let differ = a.iter().zip(b).filter(|(x, y)| x != y).count();
         assert!(a == b, "the {what} differs in {differ} bytes between skipping repeated state and issuing all of it");
+    }
+}
+
+fn sun_globals() -> Globals {
+    let mut globals = Globals {
+        view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+        ambient: [0.8, 0.8, 0.8, 0.0],
+        ..Default::default()
+    };
+    globals.sun_vp = Mat4::IDENTITY.to_cols_array_2d();
+    globals.sun_map = [1.0, 1.0, 0.0, 1.0 / 512.0];
+    globals.sun_near_vp = Mat4::IDENTITY.to_cols_array_2d();
+    globals.sun_near = [1.0, 1.0, 0.0, 1.0 / 512.0];
+    globals
+}
+
+/// The sun map, the prepass and the colour pass, either from one plan or
+/// each sorting and uploading for itself (the entry points that take the
+/// instance list). With `between`, another view (a few of the instances,
+/// into a target of its own) is drawn after the sun map, as a render target
+/// or a docked panel would be: it takes over the instance buffer. Returns
+/// what the passes encoded and the colour frame and sun map.
+fn passes(gpu: &Gpu, raster: &mut Raster, s: &Scene, colour: &wgpu::Texture, planned: bool, between: Option<&wgpu::Texture>) -> (EncodeStats, [Vec<u8>; 2]) {
+    let view = colour.create_view(&wgpu::TextureViewDescriptor::default());
+    let globals = sun_globals();
+    let other = |raster: &mut Raster| {
+        if let Some(t) = between {
+            let v = t.create_view(&wgpu::TextureViewDescriptor::default());
+            // Instances the window's plan holds elsewhere, so what this
+            // view leaves at the start of the buffer is not the window's.
+            let mut p = raster.plan_view(&s.instances[40..80], &[], &[]);
+            raster.draw_scene_planned(gpu, &v, gpu.depth_view(), globals, &mut p, Some([0.0; 4]), None);
+        }
+    };
+    raster.take_encode_stats();
+    let n = if planned {
+        let mut plan: ViewPlan = raster.plan_view(&s.instances, &[], &[]);
+        raster.sun_shadow_pass_planned(gpu, globals, &mut plan, &[]);
+        let n = raster.take_encode_stats();
+        other(raster);
+        let _ = raster.take_encode_stats();
+        raster.depth_prepass_planned(gpu, globals, &mut plan, gpu.depth_texture());
+        raster.draw_scene_planned(gpu, &view, gpu.depth_view(), globals, &mut plan, Some([0.05, 0.05, 0.1, 1.0]), None);
+        let mut n2 = raster.take_encode_stats();
+        n2.bucket_records += n.bucket_records;
+        n2.instance_bytes += n.instance_bytes;
+        n2
+    } else {
+        raster.sun_shadow_pass(gpu, globals, &s.instances, &[], &[]);
+        let n = raster.take_encode_stats();
+        other(raster);
+        let _ = raster.take_encode_stats();
+        raster.depth_prepass_with(gpu, globals, &s.instances, &[], &[], gpu.depth_texture());
+        raster.draw_scene_with(gpu, &view, gpu.depth_view(), globals, &s.instances, &[], &[], Some([0.05, 0.05, 0.1, 1.0]), None);
+        let mut n2 = raster.take_encode_stats();
+        n2.bucket_records += n.bucket_records;
+        n2.instance_bytes += n.instance_bytes;
+        n2
+    };
+    (n, [read(gpu, colour), read(gpu, raster.sun_map_texture())])
+}
+
+#[test]
+fn the_passes_share_one_plan_a_view_and_draw_the_same_frame() {
+    let gpu = Gpu::headless(SIZE, SIZE);
+    if !gpu.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
+        // CI's OpenGL cannot build the raster pass.
+        return;
+    }
+    let colour = target(&gpu, "plan-colour", gpu.scene_format());
+    let elsewhere = target(&gpu, "plan-other-view", gpu.scene_format());
+    let mut raster = Raster::new(&gpu);
+    raster.set_sun_map_layout(&gpu, 512, true);
+    let s = scene(&gpu, &mut raster);
+    let record = std::mem::size_of::<InstanceRaw>() as u64;
+    let n = s.instances.len() as u64;
+
+    let (old, old_px) = passes(&gpu, &mut raster, &s, &colour, false, None);
+    let (new, new_px) = passes(&gpu, &mut raster, &s, &colour, true, None);
+    let (far, near) = (raster.sun_map_draws().0 as u64, raster.sun_near_map_draws().0 as u64);
+    let (_, between_px) = passes(&gpu, &mut raster, &s, &colour, true, Some(&elsewhere));
+
+    // Sorted once: every record of the frame once, not once a pass.
+    assert!(new.bucket_records as u64 <= n, "one plan sorted {} records for {n} instances", new.bucket_records);
+    // Uploaded once, plus only what each sun cascade kept.
+    let most = (n + far + near) * record;
+    assert!(new.instance_bytes <= most, "one plan uploaded {} bytes; the frame, once, and the sun's casters come to {most}", new.instance_bytes);
+    // The counters can see the difference: each pass for itself sorted and
+    // uploaded the frame again.
+    assert!(old.bucket_records as u64 >= 3 * (n - 1), "each pass for itself sorted only {} records", old.bucket_records);
+    assert!(old.instance_bytes > most, "each pass for itself uploaded only {} bytes", old.instance_bytes);
+
+    for (what, i) in [("colour", 0), ("sun map", 1)] {
+        let first = &new_px[i][..4];
+        assert!(new_px[i].chunks(4).any(|c| c != first), "the {what} is one flat value: nothing drew");
+        let differ = old_px[i].iter().zip(&new_px[i]).filter(|(a, b)| a != b).count();
+        assert!(old_px[i] == new_px[i], "the {what} differs in {differ} bytes between one plan and each pass for itself");
+        let differ = between_px[i].iter().zip(&new_px[i]).filter(|(a, b)| a != b).count();
+        assert!(
+            between_px[i] == new_px[i],
+            "the {what} differs in {differ} bytes when another view drew between the sun map and the prepass"
+        );
     }
 }
