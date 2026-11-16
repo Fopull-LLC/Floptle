@@ -44,8 +44,10 @@ impl crate::Editor {
             }
             if let Some(r) = self.terrain_render.get(&e) {
                 if let Some(raster) = self.raster.as_ref() {
-                    s.meshes_gpu += r.slots.values().map(|(mid, _)| raster.mesh_gpu_bytes(*mid)).sum::<u64>();
-                    s.meshes_gpu += r.groups.values().map(|mid| raster.mesh_gpu_bytes(*mid)).sum::<u64>();
+                    // What the GPU really holds for them: chunks share the
+                    // geometry arena's pages, so each terrain counts its
+                    // share of the pages, slack and all, not its ranges.
+                    s.meshes_gpu += raster.mesh_gpu_held(r.slots.values().map(|(mid, _)| *mid).chain(r.groups.values().copied()));
                 }
                 s.meshes_cpu += r.far.values().map(mesh_bytes).sum::<u64>();
             }

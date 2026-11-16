@@ -1841,6 +1841,9 @@ impl Editor {
         let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
             return;
         };
+        // Pages of chunk geometry the ground has mostly left give their
+        // memory back, a few megabytes a frame.
+        raster.maintain_geometry(gpu);
         // Drop render meshes for terrains that no longer exist (deleted nodes).
         // cold terrains count as live: their render entry is the impostor sphere.
         let live: Vec<Entity> = self
@@ -6924,6 +6927,11 @@ mod residency_tests {
     /// 200 MB more, given back only by reloading the scene. Meshed beside the
     /// camera, then left for the far side of the world, the chunks it left
     /// must hold a small part of what they did.
+    ///
+    /// This reads each chunk's own capacity (`mesh_gpu_bytes`): with the
+    /// chunks in the shared geometry arena that is what a chunk gives back
+    /// to its page, not what the GPU holds. What the pages hold is
+    /// `a_world_seen_from_far_away_gives_its_gpu_memory_back`'s to guard.
     #[test]
     fn ground_left_behind_gives_its_mesh_memory_back() {
         let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
@@ -6974,6 +6982,61 @@ mod residency_tests {
         assert!(!far.is_empty(), "the fixture: some chunks should be drawn in far groups");
         let most = far.iter().copied().max().unwrap_or(0);
         assert!(most < 1024, "a chunk drawn in its far group still holds {most} bytes of mesh of its own");
+    }
+
+    /// **A world seen from far away gives its GPU memory back, and the
+    /// budget sees it.** Chunk meshes share the geometry arena's pages, and a
+    /// page only grows: meshed whole from the surface, then drawn coarse and
+    /// in far groups from far off, the world's chunks gave their ranges
+    /// back, but the coarse meshes and far groups left on every page kept
+    /// each page alive at its peak. And the memory budget counted the
+    /// chunks' ranges, so it saw memory come back that the GPU still held.
+    /// The pages the ground has mostly left must go, and `terrain.stats`
+    /// must count what the pages hold.
+    #[test]
+    fn a_world_seen_from_far_away_gives_its_gpu_memory_back() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.project.terrain_shape = Some(floptle_scene::TerrainShapeDoc::Natural);
+        let fill = floptle_field::procgen::PlanetFill { seed: 3, radius: 300.0, voxel: 2.0, relief: 0.0, cave_depth: 0.0, ..Default::default() };
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(e, Matter::Terrain { id: 7, collision: Default::default() });
+        ed.world.insert(e, floptle_core::CelestialBody { body_radius: 300.0, ..Default::default() });
+        ed.terrains.insert(e, EditorTerrain::new(floptle_field::procgen::generate_planet(&fill)));
+        let here = DVec3::new(0.0, 312.0, 0.0);
+        ed.sync_terrain_meshes(true, here);
+        settle(&mut ed, e, here);
+        let held = |ed: &crate::Editor| ed.raster.as_ref().unwrap().geometry_arena_stats();
+        let peak = held(&ed);
+        assert!(peak.bytes > 0, "the fixture: the chunks should be in the arena");
+        // Far enough off that the whole world is coarse or in far groups.
+        let away = DVec3::new(0.0, 4000.0, 0.0);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let mut quiet = 0;
+        while quiet < 40 {
+            ed.sync_terrain_meshes(false, away);
+            let r = &ed.terrain_render[&e];
+            quiet = if r.pending.is_empty() && r.waiting == 0 { quiet + 1 } else { 0 };
+            assert!(std::time::Instant::now() < until, "the world never settled after the move");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let after = held(&ed);
+        assert!(after.live * 3 < peak.live, "the fixture: the world seen from far off should be a small part of it seen from the surface ({} live bytes of {})", after.live, peak.live);
+        // A page is emptied once it is under a quarter full, so what is
+        // held comes to at most four times what is live, and a first page.
+        assert!(
+            after.bytes < peak.bytes && after.bytes <= 4 * after.live + (640 << 10),
+            "seen from far off the world holds {} bytes of GPU mesh pages ({} live), against {} at the surface",
+            after.bytes,
+            after.live,
+            peak.bytes
+        );
+        // The budget reads what the GPU holds: this world's share of the
+        // pages (all of them; nothing else is in the arena) and any chunk
+        // with buffers of its own.
+        let stats = ed.terrain_stats();
+        let s = stats.iter().find(|s| s.id == 7).expect("the world's stats");
+        assert!(s.meshes_gpu >= after.bytes, "terrain.stats counts {} bytes of GPU mesh, and the pages hold {}", s.meshes_gpu, after.bytes);
     }
 
     /// **The ground still to come can be counted** (`perf.counts().meshesPending`).

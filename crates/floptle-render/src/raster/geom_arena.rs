@@ -137,9 +137,12 @@ pub(super) struct GeomArena {
     /// Bytes written into the pages since made: slot writes and the copies
     /// a page makes when it grows.
     pub written: u64,
+    /// Bytes of slot geometry moved out of emptying pages since made
+    /// ([`Self::victim`]).
+    pub moved: u64,
 }
 
-const VERTEX_BYTES: u64 = std::mem::size_of::<Vertex>() as u64;
+pub(super) const VERTEX_BYTES: u64 = std::mem::size_of::<Vertex>() as u64;
 
 /// A new page starts this large (512 KiB of vertices, 128 KiB of indices),
 /// so a scene with a sprite or two does not hold a planet's worth.
@@ -160,16 +163,91 @@ impl GeomArena {
         // A page fills one buffer at most: 64 MiB of vertices and 32 MiB of
         // indices, or the device's limit if that is less.
         let limit = gpu.device.limits().max_buffer_size;
-        let fit = |per: u64, cap: u32| -> u32 {
+        // A device whose buffers cannot hold a first page gets no arena at
+        // all (0): every slot keeps buffers of its own, as before.
+        let fit = |per: u64, cap: u32, first: u32| -> u32 {
             let n = (limit / per).min(cap as u64) as u32;
-            if n.is_power_of_two() { n } else { n.next_power_of_two() / 2 }
+            let n = if n.is_power_of_two() { n } else { n.next_power_of_two() / 2 };
+            if n < first { 0 } else { n }
         };
-        GeomArena { pages: Vec::new(), max_verts: fit(VERTEX_BYTES, 1 << 21), max_indices: fit(4, 1 << 23), written: 0 }
+        let (max_verts, max_indices) = (fit(VERTEX_BYTES, 1 << 21, FIRST_PAGE_VERTS), fit(4, 1 << 23, FIRST_PAGE_INDICES));
+        let (max_verts, max_indices) = if max_verts == 0 || max_indices == 0 { (0, 0) } else { (max_verts, max_indices) };
+        GeomArena { pages: Vec::new(), max_verts, max_indices, written: 0, moved: 0 }
+    }
+
+    /// Hold a page to at most `verts` vertices and `indices` indices (each
+    /// a power of two no smaller than a first page, and no larger than the
+    /// device allows), so a test can fill several pages with little.
+    pub(super) fn limit_pages(&mut self, verts: u32, indices: u32) {
+        let fit = |n: u32, first: u32, max: u32| n.next_power_of_two().max(first).min(max);
+        self.max_verts = fit(verts, FIRST_PAGE_VERTS, self.max_verts);
+        self.max_indices = fit(indices, FIRST_PAGE_INDICES, self.max_indices);
     }
 
     /// Bytes the pages hold on the GPU.
     pub(super) fn bytes(&self) -> u64 {
         self.pages.iter().flatten().map(|p| p.vbuf.size() + p.ibuf.size()).sum()
+    }
+
+    /// Bytes the slots' ranges take up in the pages: what is live, against
+    /// [`Self::bytes`], what is held.
+    pub(super) fn live_bytes(&self) -> u64 {
+        self.pages.iter().flatten().map(|p| p.verts.used() as u64 * VERTEX_BYTES + p.indices.used() as u64 * 4).sum()
+    }
+
+    /// A page worth emptying: grown past a first page's size, with its live
+    /// ranges filling less than a quarter of its vertex buffer and of its
+    /// index buffer. The emptiest such page. Its slots move to other pages
+    /// (or a small new one) and it is let go: a page only grows, and the
+    /// coarse chunks left on it after the player has walked on would
+    /// otherwise hold it at its peak until the planet unloads. A page filled
+    /// to a quarter or more is not one, so the slots moved into another page
+    /// do not move again.
+    pub(super) fn victim(&self) -> Option<u32> {
+        let mut best: Option<(u32, f64)> = None;
+        for (i, p) in self.pages.iter().enumerate() {
+            let Some(p) = p else { continue };
+            if p.verts.size() <= FIRST_PAGE_VERTS && p.indices.size() <= FIRST_PAGE_INDICES {
+                continue;
+            }
+            let full = (p.verts.used() as f64 / p.verts.size() as f64).max(p.indices.used() as f64 / p.indices.size() as f64);
+            if full < 0.25 && best.is_none_or(|(_, b)| full < b) {
+                best = Some((i as u32, full));
+            }
+        }
+        best.map(|(i, _)| i)
+    }
+
+    /// Before page `victim`'s slots move out: unless the other pages
+    /// together have the room its live ranges take, start a page sized to
+    /// hold them (the next power of two, at least a first page). Growing a
+    /// first page to fit them instead doubled it past what they needed, and
+    /// left it barely over a quarter full.
+    pub(super) fn make_room_for(&mut self, gpu: &Gpu, victim: u32) {
+        let Some(v) = self.pages.get(victim as usize).and_then(Option::as_ref) else { return };
+        let (need_v, need_i) = (v.verts.used(), v.indices.used());
+        let (mut free_v, mut free_i) = (0u64, 0u64);
+        for (i, p) in self.pages.iter().enumerate() {
+            let Some(p) = p.as_ref().filter(|_| i as u32 != victim) else { continue };
+            free_v += (p.verts.size() - p.verts.used()) as u64;
+            free_i += (p.indices.size() - p.indices.used()) as u64;
+        }
+        if free_v >= need_v as u64 && free_i >= need_i as u64 {
+            return;
+        }
+        let verts = need_v.next_power_of_two().max(FIRST_PAGE_VERTS).min(self.max_verts);
+        let indices = need_i.next_power_of_two().max(FIRST_PAGE_INDICES).min(self.max_indices);
+        let p = Page {
+            vbuf: page_buffer(gpu, "raster-arena-verts", verts as u64 * VERTEX_BYTES, wgpu::BufferUsages::VERTEX),
+            ibuf: page_buffer(gpu, "raster-arena-indices", indices as u64 * 4, wgpu::BufferUsages::INDEX),
+            verts: Buddy::new(verts),
+            indices: Buddy::new(indices),
+            live: 0,
+        };
+        match self.pages.iter().position(Option::is_none) {
+            Some(at) => self.pages[at] = Some(p),
+            None => self.pages.push(Some(p)),
+        }
     }
 
     /// Pages in use.
@@ -187,12 +265,14 @@ impl GeomArena {
     /// `None` when one page could never hold it; and the page that grew on
     /// the way, if one did, whose buffers are new: every slot on it must
     /// take them up, whatever the answer.
-    pub(super) fn alloc(&mut self, gpu: &Gpu, v_cap: u32, i_cap: u32) -> (Option<ArenaRange>, Option<u32>) {
+    ///
+    /// `avoid` is a page to leave alone: one being emptied.
+    pub(super) fn alloc(&mut self, gpu: &Gpu, v_cap: u32, i_cap: u32, avoid: Option<u32>) -> (Option<ArenaRange>, Option<u32>) {
         if v_cap > self.max_verts || i_cap > self.max_indices {
             return (None, None);
         }
         for (i, p) in self.pages.iter_mut().enumerate() {
-            let Some(p) = p else { continue };
+            let Some(p) = p.as_mut().filter(|_| avoid != Some(i as u32)) else { continue };
             if let Some(r) = Self::take(p, i as u32, v_cap, i_cap) {
                 return (Some(r), None);
             }
@@ -207,8 +287,9 @@ impl GeomArena {
             }
             s - b.used() >= want
         };
-        let grower = self.pages.iter().position(|p| {
-            p.as_ref().is_some_and(|p| fits(&p.verts, v_cap, self.max_verts) && fits(&p.indices, i_cap, self.max_indices))
+        let grower = self.pages.iter().enumerate().position(|(i, p)| {
+            avoid != Some(i as u32)
+                && p.as_ref().is_some_and(|p| fits(&p.verts, v_cap, self.max_verts) && fits(&p.indices, i_cap, self.max_indices))
         });
         let mut grown = None;
         if let Some(i) = grower {
@@ -307,16 +388,32 @@ impl GeomArena {
         if data.vertices.len() as u64 > r.v_cap as u64 || data.indices.len() as u64 > r.i_cap as u64 {
             return false;
         }
-        let (vbuf, ibuf) = self.buffers(r.page);
+        // An index past the mesh's own vertices would draw a neighbour's in
+        // the page (own buffers would read stale bytes of the same mesh).
+        let nv = data.vertices.len() as u32;
+        if let Some(bad) = data.indices.iter().find(|&&i| i >= nv) {
+            log::error!("a mesh of {nv} vertices has index {bad}: not drawn");
+            return false;
+        }
+        let (vbuf, _) = self.buffers(r.page);
         if !data.vertices.is_empty() {
             gpu.queue.write_buffer(vbuf, r.v_off as u64 * VERTEX_BYTES, bytemuck::cast_slice(&data.vertices));
         }
-        if !data.indices.is_empty() {
-            let moved: Vec<u32> = data.indices.iter().map(|&i| i + r.v_off).collect();
-            gpu.queue.write_buffer(ibuf, r.i_off as u64 * 4, bytemuck::cast_slice(&moved));
-        }
-        self.written += std::mem::size_of_val(data.vertices.as_slice()) as u64 + data.indices.len() as u64 * 4;
+        self.written += std::mem::size_of_val(data.vertices.as_slice()) as u64;
+        self.write_indices(gpu, r, &data.indices);
         true
+    }
+
+    /// Write a slot's indices (counted from its own first vertex) into its
+    /// range, offset by the range's first vertex.
+    pub(super) fn write_indices(&mut self, gpu: &Gpu, r: &ArenaRange, indices: &[u32]) {
+        if indices.is_empty() {
+            return;
+        }
+        let moved: Vec<u32> = indices.iter().map(|&i| i + r.v_off).collect();
+        let (_, ibuf) = self.buffers(r.page);
+        gpu.queue.write_buffer(ibuf, r.i_off as u64 * 4, bytemuck::cast_slice(&moved));
+        self.written += indices.len() as u64 * 4;
     }
 }
 

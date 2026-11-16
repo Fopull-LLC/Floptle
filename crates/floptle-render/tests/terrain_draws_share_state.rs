@@ -367,16 +367,16 @@ fn chunk_mesh(i: usize, half: f32, grow: usize, tint: u8) -> MeshData {
     data
 }
 
-/// 512 coloured chunk slots (each with its own block in the terrain colour
-/// store, read by vertex) and a textured cube among them, as `scene` lays
-/// them out.
-fn coloured_scene(gpu: &Gpu, raster: &mut Raster) -> (Scene, Vec<MeshId>, f32) {
-    let side = (CHUNKS as f32).sqrt().ceil() as usize;
+/// `n` coloured chunk slots of `grow` boxes each (each with its own block
+/// in the terrain colour store, read by vertex) and a textured cube among
+/// them, as `scene` lays them out.
+fn coloured_scene(gpu: &Gpu, raster: &mut Raster, n: usize, grow: usize) -> (Scene, Vec<MeshId>, f32) {
+    let side = (n as f32).sqrt().ceil() as usize;
     let step = 2.0 / side as f32;
     let mut instances = Vec::new();
     let mut chunks = Vec::new();
-    for i in 0..CHUNKS {
-        let data = chunk_mesh(i, step * 0.4, 1, 0);
+    for i in 0..n {
+        let data = chunk_mesh(i, step * 0.4, grow, 0);
         let id = raster.register_dynamic(gpu, data.vertices.len() as u32, data.indices.len() as u32, true);
         assert!(raster.replace_dynamic(gpu, id, &data), "slot {i} took its mesh");
         let (x, y) = ((i % side) as f32, (i / side) as f32);
@@ -389,7 +389,7 @@ fn coloured_scene(gpu: &Gpu, raster: &mut Raster) -> (Scene, Vec<MeshId>, f32) {
     let pixels = (0..16).flat_map(|i| if i % 2 == 0 { [255, 64, 0, 255] } else { [0, 64, 255, 255] }).collect();
     let tex = raster.register_texture(gpu, &TextureData { pixels, width: 4, height: 4 }, TexSampling::default());
     let boxy = raster.register(gpu, &cube(0.2), None);
-    instances.insert(CHUNKS / 2, (boxy, Some(tex), instance_of(Mat4::from_translation(Vec3::new(0.1, 0.1, 0.3)), [1.0; 3])));
+    instances.insert(n / 2, (boxy, Some(tex), instance_of(Mat4::from_translation(Vec3::new(0.1, 0.1, 0.3)), [1.0; 3])));
     (Scene { instances, mask: Vec::new() }, chunks, step * 0.4)
 }
 
@@ -426,12 +426,12 @@ fn chunk_slots_share_their_buffers_and_draw_the_same_frame() {
         let mut r = Raster::new(&gpu);
         r.set_sun_map_layout(&gpu, 512, true);
         r.set_geometry_arena(arena);
-        let (s, chunks, half) = coloured_scene(&gpu, &mut r);
+        let (s, chunks, half) = coloured_scene(&gpu, &mut r, CHUNKS, 1);
         (r, s, chunks, half)
     };
     let (mut on, mut s_on, chunks_on, half) = raster_with(true);
     let (mut off, mut s_off, chunks_off, _) = raster_with(false);
-    let (pages, _, _) = on.geometry_arena_stats();
+    let pages = on.geometry_arena_stats().pages;
 
     let (n_on, px_on) = planned_frame(&gpu, &mut on, &s_on, &colour);
     let (n_off, px_off) = planned_frame(&gpu, &mut off, &s_off, &colour);
@@ -460,9 +460,9 @@ fn chunk_slots_share_their_buffers_and_draw_the_same_frame() {
     // written, nothing else in the page, and the picture follows it.
     let k = 100;
     let dug = chunk_mesh(k, half * 0.7, 1, 90);
-    let (_, bytes, before) = on.geometry_arena_stats();
+    let (bytes, before) = (on.geometry_arena_stats().bytes, on.geometry_arena_stats().written);
     assert!(on.replace_dynamic(&gpu, chunks_on[k], &dug));
-    let (_, _, after) = on.geometry_arena_stats();
+    let after = on.geometry_arena_stats().written;
     let own = (dug.vertices.len() * std::mem::size_of::<floptle_render::Vertex>() + dug.indices.len() * 4) as u64;
     assert_eq!(after - before, own, "remeshing one chunk wrote {} bytes of an arena of {bytes}; its mesh is {own}", after - before);
     assert!(off.replace_dynamic(&gpu, chunks_off[k], &dug));
@@ -490,6 +490,96 @@ fn chunk_slots_share_their_buffers_and_draw_the_same_frame() {
     for id in chunks_on {
         on.free_dynamic(id);
     }
-    let (pages, bytes, _) = on.geometry_arena_stats();
+    let st = on.geometry_arena_stats();
+    let (pages, bytes) = (st.pages, st.bytes);
     assert_eq!((pages, bytes), (0, 0), "with every chunk freed the arena still holds {pages} pages, {bytes} bytes");
+}
+
+/// **Pages the ground has mostly left give their memory back.** A page only
+/// grows, so a chunk shrinking (ground drawn coarse once the player has
+/// walked on) only gave its range back to the page; with a coarse chunk
+/// still on every page, no page ever emptied and the GPU held the walk's
+/// peak until the planet unloaded. Here 64 big chunk slots fill eight
+/// pages, then all but one a page shrink: every page stays alive, under a
+/// quarter full. `maintain_geometry` moves the survivors out, a bounded
+/// amount a call, and lets the emptied pages go; the pictures are the
+/// ones the slots draw with buffers of their own, and the memory a budget
+/// reads (`mesh_gpu_held`) is what the pages hold.
+#[test]
+fn emptied_pages_give_their_memory_back() {
+    let gpu = Gpu::headless(SIZE, SIZE);
+    if !gpu.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
+        // CI's OpenGL cannot build the raster pass.
+        return;
+    }
+    const N: usize = 64;
+    let colour = target(&gpu, "compact-colour", gpu.scene_format());
+    let raster_with = |arena: bool| {
+        let mut r = Raster::new(&gpu);
+        r.set_sun_map_layout(&gpu, 512, true);
+        r.set_geometry_arena(arena);
+        // 8,192 vertices a slot, 65,536 a page: eight slots a page.
+        r.set_geometry_page_limit(1 << 16, 1 << 17);
+        let (s, chunks, half) = coloured_scene(&gpu, &mut r, N, 150);
+        (r, s, chunks, half)
+    };
+    let (mut on, mut s_on, chunks_on, half) = raster_with(true);
+    let (mut off, mut s_off, chunks_off, _) = raster_with(false);
+    let peak = on.geometry_arena_stats();
+    assert!(peak.pages >= 8, "the fixture: 64 big slots should fill eight pages ({} pages)", peak.pages);
+
+    // All but every eighth chunk shrink to one box: one big survivor a page.
+    for (raster, scene, chunks) in [(&mut on, &mut s_on, &chunks_on), (&mut off, &mut s_off, &chunks_off)] {
+        for (i, &id) in chunks.iter().enumerate().filter(|(i, _)| i % 8 != 0) {
+            assert!(raster.replace_dynamic(&gpu, id, &chunk_mesh(i, half, 1, 40)));
+            let at = scene.instances.iter_mut().find(|(m, _, _)| *m == id).expect("the chunk's instance");
+            at.2.normal_mat[0][3] = raster.dyn_paint_base(id) as f32;
+        }
+    }
+    let shrunk = on.geometry_arena_stats();
+    assert_eq!(shrunk.pages, peak.pages, "the fixture: a survivor on every page keeps every page");
+    assert!(shrunk.live * 4 < shrunk.bytes, "the fixture: the pages should be under a quarter full ({} of {} bytes)", shrunk.live, shrunk.bytes);
+
+    // A frame at a time, each moving a bounded amount.
+    let mut steps = 0;
+    loop {
+        let moved = on.maintain_geometry(&gpu);
+        if moved == 0 {
+            break;
+        }
+        // The budget, and at most the one slot it was on when it ran out.
+        assert!(moved <= (4 << 20) + 8192 * 36, "one call moved {moved} bytes");
+        steps += 1;
+        assert!(steps < 64, "the arena never settled");
+    }
+    let after = on.geometry_arena_stats();
+    assert!(
+        after.bytes * 2 < shrunk.bytes,
+        "with a survivor on every page the arena still holds {} bytes in {} pages, of {} in {} ({} live)",
+        after.bytes,
+        after.pages,
+        shrunk.bytes,
+        shrunk.pages,
+        after.live
+    );
+    assert!(after.moved > 0 && after.pages < shrunk.pages);
+    // What a memory budget reads is what the pages hold.
+    assert_eq!(on.mesh_gpu_held(chunks_on.iter().copied()), after.bytes, "the chunks' held memory is not the pages'");
+
+    let (_, px_on) = planned_frame(&gpu, &mut on, &s_on, &colour);
+    let (_, px_off) = planned_frame(&gpu, &mut off, &s_off, &colour);
+    same("colour after moving the survivors", &px_on[0], &px_off[0]);
+    same("sun map after moving the survivors", &px_on[1], &px_off[1]);
+    // And they still remesh where they are now.
+    for (raster, chunks) in [(&mut on, &chunks_on), (&mut off, &chunks_off)] {
+        assert!(raster.replace_dynamic(&gpu, chunks[8], &chunk_mesh(8, half * 0.8, 150, 200)));
+    }
+    let (_, px_on) = planned_frame(&gpu, &mut on, &s_on, &colour);
+    let (_, px_off) = planned_frame(&gpu, &mut off, &s_off, &colour);
+    same("colour after remeshing a moved chunk", &px_on[0], &px_off[0]);
+    // A mesher index past the mesh's own vertices would draw a neighbour's
+    // vertices out of the page: the slot refuses the mesh.
+    let mut bad = chunk_mesh(16, half, 150, 0);
+    bad.indices[5] = bad.vertices.len() as u32;
+    assert!(!on.replace_dynamic(&gpu, chunks_on[16], &bad), "a mesh indexing past its own vertices went into the arena");
 }
