@@ -2692,6 +2692,7 @@ impl Raymarch {
         if !frame.fill {
             return;
         }
+        use crate::sky_cache::{SKY_ATLAS_W, SKY_HEADER_BYTES, SKY_LEVEL_ROWS, SKY_TEXEL};
         let s = &self.sky_slots[slot];
         // The fill reads this frame's field.
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
@@ -2712,21 +2713,32 @@ impl Raymarch {
             });
             rp.set_pipeline(&self.sky_fill_pipeline);
             rp.set_bind_group(0, &self.bind, &[]);
-            rp.draw(0..3, 0..1);
+            // Only the levels with cells due: each is a band of rows.
+            for (l, _) in frame.due.iter().enumerate().filter(|(_, d)| **d) {
+                rp.set_scissor_rect(0, l as u32 * SKY_LEVEL_ROWS, SKY_ATLAS_W, SKY_LEVEL_ROWS);
+                rp.draw(0..3, 0..1);
+            }
         }
-        use crate::sky_cache::{SKY_ATLAS_H, SKY_ATLAS_W, SKY_HEADER_BYTES, SKY_TEXEL};
-        encoder.copy_texture_to_buffer(
-            s.atlas.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &s.buf,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: SKY_HEADER_BYTES,
-                    bytes_per_row: Some(SKY_ATLAS_W * SKY_TEXEL),
-                    rows_per_image: Some(SKY_ATLAS_H),
+        for (l, _) in frame.due.iter().enumerate().filter(|(_, d)| **d) {
+            let row = l as u32 * SKY_LEVEL_ROWS;
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &s.atlas,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: row, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
                 },
-            },
-            wgpu::Extent3d { width: SKY_ATLAS_W, height: SKY_ATLAS_H, depth_or_array_layers: 1 },
-        );
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &s.buf,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: SKY_HEADER_BYTES + (row * SKY_ATLAS_W * SKY_TEXEL) as u64,
+                        bytes_per_row: Some(SKY_ATLAS_W * SKY_TEXEL),
+                        rows_per_image: Some(SKY_LEVEL_ROWS),
+                    },
+                },
+                wgpu::Extent3d { width: SKY_ATLAS_W, height: SKY_LEVEL_ROWS, depth_or_array_layers: 1 },
+            );
+        }
         gpu.queue.submit([encoder.finish()]);
     }
 

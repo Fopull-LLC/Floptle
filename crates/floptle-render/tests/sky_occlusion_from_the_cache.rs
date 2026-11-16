@@ -250,3 +250,231 @@ fn a_thin_plank_keeps_the_water_under_it_covered() {
     assert!(leaks <= covered / 20, "light leaks under the plank: {leaks} of {covered} covered pixels read over 0.3");
     assert!(shut <= open / 20, "{shut} of {open} open pixels read under 0.7");
 }
+
+/// The crowded beach with every proxy held still long enough to be baked
+/// in: the same bars against the four rays as the still terrain.
+#[test]
+fn a_crowded_beach_reads_from_the_cache_once_it_holds_still() {
+    let Some(mut beach) = Beach::new(terrain()) else { return };
+    beach.raymarch.set_sky_cache(&beach.gpu, Some(24.0));
+    let png = std::env::var("SKY_CACHE_PNG").ok();
+    for view in [View::EyeLevel, View::Above] {
+        let (globals, eye, rm) = beach.stage_with(view, Layout::Crowd, DVec3::ZERO);
+        beach.settle_all(rm, eye);
+        let st = beach.raymarch.sky_cache_stats(0).unwrap();
+        assert_eq!(st.settled.count_ones(), PROXIES as u32, "{view:?}: {st:?}");
+        assert_eq!(st.moving, 0, "{view:?}: {st:?}");
+        let call = "skyOcclusion(worldPos, n, 24)";
+        let path = png.as_ref().map(|d| format!("{d}/crowd-{view:?}.png"));
+        let (sea, mean, p95, p999, worst, served) = against_the_march(&mut beach, globals, eye, call, path.as_deref());
+        println!("{view:?} crowd {call}: {sea} sea px; served {:.1}%; difference mean {mean:.4}, 95% {p95:.3}, 99.9% {p999:.3}, worst {worst:.3}", served * 100.0);
+        hold(&format!("{view:?} crowd"), served, mean, p95, p999, worst);
+    }
+}
+
+/// A baked deck pushed four units along: the water where it now stands
+/// darkens on the very next frame, from the short-range term for proxies
+/// that move, and once its refill is done the cache agrees with the march
+/// again, its old place open.
+#[test]
+fn a_proxy_that_moves_darkens_where_it_goes_at_once_and_leaves_its_old_place() {
+    let Some(mut beach) = Beach::new(terrain()) else { return };
+    beach.raymarch.set_sky_cache(&beach.gpu, Some(24.0));
+    let (globals, eye, mut rm) = beach.stage_with(View::EyeLevel, Layout::Crowd, DVec3::ZERO);
+    // A raised deck in the spare slot, sixteen units ahead of the camera
+    // and well inside the moving proxies' mask grid (a dock out past it
+    // casts no cover while it moves, by design), and higher over the water
+    // than the op's rays lift off it over this coarse terrain (up to 2.3).
+    let deck = (DVec3::new(6.0, 3.5, 2.0) - eye).as_vec3();
+    rm.prox_a[30] = [deck.x, deck.y, deck.z, 0.0];
+    rm.prox_b[30] = [2.0, 0.1, 2.0, 2.0];
+    rm.prox_rot[30] = [0.0, 0.0, 0.0, 1.0];
+    rm.prox_count[0] = 31.0;
+    beach.raymarch.upload_globals(&beach.gpu, rm);
+    beach.settle_all(rm, eye);
+    // Pushed four units across the view.
+    let mut moved = rm;
+    moved.prox_a[30][2] += 4.0;
+    let call = "skyOcclusion(worldPos, vec3(0, 1, 0), 24)";
+    let (before, _) = beach.both(globals, eye, call);
+    beach.raymarch.upload_globals(&beach.gpu, moved);
+    beach.refresh(moved, eye);
+    let st = beach.raymarch.sky_cache_stats(0).unwrap();
+    assert_eq!(st.moving, 1 << 30, "{st:?}");
+    let (now, full) = beach.both(globals, eye, call);
+    // Where the march now reads the dock's cover, darker by over a
+    // quarter than the cache read before it moved; on those, the cache
+    // must already read darker by at least a tenth.
+    let (mut fresh, mut followed) = (0usize, 0usize);
+    for ((b, a), f) in before.iter().zip(&now).zip(&full) {
+        if let (Some(b), Some(a), Some(f)) = (b, a, f)
+            && b - f > 0.25
+        {
+            fresh += 1;
+            if b - a > 0.1 {
+                followed += 1;
+            }
+        }
+    }
+    let dark = |v: &[Option<f32>]| v.iter().flatten().filter(|x| **x < 0.5).count();
+    let most = before.iter().zip(&full).filter_map(|(b, f)| Some(b.as_ref()? - f.as_ref()?)).fold(0.0f32, f32::max);
+    println!("{fresh} px newly under the deck, {followed} of them darker on the first frame; dark before {}, now {}, march {}; most darkened {most:.3}", dark(&before), dark(&now), dark(&full));
+    assert!(fresh > 200, "the fixture: only {fresh} pixels newly covered");
+    assert!(followed * 4 >= fresh * 3, "only {followed} of {fresh} newly covered pixels darkened on the first frame");
+    beach.settle_all(moved, eye);
+    let (sea, mean, p95, p999, worst, served) = against_the_march(&mut beach, globals, eye, call, None);
+    println!("after: {sea} sea px; served {:.1}%; difference mean {mean:.4}, 95% {p95:.3}, 99.9% {p999:.3}, worst {worst:.3}", served * 100.0);
+    // The deck is a crisp caster a few cells across: at its shadow's edge
+    // the four rays step by up to three quarters, which the cells blur, so
+    // the worst pixel is not held here; the rest of the bars are.
+    assert!(served >= 0.9 && mean <= 0.03 && p95 <= 0.1, "after the deck moved: served {served}, mean {mean}, 95% {p95}");
+    // Where it stood is open again.
+    let (after, full) = beach.both(globals, eye, call);
+    let (mut left, mut open) = (0usize, 0usize);
+    for ((b, a), f) in before.iter().zip(&after).zip(&full) {
+        if let (Some(b), Some(a), Some(f)) = (b, a, f)
+            && *b < 0.5 && *f > 0.9
+        {
+            left += 1;
+            if *a > 0.8 {
+                open += 1;
+            }
+        }
+    }
+    println!("{left} px the deck left, {open} of them open again");
+    assert!(left > 200, "the fixture: the deck left only {left} pixels");
+    assert!(open * 20 >= left * 19, "only {open} of the {left} pixels the deck left read open again");
+}
+
+/// GPU milliseconds a frame of the sea through `bind` takes while the
+/// camera walks forward a quarter unit a frame from `view`, the cache
+/// refreshed every frame (its fill included): the least of several rounds.
+fn walking_cost(beach: &mut Beach, timer: &mut floptle_render::GpuTimer, view: View, bind: floptle_render::FlslBindingId, refresh: bool) -> f32 {
+    const FRAMES: usize = 20;
+    let mut best = f32::MAX;
+    let mut k = 0usize;
+    for _ in 0..8 {
+        if !timer.begin() {
+            continue;
+        }
+        timer.mark(&beach.gpu, "walk");
+        for _ in 0..FRAMES {
+            k += 1;
+            let shift = DVec3::new(0.25 * (k % 120) as f64, 0.0, 0.0);
+            let (g, eye, rm) = beach.stage_with(view, Layout::Crowd, shift);
+            if refresh {
+                beach.refresh(rm, eye);
+            }
+            beach.draw(g, eye, bind);
+        }
+        timer.mark_gap(&beach.gpu);
+        timer.end(&beach.gpu);
+        for _ in 0..200 {
+            beach.gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+            timer.poll();
+            if timer.begin() {
+                break;
+            }
+        }
+        if let Some(s) = timer.spans().iter().find(|s| s.label == "walk") {
+            best = best.min(s.ms / FRAMES as f32);
+        }
+    }
+    best
+}
+
+/// What `skyOcclusion(worldPos, up, 24)` costs on the crowded beach, over
+/// the plain shader, beside six field reads: marched (the cache off),
+/// read from the settled cache, while the camera walks (the fill's
+/// refills counted in), and with every proxy moving (read through the
+/// short-range term). Held as ratios to six reads, so a slower or busier
+/// GPU moves both sides: the settled cache no more than two and a half
+/// times six reads (it measures 1.2 to 2 times on an RTX 4060, where the
+/// march costs 6 to 8 times),
+/// and thirty moving proxies no more than half again what thirty baked
+/// ones cost.
+#[test]
+fn a_crowded_beach_costs_a_few_field_reads_through_the_cache() {
+    let Some(mut beach) = Beach::new(terrain()) else { return };
+    if beach.gpu.adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+        return;
+    }
+    let Some(mut timer) = floptle_render::GpuTimer::new(&beach.gpu) else { return };
+    let plain = beach.shader("1.0");
+    let six = beach.shader(SIX_READS);
+    let sky = beach.shader("skyOcclusion(worldPos, vec3(0, 1, 0), 24)");
+    for view in [View::EyeLevel, View::Above] {
+        beach.raymarch.set_sky_cache(&beach.gpu, None);
+        let (globals, eye, rm) = beach.stage_with(view, Layout::Crowd, DVec3::ZERO);
+        let t = cost(&mut beach, &mut timer, globals, eye, &[plain, six, sky, plain, six, sky]);
+        let base = t[0].min(t[3]);
+        let (reads, march) = (t[1].min(t[4]) - base, t[2].min(t[5]) - base);
+        // Every proxy moving: each nudged two centimetres every frame, so
+        // none ever holds still long enough to be baked in.
+        beach.raymarch.set_sky_cache(&beach.gpu, Some(24.0));
+        for k in 0..160 {
+            let mut jig = rm;
+            for a in jig.prox_a.iter_mut().take(PROXIES) {
+                a[1] += 0.02 * (k % 2) as f32;
+            }
+            beach.raymarch.upload_globals(&beach.gpu, jig);
+            beach.refresh(jig, eye);
+        }
+        let st = beach.raymarch.sky_cache_stats(0).unwrap();
+        assert_eq!(st.settled, 0, "{st:?}");
+        assert_eq!(st.moving.count_ones(), PROXIES as u32, "{st:?}");
+        let t = cost(&mut beach, &mut timer, globals, eye, &[plain, sky, plain, sky]);
+        let moving = t[1].min(t[3]) - t[0].min(t[2]);
+        beach.raymarch.upload_globals(&beach.gpu, rm);
+        beach.settle_all(rm, eye);
+        let t = cost(&mut beach, &mut timer, globals, eye, &[plain, six, sky, plain, six, sky]);
+        let base2 = t[0].min(t[3]);
+        let (reads2, steady) = (t[1].min(t[4]) - base2, t[2].min(t[5]) - base2);
+        let walk_plain = walking_cost(&mut beach, &mut timer, view, plain, false);
+        let walk = walking_cost(&mut beach, &mut timer, view, sky, true) - walk_plain;
+        let fill = walking_cost(&mut beach, &mut timer, view, plain, true) - walk_plain;
+        println!(
+            "{view:?} crowd: plain {base:.3} ms; over it, six reads {reads:.3} / {reads2:.3}; skyOcclusion reach 24 marched {march:.3}, cache settled {steady:.3}, all proxies moving {moving:.3}, camera walking {walk:.3} (of which the fill {fill:.3})"
+        );
+        let r = reads.min(reads2).max(0.01);
+        assert!(steady <= 2.5 * r, "{view:?}: through the settled cache skyOcclusion costs {steady:.3} ms, {:.1} times six reads ({r:.3} ms)", steady / r);
+        assert!(moving <= 1.5 * steady.max(0.02), "{view:?}: with every proxy moving it costs {moving:.3} ms, {:.1} times the settled {steady:.3} ms", moving / steady.max(0.02));
+    }
+}
+
+/// Where the op's time goes through the cache on the crowded beach: the
+/// share of the sea it serves, and the cost of the cache's read alone and
+/// of its finest level alone beside the op and six reads. A probe for
+/// tuning, not a guard: `--ignored` to run it.
+#[test]
+#[ignore]
+fn where_the_time_goes() {
+    let Some(mut beach) = Beach::new(terrain()) else { return };
+    let Some(mut timer) = floptle_render::GpuTimer::new(&beach.gpu) else { return };
+    const ONLY: &str = r#"
+fn sky_only(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
+    return sky_cached(p, n).x;
+}
+fn sky_lvl0(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
+    return skyc_level(0u, p, n).x;
+}
+"#;
+    let plain = beach.shader("1.0");
+    let six = beach.shader(SIX_READS);
+    let sky = beach.shader("skyOcclusion(worldPos, vec3(0, 1, 0), 24)");
+    let only = beach.shader_with("skyOcclusion(worldPos, vec3(0, 1, 0), 24)", Some(("sky_occlusion(", "sky_only(")), ONLY);
+    let l0 = beach.shader_with("skyOcclusion(worldPos, vec3(0, 1, 0), 24)", Some(("sky_occlusion(", "sky_lvl0(")), ONLY);
+    let served = beach.shader_with("skyOcclusion(worldPos, vec3(0, 1, 0), 24)", Some(("sky_occlusion(", "sky_served(")), SERVED);
+    beach.raymarch.set_sky_cache(&beach.gpu, Some(24.0));
+    for view in [View::EyeLevel, View::Above] {
+        let (globals, eye, rm) = beach.stage_with(view, Layout::Crowd, DVec3::ZERO);
+        beach.settle_all(rm, eye);
+        beach.draw(globals, eye, served);
+        let v = beach.read();
+        let n = v.iter().flatten().count();
+        let s = v.iter().flatten().filter(|x| **x > 0.5).count();
+        let t = cost(&mut beach, &mut timer, globals, eye, &[plain, six, sky, only, l0, plain, six, sky, only, l0]);
+        let b = t[0].min(t[5]);
+        println!("{view:?}: served {:.1}%; six {:.3} op {:.3} cache-only {:.3} level0-only {:.3}", 100.0 * s as f32 / n as f32, t[1].min(t[6]) - b, t[2].min(t[7]) - b, t[3].min(t[8]) - b, t[4].min(t[9]) - b);
+    }
+}

@@ -465,6 +465,29 @@ within 0.15 everywhere, and within 0.02 on all but about one pixel in a hundred 
 where a march started past a stretch already proved clear samples its
 penumbra at other places.
 
+**The sky cache.** Where nearly every pixel of a sea is near a collider
+proxy (a beach full of crew, crates, a dock and boats), the early outs
+settle little and the cone marches. The renderer can instead keep the
+cone's answer in a grid round the camera (`crates/floptle-render/src/sky_cache.rs`):
+four nested cubes of 48 cells, 1 to 8 units across, each cell holding the
+cone along the six axis directions, refilled on the GPU only where
+something changed (a scroll, an edit, a volume or blob that moved, a proxy
+that came to rest or started moving), a few thousand cells a frame. A pixel
+then reads the eight cells round it. It answers one reach (calls at any
+other reach march), holds the terrain, the volumes, the blobs and the
+proxies that have held still for half a second; a proxy that moves is read
+per pixel through a short-range term instead, approximate by design. A
+scene with Field Shapes is not cached. Where a cell centre sits too near
+matter for its own rays (just under a plank, inside rock) it is not read,
+and where too few of the eight can answer the op marches, so cover does not
+leak. Cover's edges come out softer than four hard rays: on the beach the
+mean difference from the march is under 0.01 and 95% of the sea is within
+0.03. It is off by default, so a project looks exactly as it did; it is
+not yet a project setting. `sky_occlusion_from_the_cache.rs` holds its
+answers against the march (still terrain, a thin plank, the crowded beach,
+a dock pushed along) and its cost against six field reads: no more than
+twice, where the march on the crowded beach costs six to eight times.
+
 ### 4.5 Moving the surface: `output offset`
 
 A surface shader can move the geometry it is on. `output offset` is a `vec3`

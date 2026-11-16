@@ -381,7 +381,7 @@ impl Beach {
     /// Refresh the sky cache until a camera standing still at `eye` has
     /// filled every level.
     pub fn settle(&mut self, rm: RaymarchGlobals, eye: DVec3) {
-        for _ in 0..90 {
+        for _ in 0..160 {
             self.refresh(rm, eye);
         }
         self.gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
@@ -393,7 +393,7 @@ impl Beach {
         for k in 0..1000 {
             self.refresh(rm, eye);
             let st = self.raymarch.sky_cache_stats(0).unwrap_or_default();
-            if k > 60 && st.boxes == 0 && st.moving == 0 {
+            if k > 160 && st.boxes == 0 && st.moving == 0 {
                 break;
             }
         }

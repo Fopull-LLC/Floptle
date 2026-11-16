@@ -54,7 +54,7 @@ pub const SKY_DIMS: u32 = 48;
 /// The finest level's cell size, in world units; each level doubles it.
 pub const SKY_CELL0: f32 = 1.0;
 /// Cells refilled per frame, about.
-pub const SKY_BUDGET: u32 = 8192;
+pub const SKY_BUDGET: u32 = 4096;
 /// Frames a proxy must hold still before the cache takes it in.
 pub const SKY_SETTLE_FRAMES: u32 = 30;
 /// Dirty boxes refilled at once; more are merged into these.
@@ -142,7 +142,15 @@ pub struct SkyFrame {
     pub fill: bool,
     /// Cells the fill is expected to refill.
     pub cells: u32,
+    /// The levels the fill pass need visit: those with cells due. Each is
+    /// [`SKY_LEVEL_ROWS`] rows of the atlas, so the pass and the copy can
+    /// skip the rest.
+    pub due: [bool; SKY_LEVELS],
 }
+
+/// Rows of the atlas each level takes.
+pub const SKY_LEVEL_ROWS: u32 = SKY_DIMS * SKY_DIMS * SKY_DIMS / SKY_ATLAS_W;
+const _: () = assert!(SKY_LEVEL_ROWS * SKY_ATLAS_W == SKY_DIMS * SKY_DIMS * SKY_DIMS);
 
 /// What [`SkyCache::plan`] has been doing, for counters and tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -460,8 +468,16 @@ impl SkyCache {
         let mut left = (self.budget as f64 - box_rate).max(self.budget as f64 / 4.0);
         let mut periods = [1u32; SKY_LEVELS];
         let mut cells = box_rate;
+        let heal = frame.is_multiple_of(HEAL_EVERY);
+        let mut due = [heal; SKY_LEVELS];
+        for (l, d) in due.iter_mut().enumerate() {
+            *d |= self.boxes.iter().any(|b| self.level_cells(l, b.lo, b.hi) > 0.0);
+        }
         for l in (0..SKY_LEVELS).rev() {
             let want = self.pending[l];
+            if want >= 1.0 {
+                due[l] = true;
+            }
             if want < 1.0 {
                 self.pending[l] = 0.0;
                 continue;
@@ -475,8 +491,7 @@ impl SkyCache {
             cells += done;
             self.pending[l] = (want - done).max(0.0);
         }
-        let heal = frame.is_multiple_of(HEAL_EVERY);
-        let fill = !shapes && (cells >= 1.0 || heal);
+        let fill = !shapes && due.iter().any(|d| *d);
 
         // The header.
         let mut h = vec![0u32; SKY_HEADER_WORDS];
@@ -539,7 +554,7 @@ impl SkyCache {
             }
         }
         self.stats = stats;
-        SkyFrame { header: h, fill, cells: cells as u32 }
+        SkyFrame { header: h, fill, cells: cells as u32, due }
     }
 
     fn reset_level(&mut self, l: usize, stats: &mut SkyStats) {
@@ -578,19 +593,20 @@ impl SkyCache {
 
     /// Cells of every level's window inside an anchor-relative box.
     fn box_cells(&self, lo: DVec3, hi: DVec3) -> f64 {
+        (0..SKY_LEVELS).map(|l| self.level_cells(l, lo, hi)).sum()
+    }
+
+    /// Cells of level `l`'s window inside an anchor-relative box.
+    fn level_cells(&self, l: usize, lo: DVec3, hi: DVec3) -> f64 {
         let Some(mins) = self.mins else { return 0.0 };
-        let mut n = 0.0;
-        for (l, m) in mins.iter().enumerate() {
-            let cell = level_cell(l) as f64;
-            let mut v = 1.0;
-            for a in 0..3 {
-                let w0 = m[a] as f64 * cell;
-                let w1 = w0 + SKY_DIMS as f64 * cell;
-                v *= ((hi[a].min(w1) - lo[a].max(w0)) / cell).max(0.0);
-            }
-            n += v;
+        let cell = level_cell(l) as f64;
+        let mut v = 1.0;
+        for a in 0..3 {
+            let w0 = mins[l][a] as f64 * cell;
+            let w1 = w0 + SKY_DIMS as f64 * cell;
+            v *= ((hi[a].min(w1) - lo[a].max(w0)) / cell).max(0.0);
         }
-        n
+        v
     }
 }
 
@@ -690,7 +706,14 @@ mod tests {
             let f = c.plan(&view(cam), &g, &[], &[]);
             assert_eq!(f.cells, 0);
             assert_eq!(c.stats().scrolled, [0; SKY_LEVELS]);
+            // Only the heal pass, now and then, visits any level.
+            assert!(f.due.iter().all(|d| *d) || !f.due.iter().any(|d| *d), "{:?}", f.due);
         }
+        // A one-cell step leaves only the finest level due (unless the
+        // step lands on a heal frame, when every level is visited).
+        let cam2 = cam + DVec3::new(0.0, 0.0, 1.0);
+        let f = c.plan(&view(cam2), &g, &[], &[]);
+        assert!(f.due[0] && (f.due.iter().all(|d| *d) || !f.due[1..].iter().any(|d| *d)), "{:?}", f.due);
     }
 
     #[test]
@@ -849,7 +872,7 @@ mod tests {
             g.vol_center[0] = [t.x, t.y, t.z, 3.0];
             g.vol_half[0] = [100.0, 20.0, 100.0, 0.6];
             let f = c.plan(&SkyView { cam, anchor, anchor_id: 7 }, &g, &[1], &[]);
-            if k > 100 {
+            if k > 250 {
                 assert_eq!(f.cells, 0, "frame {k}: {:?}", c.stats());
                 assert_eq!(c.stats().boxes, 0);
             }

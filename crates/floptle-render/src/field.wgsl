@@ -2596,9 +2596,11 @@ fn skyc_mod(l: u32) -> vec3<u32> {
 // lattice it belongs to on each axis, and the level's epoch), with the
 // valid bit left out: compared against `(cell.y >> 24) & 0xFD`.
 fn skyc_tag(l: u32, s: vec3<u32>) -> u32 {
-    let o = SKYC_LEVEL + l * SKYC_LEVEL_WORDS;
-    let m = skyc_mod(l);
-    let t = skyc_word(o + 7u);
+    return skyc_tag_of(skyc_mod(l), skyc_word(SKYC_LEVEL + l * SKYC_LEVEL_WORDS + 7u), s);
+}
+
+// `skyc_tag` from the level's storage start `m` and tag word `t`, read once.
+fn skyc_tag_of(m: vec3<u32>, t: u32, s: vec3<u32>) -> u32 {
     let wrap = select(0u, 1u, s.x < m.x) | select(0u, 2u, s.y < m.y) | select(0u, 4u, s.z < m.z);
     return 1u | (((t & 7u) ^ wrap) << 2u) | (((t >> 3u) & 7u) << 5u);
 }
@@ -2680,6 +2682,7 @@ fn skyc_level(l: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let f = u - base;
     let b = vec3<u32>(base);
     let m = skyc_mod(l);
+    let tw = skyc_word(o + 7u);
     var sum = 0.0;
     var wsum = 0.0;
     var usable = 0.0;
@@ -2689,7 +2692,7 @@ fn skyc_level(l: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         let s = (b + corner + m) % vec3<u32>(SKYC_DIMS);
         let c = skyc_cell(l, s);
         let flags = c.y >> 24u;
-        if ((flags & 0xFDu) != skyc_tag(l, s)) {
+        if ((flags & 0xFDu) != skyc_tag_of(m, tw, s)) {
             continue;
         }
         filled = filled + 1u;
@@ -2713,18 +2716,55 @@ fn skyc_level(l: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(sum / wsum, wsum, edge);
 }
 
-// What the cache leaves out, for a point it answered: collider proxies the
-// cache has not baked in, each marched as the op marches them, against
-// nothing else.
+// What the cache leaves out, for a point it answered: the collider proxies
+// that are moving (or have not held still long enough to be baked in). A
+// march for them would cost the four rays the cache is there to save, so
+// they get a short-range term instead, in the way SDF ambient occlusion
+// reads a field: three reads of the moving proxies along `n`, at 0.5, 1.5
+// and 4 units, each darkening by how much nearer than that the nearest one
+// is. Only the proxies the mask grid round the camera names for the
+// point's cell are read, so no pixel loops over every slot; past the grid,
+// moving proxies cast no sky cover. A proxy holding the point (a crew
+// member's own capsule, for the surface of the crew member) is left out,
+// as the march leaves it out.
 fn sky_unbaked(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
-    let baked = skyc_word(SKYC_SETTLED);
-    let pc = min(u32(G.prox_count.x), 32u);
-    let all = select((1u << pc) - 1u, 0xffffffffu, pc >= 32u);
-    let rest = all & ~baked;
-    if (rest == 0u) {
+    let moving = skyc_word(SKYC_MOVING);
+    if (moving == 0u) {
         return 1.0;
     }
-    return sky_cone(p, n, reach, FieldSet(0u, rest, false, false, 0.0));
+    let size = skyc_f(SKYC_GRID_CELL);
+    let origin = vec3<f32>(skyc_f(SKYC_GRID_ORIGIN), skyc_f(SKYC_GRID_ORIGIN + 1u), skyc_f(SKYC_GRID_ORIGIN + 2u));
+    let g = floor((p - origin) / size);
+    if (any(g < vec3<f32>(0.0)) || any(g >= vec3<f32>(f32(SKYC_GRID_DIMS)))) {
+        return 1.0;
+    }
+    let gi = vec3<u32>(g);
+    var mask = skyc_word(SKYC_GRID + (gi.z * SKYC_GRID_DIMS + gi.y) * SKYC_GRID_DIMS + gi.x) & moving;
+    var m = mask;
+    while (m != 0u) {
+        let i = firstTrailingBit(m);
+        m = m & (m - 1u);
+        if (prox_d(i, p + n * 0.05) < 0.05) {
+            mask = mask & ~(1u << i);
+        }
+    }
+    if (mask == 0u) {
+        return 1.0;
+    }
+    var occ = 0.0;
+    for (var k = 0u; k < 3u; k = k + 1u) {
+        let h = select(select(4.0, 1.5, k == 1u), 0.5, k == 0u);
+        let q = p + n * h;
+        var d = 1e9;
+        var mm = mask;
+        while (mm != 0u) {
+            let i = firstTrailingBit(mm);
+            mm = mm & (mm - 1u);
+            d = min(d, prox_d(i, q));
+        }
+        occ = occ + clamp(1.0 - d / h, 0.0, 1.0);
+    }
+    return 1.0 - occ / 3.0;
 }
 
 // The pieces the cache holds: every volume present, the blobs, and the
@@ -2752,14 +2792,24 @@ fn skyc_fill(c: vec3<f32>, cell: f32, tag: u32, reach: f32) -> vec2<u32> {
     // matter lies inside that stretch (the centre just under a plank), the
     // rays start in it or past it, and both read open what a point a little
     // further from the plank reads covered: the lobe says it cannot answer,
-    // and the cells round a point that can answer do. The sphere half way
-    // along the stretch holds all of it.
+    // and the cells round a point that can answer do. Four small spheres
+    // along the stretch hold all of it; one big one would also take in
+    // ground beside the stretch, and the cells by every shore would give up.
     let lift = sky_ray_lift(3u, shadow_lift_base(c));
     var lobe: array<u32, 6>;
     for (var a = 0u; a < 6u; a = a + 1u) {
         var axis = vec3<f32>(0.0);
         axis[a >> 1u] = select(1.0, -1.0, (a & 1u) == 1u);
-        if (d < lift && field_set_d(c + axis * (0.5 * lift), pieces, 0u) < 0.5 * lift) {
+        var hit = false;
+        if (d < lift) {
+            for (var k = 0u; k < 4u; k = k + 1u) {
+                if (field_set_d(c + axis * ((f32(k) + 0.5) * 0.25 * lift), pieces, 0u) < 0.125 * lift) {
+                    hit = true;
+                    break;
+                }
+            }
+        }
+        if (hit) {
             lobe[a] = SKYC_UNSURE;
             continue;
         }
