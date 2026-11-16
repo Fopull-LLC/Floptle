@@ -339,6 +339,22 @@ impl Beach {
         (globals, eye, rm)
     }
 
+    /// Refresh the sky cache for a camera at `eye`, the lattice anchored
+    /// at the world origin.
+    pub fn refresh(&mut self, rm: RaymarchGlobals, eye: DVec3) {
+        let at = floptle_render::sky_cache::SkyView { cam: eye, anchor: DVec3::ZERO, anchor_id: 1 };
+        self.raymarch.refresh_sky_cache(&self.gpu, rm, at, 0);
+    }
+
+    /// Refresh the sky cache until a camera standing still at `eye` has
+    /// filled every level.
+    pub fn settle(&mut self, rm: RaymarchGlobals, eye: DVec3) {
+        for _ in 0..90 {
+            self.refresh(rm, eye);
+        }
+        self.gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+    }
+
     /// Draw the sea through `bind`: a sheet at y = 0 over everything seaward
     /// of the shore (the land is drawn by its meshes, which this leaves out).
     pub fn draw(&mut self, globals: Globals, eye: DVec3, bind: FlslBindingId) {

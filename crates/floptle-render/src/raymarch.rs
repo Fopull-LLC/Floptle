@@ -675,6 +675,20 @@ pub struct Raymarch {
     fog_pass_on: bool,
     /// Draw every fragment that reads the fog pass magenta.
     fog_debug: bool,
+    /// The sky cache (`sky_cache.rs`): the reach it answers, `None` while it
+    /// is off; one cache per view that refreshes one (at most
+    /// [`SKY_VIEWS`]), and which of them the bind groups carry now.
+    sky_reach: Option<f32>,
+    sky_slots: Vec<SkySlot>,
+    sky_active: Option<usize>,
+    sky_fill_pipeline: wgpu::RenderPipeline,
+    /// What the sky binding holds while no cache is: a header that says off.
+    sky_fallback: wgpu::Buffer,
+    /// Volume edits since the caches last refreshed (slot, voxel box), and
+    /// a count that moves on whenever volumes are uploaded without keys, so
+    /// the caches know what they hold has changed.
+    sky_edits: Vec<(usize, [u32; 3], [u32; 3])>,
+    sky_gen: u64,
     /// Kept so [`set_custom_field`](Self::set_custom_field) can rebuild the
     /// pipelines with spliced Field Shape code (the bind layout never changes).
     pipeline_layout: wgpu::PipelineLayout,
@@ -898,6 +912,8 @@ impl Raymarch {
                 },
                 // The terrain slot store, shared with the raster pass.
                 crate::terrain_slots::slot_layout_entry(14),
+                // The sky cache, which its fill pass reads (`fs_sky_fill`).
+                fog_buf_entry(15),
             ],
         });
 
@@ -911,6 +927,7 @@ impl Raymarch {
         let (froxel_scan_layout, froxel_scan_pipeline) = froxel_scan_pipeline(gpu);
         let env = crate::env::EnvMap::new(device);
         let env_pipeline = Self::build_env_pipeline(gpu, &layout, &module);
+        let sky_fill_pipeline = Self::build_sky_fill_pipeline(gpu, &layout, &module);
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raymarch-globals"),
@@ -972,6 +989,7 @@ impl Raymarch {
         // No bake yet: a 4x1x1 of zeroes, so the binding is valid and reads black.
         let gi = crate::gi::GiVolume::empty(gpu);
         let fog_fallback = fog_fallback_buffer(device);
+        let sky_fallback = sky_fallback_buffer(device);
         // No sun map until the raster hands one over (`set_sun_map`): a 1x1
         // depth texture keeps the binding valid, and `fog_sun.x` stays 0.
         let sun_fallback = device
@@ -997,7 +1015,7 @@ impl Raymarch {
         let bind = make_bind(
             device, &bind_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &terrain_tex,
             &tile_sampler, &tile_sampler_nearest, &sky_tex, &prime_fallback, &gi.tex, &fog_fallback,
-            &sun_fallback, &sun_samp, &terrain_slots,
+            &sun_fallback, &sun_samp, &terrain_slots, &sky_fallback,
         );
         let field_layout = field_bind_layout(device);
         let scene_fallback = crate::ssr::SceneHistory::empty(device);
@@ -1005,7 +1023,7 @@ impl Raymarch {
         let field_bind = make_field_bind(
             device, &field_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &gi.tex,
             &prime_fallback, env.view(), env.sampler(), &scene_fallback.0, &scene_fallback.1,
-            &probe_fallback.0, &probe_fallback.1, &fog_fallback,
+            &probe_fallback.0, &probe_fallback.1, &fog_fallback, &sky_fallback,
         );
 
         Self {
@@ -1027,6 +1045,13 @@ impl Raymarch {
             sun_samp,
             fog_pass_on: true,
             fog_debug: false,
+            sky_reach: None,
+            sky_slots: Vec::new(),
+            sky_active: None,
+            sky_fill_pipeline,
+            sky_fallback,
+            sky_edits: Vec::new(),
+            sky_gen: 0,
             pipeline_layout: layout,
             globals_buf,
             bind_layout,
@@ -1121,6 +1146,32 @@ impl Raymarch {
         // not reach the environment map would leave every reflection showing
         // the previous sky.
         self.env_pipeline = Self::build_env_pipeline(gpu, &self.pipeline_layout, &module);
+        self.sky_fill_pipeline = Self::build_sky_fill_pipeline(gpu, &self.pipeline_layout, &module);
+    }
+
+    /// The sky cache's fill pass: one texel a cell, into the atlas.
+    fn build_sky_fill_pipeline(gpu: &Gpu, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule) -> wgpu::RenderPipeline {
+        gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raymarch-sky-fill"),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs_sky_fill"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState { format: SKY_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            multiview_mask: None,
+            cache: gpu.pipeline_cache.as_ref(),
+        })
     }
 
     /// The sky-capture pipeline: the same module and the same bind group as the
@@ -1334,6 +1385,7 @@ impl Raymarch {
     /// holds until the fourth one.
     fn rebuild_binds(&mut self, device: &wgpu::Device) {
         let fog = self.fog_active.and_then(|i| self.fog_slots.get(i)).map_or(&self.fog_fallback, |f| &f.buf);
+        let sky = self.sky_active.and_then(|i| self.sky_slots.get(i)).map_or(&self.sky_fallback, |f| &f.buf);
         self.field_bind = make_field_bind(
             device,
             &self.field_layout,
@@ -1350,6 +1402,7 @@ impl Raymarch {
             self.probe_view.as_ref().map_or(&self.probe_fallback.0, |s| &s.0),
             self.probe_view.as_ref().map_or(&self.probe_fallback.1, |s| &s.1),
             fog,
+            sky,
         );
         self.bind = make_bind(
             device,
@@ -1368,6 +1421,7 @@ impl Raymarch {
             self.sun_map.as_ref().unwrap_or(&self.sun_fallback),
             &self.sun_samp,
             &self.terrain_slots,
+            sky,
         );
         self.bind_primed = self.prime_view.as_ref().map(|v| {
             make_bind(
@@ -1387,6 +1441,7 @@ impl Raymarch {
                 self.sun_map.as_ref().unwrap_or(&self.sun_fallback),
                 &self.sun_samp,
                 &self.terrain_slots,
+                sky,
             )
         });
     }
@@ -1629,6 +1684,7 @@ impl Raymarch {
             {
                 write_volume_data(gpu, &self._dist_tex, &self._color_tex, b, [0, 0, 0]);
                 self.uploaded_cells += b.distance.len() as u64;
+                self.sky_gen += 1;
                 let (tight_min, tight_max) = full_content_bounds(b);
                 self.slots[0].tight_min = tight_min;
                 self.slots[0].tight_max = tight_max;
@@ -1664,6 +1720,7 @@ impl Raymarch {
         };
         self.atlas_refused = refused.map(|bytes| AtlasRefused { bytes, dropped: volumes.len() - accepted.len() });
         self.slots.clear();
+        self.sky_gen += 1;
         for (b, origin) in &accepted {
             write_volume_data(gpu, &dist_tex, &color_tex, b, *origin);
             self.uploaded_cells += b.distance.len() as u64;
@@ -1721,6 +1778,15 @@ impl Raymarch {
             }
         }
         self.uploaded_cells += write_sub_box(gpu, &self._dist_tex, &self._color_tex, off, baked, [x0, y0, z0], [x1, y1, z1]);
+        if self.sky_reach.is_some() {
+            if self.sky_edits.len() >= 64 {
+                // A storm of edits: refill everything rather than track each.
+                self.sky_edits.clear();
+                self.invalidate_sky_cache();
+            } else {
+                self.sky_edits.push((slot, [x0, y0, z0], [x1, y1, z1]));
+            }
+        }
     }
 
     /// Make the atlas hold exactly `volumes`, spending at most about
@@ -2537,6 +2603,156 @@ impl Raymarch {
         self.fog_debug = on;
     }
 
+    /// Turn the sky cache on, answering `skyOcclusion` calls at `reach`, or
+    /// off with `None` (the default), where every call marches as before.
+    /// See `sky_cache.rs`. A different reach starts every cache again.
+    pub fn set_sky_cache(&mut self, gpu: &Gpu, reach: Option<f32>) {
+        if reach == self.sky_reach {
+            return;
+        }
+        self.sky_reach = reach;
+        self.sky_slots.clear();
+        self.sky_edits.clear();
+        if self.sky_active.take().is_some() {
+            self.rebuild_binds(&gpu.device);
+        }
+    }
+
+    /// The reach the sky cache answers, `None` while it is off.
+    pub fn sky_cache(&self) -> Option<f32> {
+        self.sky_reach
+    }
+
+    /// Refill every view's sky cache from scratch.
+    pub fn invalidate_sky_cache(&mut self) {
+        for s in &mut self.sky_slots {
+            s.cache.invalidate();
+        }
+    }
+
+    /// What the last refresh of view `view`'s sky cache did, if it has one.
+    pub fn sky_cache_stats(&self, view: u64) -> Option<crate::sky_cache::SkyStats> {
+        self.sky_slots.iter().find(|s| s.view == view).map(|s| s.cache.stats())
+    }
+
+    /// Bring view `view`'s sky cache up to date for this frame and bind it,
+    /// for the passes that shade to read: work out what is due
+    /// (`SkyCache::plan`), write the header and run the fill pass over the
+    /// cells due. `globals` are this view's, as the frame uploads them; call
+    /// it after the volumes for the frame are uploaded and before the
+    /// passes that shade. `view` names the view: up to [`SKY_VIEWS`] keep a
+    /// cache of their own, and any more read none and march.
+    ///
+    /// Does nothing (and binds no cache) while the cache is off.
+    pub fn refresh_sky_cache(&mut self, gpu: &Gpu, mut globals: RaymarchGlobals, at: crate::sky_cache::SkyView, view: u64) {
+        let Some(reach) = self.sky_reach else { return };
+        let slot = match self.sky_slots.iter().position(|s| s.view == view) {
+            Some(i) => Some(i),
+            None if self.sky_slots.len() < SKY_VIEWS => {
+                self.sky_slots.push(SkySlot::new(&gpu.device, view, reach));
+                Some(self.sky_slots.len() - 1)
+            }
+            None => None,
+        };
+        if self.sky_active != slot {
+            self.sky_active = slot;
+            self.rebuild_binds(&gpu.device);
+        }
+        let Some(slot) = slot else { return };
+        self.patch_globals(&mut globals);
+        // What each volume instance holds: its region's key, or for a
+        // volume uploaded without one, how many such uploads there have been.
+        let region = |i: usize| {
+            let tag = globals.vol_atlas[i][3];
+            if tag >= 0.5 { tag as usize - 1 } else { i }
+        };
+        let keys: Vec<u64> = (0..MAX_VOLUMES)
+            .map(|i| self.slots.get(region(i)).map_or(0, |s| if s.key != 0 { s.key } else { self.sky_gen }))
+            .collect();
+        // Each edit, in every instance drawing from the region it went into.
+        let mut edits = Vec::new();
+        for &(r, lo, hi) in &self.sky_edits {
+            let Some(s) = self.slots.get(r) else { continue };
+            for i in (0..MAX_VOLUMES).filter(|&i| region(i) == r && globals.vol_center[i][3] >= 0.5) {
+                let (c, h) = (globals.vol_center[i], globals.vol_half[i]);
+                let at = |v: [u32; 3]| {
+                    let f = |a: usize| c[a] - h[a] + v[a] as f32 / s.dims[a].max(1) as f32 * 2.0 * h[a];
+                    glam::Vec3::new(f(0), f(1), f(2))
+                };
+                edits.push(crate::sky_cache::SkyEdit { min: at(lo), max: at(hi) });
+            }
+        }
+        if self.sky_slots.len() <= 1 || slot + 1 == self.sky_slots.len() {
+            // Every cache has seen them once the last one has.
+            self.sky_edits.clear();
+        }
+        let s = &mut self.sky_slots[slot];
+        let frame = s.cache.plan(&at, &globals, &keys, &edits);
+        gpu.queue.write_buffer(&s.buf, 0, bytemuck::cast_slice(&frame.header));
+        if !frame.fill {
+            return;
+        }
+        let s = &self.sky_slots[slot];
+        // The fill reads this frame's field.
+        gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raymarch-sky-fill") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raymarch-sky-fill"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &s.atlas_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.sky_fill_pipeline);
+            rp.set_bind_group(0, &self.bind, &[]);
+            rp.draw(0..3, 0..1);
+        }
+        use crate::sky_cache::{SKY_ATLAS_H, SKY_ATLAS_W, SKY_HEADER_BYTES, SKY_TEXEL};
+        encoder.copy_texture_to_buffer(
+            s.atlas.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &s.buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: SKY_HEADER_BYTES,
+                    bytes_per_row: Some(SKY_ATLAS_W * SKY_TEXEL),
+                    rows_per_image: Some(SKY_ATLAS_H),
+                },
+            },
+            wgpu::Extent3d { width: SKY_ATLAS_W, height: SKY_ATLAS_H, depth_or_array_layers: 1 },
+        );
+        gpu.queue.submit([encoder.finish()]);
+    }
+
+    /// View `view`'s sky cache buffer, header and cells, as the GPU has it.
+    /// Waits for the GPU: for tests.
+    #[doc(hidden)]
+    pub fn read_sky_cache(&self, gpu: &Gpu, view: u64) -> Option<Vec<u32>> {
+        let s = self.sky_slots.iter().find(|s| s.view == view)?;
+        let size = s.buf.size();
+        let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sky-cache-readback"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sky-cache-readback") });
+        enc.copy_buffer_to_buffer(&s.buf, 0, &staging, 0, size);
+        gpu.queue.submit([enc.finish()]);
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        let words = bytemuck::cast_slice(&slice.get_mapped_range()).to_vec();
+        staging.unmap();
+        Some(words)
+    }
+
     /// Render the SDF matter's silhouette as 1.0 into a single-channel mask (clearing
     /// it first) — the selection-outline source for the blob.
     pub fn draw_mask(&self, gpu: &Gpu, mask: &wgpu::TextureView, globals: RaymarchGlobals) {
@@ -2672,6 +2888,8 @@ pub(crate) fn field_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout 
             },
             // The half-resolution fog (`fog_cached`).
             fog_buf_entry(12),
+            // The sky cache (`sky_cached`).
+            fog_buf_entry(13),
         ],
     })
 }
@@ -2707,6 +2925,7 @@ pub(crate) fn make_field_bind(
     probes: &wgpu::TextureView,
     probes_samp: &wgpu::Sampler,
     fog: &wgpu::Buffer,
+    sky: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2728,6 +2947,7 @@ pub(crate) fn make_field_bind(
             wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(probes) },
             wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(probes_samp) },
             wgpu::BindGroupEntry { binding: 12, resource: fog.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 13, resource: sky.as_entire_binding() },
         ],
     })
 }
@@ -2763,6 +2983,7 @@ fn make_bind(
     sun: &wgpu::TextureView,
     sun_samp: &wgpu::Sampler,
     slots: &wgpu::Buffer,
+    sky_cache: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
     let gi_view = gi.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2791,6 +3012,7 @@ fn make_bind(
             wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(sun) },
             wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(sun_samp) },
             wgpu::BindGroupEntry { binding: 14, resource: slots.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 15, resource: sky_cache.as_entire_binding() },
         ],
     })
 }
@@ -3022,6 +3244,57 @@ pub(crate) fn fog_fallback_buffer(device: &wgpu::Device) -> wgpu::Buffer {
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     })
+}
+
+/// The sky cache's atlas format: two 32-bit words a cell.
+const SKY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Uint;
+/// Views that can keep a sky cache of their own at once; any more march.
+pub const SKY_VIEWS: usize = 2;
+
+/// What the sky binding holds while no cache is: zeroes, whose header says
+/// the cache is off.
+pub(crate) fn sky_fallback_buffer(device: &wgpu::Device) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("raymarch-sky-fallback"),
+        size: 256,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    })
+}
+
+/// One view's sky cache: the planner, the atlas the fill pass renders, and
+/// the buffer the atlas is copied into behind the header, which every
+/// surface reads.
+struct SkySlot {
+    view: u64,
+    cache: crate::sky_cache::SkyCache,
+    atlas: wgpu::Texture,
+    atlas_view: wgpu::TextureView,
+    buf: wgpu::Buffer,
+}
+
+impl SkySlot {
+    fn new(device: &wgpu::Device, view: u64, reach: f32) -> Self {
+        use crate::sky_cache::{SKY_ATLAS_H, SKY_ATLAS_W, SKY_HEADER_BYTES, SKY_TEXEL};
+        let atlas = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raymarch-sky-atlas"),
+            size: wgpu::Extent3d { width: SKY_ATLAS_W, height: SKY_ATLAS_H, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SKY_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raymarch-sky-cache"),
+            size: SKY_HEADER_BYTES + (SKY_ATLAS_W * SKY_ATLAS_H * SKY_TEXEL) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        SkySlot { view, cache: crate::sky_cache::SkyCache::new(reach), atlas, atlas_view, buf }
+    }
 }
 
 /// The 1x1 R32Float "no mesh anywhere" depth-prime fallback, holding 1.0. Any
