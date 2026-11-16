@@ -1020,6 +1020,7 @@ impl Editor {
                 render.free_all(raster);
             }
             render.pending.clear();
+            render.waiting = 0;
             render.empty.clear();
             render.born.clear();
             render.impostor = true;

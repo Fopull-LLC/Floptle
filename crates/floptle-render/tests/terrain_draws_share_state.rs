@@ -636,3 +636,82 @@ fn compaction_never_strands_an_empty_page() {
         start.pages
     );
 }
+
+/// **Pages that all keep some ground give back the room between them.** On
+/// a world small enough to be drawn whole, far ground stays on every page:
+/// a walk round it grew each page in turn, and none emptied to the quarter
+/// that compaction waited for, so back where the walk began the pages held
+/// half as much again as at the start. Here four full pages each keep three
+/// of their eight big slots, over a third full: one page's slots fit in the
+/// room the others have, and then another's. Compaction must move them
+/// there and let those pages go, a bounded amount a call, without starting
+/// a page; the pictures are the ones the slots draw with buffers of their
+/// own. Once it has nothing left to do it must say so call after call.
+#[test]
+fn pages_left_part_full_by_a_walk_give_back_the_room_between_them() {
+    let gpu = Gpu::headless(SIZE, SIZE);
+    if !gpu.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
+        // CI's OpenGL cannot build the raster pass.
+        return;
+    }
+    const N: usize = 32;
+    let colour = target(&gpu, "part-full-colour", gpu.scene_format());
+    let raster_with = |arena: bool| {
+        let mut r = Raster::new(&gpu);
+        r.set_sun_map_layout(&gpu, 512, true);
+        r.set_geometry_arena(arena);
+        // 8,192 vertices a slot, 65,536 a page: eight slots a page.
+        r.set_geometry_page_limit(1 << 16, 1 << 17);
+        let (s, chunks, half) = coloured_scene(&gpu, &mut r, N, 150);
+        (r, s, chunks, half)
+    };
+    let (mut on, mut s_on, chunks_on, half) = raster_with(true);
+    let (mut off, mut s_off, chunks_off, _) = raster_with(false);
+    let full = on.geometry_arena_stats();
+    assert_eq!(full.pages, 4, "the fixture: 32 big slots should fill four pages");
+    // Five of every eight shrink to one box: three big slots stay a page.
+    for (raster, scene, chunks) in [(&mut on, &mut s_on, &chunks_on), (&mut off, &mut s_off, &chunks_off)] {
+        for (i, &id) in chunks.iter().enumerate().filter(|(i, _)| i % 8 >= 3) {
+            assert!(raster.replace_dynamic(&gpu, id, &chunk_mesh(i, half, 1, 40)));
+            let at = scene.instances.iter_mut().find(|(m, _, _)| *m == id).expect("the chunk's instance");
+            at.2.normal_mat[0][3] = raster.dyn_paint_base(id) as f32;
+        }
+    }
+    let part = on.geometry_arena_stats();
+    assert_eq!(part.pages, 4, "the fixture: three big slots on every page keep every page");
+    assert!(
+        part.live * 4 > part.bytes && part.live * 2 < part.bytes,
+        "the fixture: the pages should be over a quarter and under half full ({} of {} bytes)",
+        part.live,
+        part.bytes
+    );
+    let mut steps = 0;
+    loop {
+        let moved = on.maintain_geometry(&gpu);
+        if moved == 0 {
+            break;
+        }
+        assert!(moved <= (4 << 20) + 8192 * 36, "one call moved {moved} bytes");
+        steps += 1;
+        assert!(steps < 64, "the arena never settled");
+    }
+    let after = on.geometry_arena_stats();
+    assert!(
+        after.pages == 2 && after.bytes * 5 <= after.live * 7,
+        "with three big slots on every page the arena still holds {} bytes in {} pages for {} live (it held {} in {})",
+        after.bytes,
+        after.pages,
+        after.live,
+        part.bytes,
+        part.pages
+    );
+    // Nothing left to move, call after call: a standing player's frames.
+    for _ in 0..3 {
+        assert_eq!(on.maintain_geometry(&gpu), 0, "a settled arena moved geometry again");
+    }
+    assert_eq!(on.geometry_arena_stats().moved, after.moved);
+    let (_, px_on) = planned_frame(&gpu, &mut on, &s_on, &colour);
+    let (_, px_off) = planned_frame(&gpu, &mut off, &s_off, &colour);
+    same("colour after emptying part-full pages", &px_on[0], &px_off[0]);
+    same("sun map after emptying part-full pages", &px_on[1], &px_off[1]);
+}
