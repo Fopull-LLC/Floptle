@@ -373,3 +373,59 @@ fn an_instance_without_a_hook_costs_next_to_nothing_outside_the_hooks() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **What the seed step costs over an idle crowd**, printed rather than
+/// held to a number: 230 instances that change nothing, as 46 kinds, as 46
+/// kinds beside one script that mentions `getfenv` (which makes every
+/// instance's `node` suspect), and as 230 kinds. Run with `--ignored
+/// --nocapture`; the scripts folder is `SEED_BENCH_DIR` if set, so the disk
+/// the project lives on can be measured.
+#[test]
+#[ignore]
+fn seed_step_cost_over_an_idle_crowd() {
+    let base = std::env::var("SEED_BENCH_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    for (kinds, extra) in [(46usize, ""), (46, "-- getfenv\n"), (230, "")] {
+        let dir = base.join(format!("floptle-seed-bench-{}-{kinds}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for k in 0..kinds {
+            let body = format!(
+                "defaults = {{ speed = 1 }}\nfunction update(node, dt) end\n{}",
+                if k == 0 { extra } else { "" }
+            );
+            write_script(&dir, &format!("k{k}"), &body);
+        }
+        let mut world = World::default();
+        for i in 0..230usize {
+            let e = world.spawn();
+            world.insert(e, Transform::from_translation(glam::DVec3::new(i as f64, 0.0, 0.0)));
+            world.insert(
+                e,
+                Scripts(vec![floptle_core::ScriptInst {
+                    kind: format!("k{}", i % kinds),
+                    enabled: true,
+                    params: vec![("speed".into(), 2.0)],
+                    refs: Vec::new(),
+                    strs: Vec::new(),
+                    pinned_bools: None,
+                }]),
+            );
+        }
+        let mut host = ScriptHost::new();
+        host.profile().borrow_mut().enable(true);
+        for f in 0..10 {
+            profiled_frame(&mut host, &mut world, &dir, f);
+        }
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let n = 600;
+        let mut seed = 0.0f32;
+        for f in 10..10 + n {
+            seed += profiled_frame(&mut host, &mut world, &dir, f).part("scriptsSeed");
+        }
+        eprintln!(
+            "scriptsSeed over 230 idle instances, {kinds} kinds{}: {:.4} ms a frame",
+            if extra.is_empty() { "" } else { ", beside a getfenv" },
+            seed / n as f32
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

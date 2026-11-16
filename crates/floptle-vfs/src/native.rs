@@ -67,6 +67,14 @@ pub(crate) fn modified_impl(path: &Path) -> Option<floptle_core::time::SystemTim
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
+/// Whether the path exists, and its mtime if the platform has one, in one
+/// call: `None` for a missing path, `Some(None)` for one with no mtime.
+/// [`exists`] then [`crate::modified`] asks the disk twice for the same answer,
+/// which a check made every frame pays for twice.
+pub fn presence<P: AsRef<Path>>(path: P) -> Option<Option<floptle_core::time::SystemTime>> {
+    std::fs::metadata(path).ok().map(|m| m.modified().ok())
+}
+
 /// List a directory. Order is the platform's, as with `std::fs::read_dir`;
 /// sort if it matters.
 ///

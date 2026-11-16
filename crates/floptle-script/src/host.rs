@@ -3663,6 +3663,7 @@ impl ScriptHost {
             sleepers,
             destroy_told: std::collections::HashSet::new(),
             kinds_this_frame: Default::default(),
+            kind_direct: Default::default(),
             last_scripts_dir: None,
             script_clock,
             space_info,
@@ -7156,6 +7157,7 @@ impl ScriptHost {
         }
         let seed_t = self.part_start();
         self.mark_rebound();
+        let (mut seeded, mut skipped) = (0u32, 0u32);
         for &e in &work {
             let Some(scripts) = world.get::<Scripts>(e) else { continue };
             for inst in &scripts.0 {
@@ -7164,10 +7166,13 @@ impl ScriptHost {
                     // frame asks of it is to be counted as still here. The
                     // seed is for what changed — a new instance, a hot
                     // reload, a node index taken by a new node, a `params`
-                    // a sleeper has not been given yet.
+                    // a sleeper has not been given yet, a `node` or
+                    // `params` somebody replaced.
                     if self.seed_is_current(e, &inst.kind, scripts_dir) {
+                        skipped += 1;
                         continue;
                     }
+                    seeded += 1;
                     self.charge_memory_to(Some(&inst.kind));
                     self.ensure_instance(e, &inst.kind, scripts_dir);
                     // A sleeper's params are seeded when it wakes, by the tick
@@ -7180,6 +7185,9 @@ impl ScriptHost {
         }
         self.charge_memory_to(None);
         self.keep_switched_off_instances(world);
+        if let Ok(mut p) = self.profile.try_borrow_mut() {
+            p.set_seed_counts(seeded, skipped);
+        }
         self.part_end("scriptsSeed", seed_t);
         // Web replies land here — the frame pass, never the tick pass. A reply
         // arrives when it arrives, so a rollback replay must never see one.
@@ -9044,8 +9052,24 @@ impl ScriptHost {
         if let Some(g) = self.kinds_this_frame.get(&kid) {
             return *g;
         }
-        let path = resolve_script_path(scripts_dir, &self.extra_script_dirs, name);
-        let g = self.ensure_source(name, &path);
+        // The project's own file, when it is there, is where every other
+        // place a script can live would be looked past to: one question to
+        // the disk answers both where the file is and whether it changed.
+        let direct = match self.kind_direct.get(&kid) {
+            Some((dir, p)) if dir.as_os_str() == scripts_dir.as_os_str() => Some(p.clone()),
+            _ => floptle_vfs::contain(scripts_dir, &format!("{name}.lua")).map(|p| {
+                let p: std::rc::Rc<Path> = p.into();
+                self.kind_direct.insert(kid, (scripts_dir.to_path_buf(), p.clone()));
+                p
+            }),
+        };
+        let g = match direct.and_then(|p| floptle_vfs::presence(&p).map(|m| (p, m))) {
+            Some((path, mtime)) => Some(self.note_source(name, &path, mtime)),
+            None => {
+                let path = resolve_script_path(scripts_dir, &self.extra_script_dirs, name);
+                self.ensure_source(name, &path)
+            }
+        };
         self.kinds_this_frame.insert(kid, g);
         g
     }
@@ -9058,15 +9082,43 @@ impl ScriptHost {
     /// and doing that for every instance every frame was most of
     /// `scriptsSeed`: two `String` keys, two registry fetches, a fresh `node`
     /// handle and a fresh registry slot each, per instance per frame.
+    ///
+    /// A sleeper not yet given its `params` is current too: the seed leaves
+    /// that to the tick that wakes it. And an instance whose `node` or
+    /// `params` might have been replaced — by its own source, through its
+    /// handle, or by a script that reaches environments by function — is
+    /// current while `node` is still the handle the seed put there and
+    /// `params` is still set: the two things the seed would put back.
     fn seed_is_current(&mut self, e: Entity, name: &str, scripts_dir: &Path) -> bool {
         let kid = self.intern_kind(name);
         let Some(generation) = self.kind_generation(kid, name, scripts_dir) else { return false };
-        let Some(inst) = self.instances.get_mut(&(e.index(), kid)) else { return false };
-        if inst.generation != generation || inst.entity != e || !inst.seeded || inst.rebinds_globals || self.any_fenv {
+        let Some(inst) = self.instances.get(&(e.index(), kid)) else { return false };
+        if inst.generation != generation || inst.entity != e {
             return false;
         }
-        inst.seen = true;
+        if !inst.seeded && !self.sleepers.borrow().is_asleep(e.index(), name) {
+            return false;
+        }
+        if (inst.rebinds_globals || self.any_fenv) && !self.globals_in_place(inst) {
+            return false;
+        }
+        if let Some(inst) = self.instances.get_mut(&(e.index(), kid)) {
+            inst.seen = true;
+        }
         true
+    }
+
+    /// Whether `inst`'s environment still holds, raw, the `node` handle the
+    /// seed last put there and a `params` (unless it is a sleeper the seed
+    /// has not given one yet) — everything the seed would otherwise put back.
+    fn globals_in_place(&self, inst: &Instance) -> bool {
+        let Some((_, addr)) = inst.own_handle.as_ref() else { return false };
+        let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return false };
+        let node_held = match env.raw_get::<Value>("node") {
+            Ok(v @ Value::Table(_)) => v.to_pointer() as usize == *addr,
+            _ => false,
+        };
+        node_held && (!inst.seeded || env.raw_get::<Value>("params").is_ok_and(|v| !v.is_nil()))
     }
 
     fn ensure_instance(&mut self, e: Entity, name: &str, scripts_dir: &Path) -> bool {
@@ -9155,6 +9207,7 @@ impl ScriptHost {
                                     params_dirty: false,
                                     seeded: false,
                                     rebinds_globals,
+                                    own_handle: None,
                                 },
                             );
                         }
@@ -9185,7 +9238,12 @@ impl ScriptHost {
         // A persistent `node` handle for this script's own entity, so methods called from
         // other scripts (which don't get the per-call `node` argument) can still reach it.
         if let Ok(h) = new_node_handle(&self.lua, e.index()) {
+            let addr = Value::Table(h.clone()).to_pointer() as usize;
+            let key = self.lua.create_registry_value(&h).ok();
             let _ = env.set("node", h);
+            if let Some(inst) = self.instances.get_mut(&id) {
+                inst.own_handle = key.map(|k| (k, addr));
+            }
         }
         // Publish the live environment for other scripts' handles.
         // Published as a registry key: a live `Table` per instance is what the
@@ -10060,33 +10118,39 @@ impl ScriptHost {
     fn ensure_source(&mut self, name: &str, path: &Path) -> Option<u64> {
         // A browser build has no mtimes at all: a file there is present or
         // absent, and never newer. Only absence answers `None`.
-        if !floptle_vfs::exists(path) {
-            return None;
+        let mtime = floptle_vfs::presence(path)?;
+        Some(self.note_source(name, path, mtime))
+    }
+
+    /// [`Self::ensure_source`] for a file already found at `path` with
+    /// `mtime`: the generation, bumped if the mtime moved.
+    fn note_source(&mut self, name: &str, path: &Path, mtime: Option<floptle_core::time::SystemTime>) -> u64 {
+        if !self.sources.contains_key(name) {
+            self.sources.insert(
+                name.to_string(),
+                Source { generation: 0, mtime: None, error: None, path: path.to_path_buf(), text: None, reads: 0 },
+            );
         }
-        let mtime = floptle_vfs::modified(path);
-        let entry = self.sources.entry(name.to_string()).or_insert_with(|| Source {
-            generation: 0,
-            mtime: None,
-            error: None,
-            path: path.to_path_buf(),
-            text: None,
-            reads: 0,
-        });
+        let Some(entry) = self.sources.get_mut(name) else { return 0 };
         // A script can move between package folders and the project's own
         // (the project wins — see `resolve`), so the path is refreshed rather
         // than fixed at first sight: quoting a line out of the file that is no
-        // longer the one running would be worse than quoting none.
-        if entry.path != path {
+        // longer the one running would be worse than quoting none. Another
+        // file is another source, whatever its mtime says: a project file
+        // written in the same second as the package's it now shadows is still
+        // the one that must run.
+        let moved = entry.path != path;
+        if moved {
             entry.path = path.to_path_buf();
         }
-        if entry.mtime != mtime {
+        if moved || entry.mtime != mtime {
             entry.mtime = mtime;
             entry.generation += 1;
             entry.error = None;
             // A quoted line must come from the file that is running.
             entry.text = None;
         }
-        Some(entry.generation)
+        entry.generation
     }
 
     /// A script failed to load. Three things have to happen, and they are not

@@ -364,6 +364,12 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
             out.set("mirrorRefreshed", m.refreshed)?;
             // Animators last frame, and how many culling skipped (hidden, off
             // screen, switched off, or between a reduced-rate animator's frames).
+            // Script instances the last frame pass seeded (new, hot-reloaded,
+            // a `node` or `params` put back) and passed by as unchanged: an
+            // idle crowd should read nearly all skipped.
+            let (seeded, skipped) = p.borrow().seed_counts();
+            out.set("scriptsSeeded", seeded)?;
+            out.set("scriptsSeedSkipped", skipped)?;
             let (animators, culled) = p.borrow().anim_counts();
             out.set("animators", animators)?;
             out.set("animatorsCulled", culled)?;

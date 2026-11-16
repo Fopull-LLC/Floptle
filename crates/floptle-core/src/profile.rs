@@ -611,6 +611,9 @@ pub struct FrameProfile {
     overloaded: bool,
     /// Last frame's animators and how many were culled.
     anim_counts: (usize, usize),
+    /// The last script frame pass's seed: instances seeded, and instances
+    /// passed by as already current.
+    seed_counts: (u32, u32),
     /// Simulated water last frame: points awake, points solved, tiles held.
     water_counts: (usize, usize, usize),
     /// Tiled sims' tiles awake last frame, by why (`water::AWAKE_REASONS`).
@@ -1036,6 +1039,18 @@ impl FrameProfile {
     /// [`Self::set_water_awake_by`]'s numbers.
     pub fn water_awake_by(&self) -> [usize; 6] {
         self.water_awake_by
+    }
+
+    /// The script frame pass's seed: instances it seeded (built, a hot
+    /// reload, `node` or `params` put back, `params` given) and instances it
+    /// passed by because nothing they were seeded from had changed.
+    pub fn set_seed_counts(&mut self, seeded: u32, skipped: u32) {
+        self.seed_counts = (seeded, skipped);
+    }
+
+    /// [`Self::set_seed_counts`]'s numbers.
+    pub fn seed_counts(&self) -> (u32, u32) {
+        self.seed_counts
     }
 
     /// Last frame's animators, and how many culling skipped.

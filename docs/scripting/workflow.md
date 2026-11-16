@@ -441,6 +441,16 @@ would do.
 craft with a dozen sweeps a frame shows up here rather than only as its
 script's time.
 
+`scriptsSeeded` and `scriptsSeedSkipped` are what last frame's seed did, the
+step named `scriptsSeed` in `perf.parts()` that readies every script before
+the first `update`. An instance is seeded when it is new, when its file
+changed (a hot reload), or when its `node` or `params` was replaced (by the
+script itself, through its handle, or through `getfenv`); every other
+instance is passed by, so a scene of scripts at rest reads nearly all
+skipped. What the seed still pays for those is a look at each script file a
+frame, so that an edit runs the next frame: it grows with how many different
+scripts a scene uses, not how many nodes carry them.
+
 `mirrorRebuilds` above zero on every frame means something replaces the scene,
 or a node's id, every frame, and `perf.mirrorCause()` names what.
 

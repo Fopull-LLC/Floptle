@@ -591,6 +591,15 @@ struct Instance {
     /// did for every script. For the rest it does that once, when the
     /// environment is built: what it put there is still there.
     rebinds_globals: bool,
+    /// The `node` handle the seed last put in this environment, and its
+    /// address. For an instance whose globals may be replaced
+    /// ([`Self::rebinds_globals`], or any script reaching environments by
+    /// function), the seed asks whether `node` is still this very table and
+    /// `params` still set, and puts them back only when one is not: what it
+    /// did every frame before, for an answer that was nearly always "nothing
+    /// moved". The key keeps the handle alive, so no other table can be given
+    /// its address while it is held here.
+    own_handle: Option<(RegistryKey, usize)>,
 }
 
 /// A script kind's name, interned: instances are keyed by `(node, kind id)`,
@@ -1015,6 +1024,11 @@ pub struct ScriptHost {
     /// file), so the file is looked at once per kind rather than once per
     /// instance. Cleared at the start of every frame pass.
     kinds_this_frame: rustc_hash::FxHashMap<KindId, Option<u64>>,
+    /// Each kind's file where the project's own scripts folder would hold
+    /// it, with that folder, built once: the project's file wins over every
+    /// other place a script can live, so when it is there it is the answer,
+    /// and asking the disk for it is one call a kind a frame.
+    kind_direct: rustc_hash::FxHashMap<KindId, (std::path::PathBuf, std::rc::Rc<std::path::Path>)>,
     /// The scripts folder the last pass ran from, so a spawn's callback can
     /// load the new node's scripts before it runs (see `call_spawn_callback`).
     last_scripts_dir: Option<std::path::PathBuf>,

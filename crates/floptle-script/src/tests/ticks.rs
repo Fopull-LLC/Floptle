@@ -679,6 +679,208 @@ fn a_script_that_overwrites_node_or_params_has_them_reset_each_frame() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Set `name.lua` in `dir` to `body`, with an mtime `secs` into the future,
+/// so a rewrite inside the same second still reads as a new file.
+fn rewrite_script(dir: &Path, name: &str, body: &str, secs: u64) {
+    write_script(dir, name, body);
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(secs);
+    std::fs::File::options().write(true).open(dir.join(format!("{name}.lua"))).unwrap().set_modified(later).unwrap();
+}
+
+/// **A script the seed has passed by for many frames still reloads on the
+/// frame its file changes.** The seed leaves an unchanged instance alone,
+/// and what it asks first is whether the source moved on: a mover runs ten
+/// frames untouched, its file is rewritten, and the very next frame runs the
+/// new code (seeded once), then is passed by again.
+#[test]
+fn a_script_passed_by_for_frames_reloads_the_frame_its_file_changes() {
+    let dir = std::env::temp_dir().join(format!("floptle_seed_reload_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(&dir, "mover", "function update(n, dt) n.x = n.x + 1 end\n");
+    let (mut world, e) = world_with_script("mover");
+    let mut host = ScriptHost::new();
+    for f in 0..10 {
+        host.run(&mut world, &dir, 1.0 / 60.0, f as f32 / 60.0);
+    }
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 10.0);
+    assert_eq!(host.profile().borrow().seed_counts(), (0, 1), "an unchanged instance was seeded again");
+    rewrite_script(&dir, "mover", "function update(n, dt) n.x = n.x + 100 end\n", 10);
+    host.run(&mut world, &dir, 1.0 / 60.0, 10.0 / 60.0);
+    assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 110.0, "the edit was not picked up the next frame");
+    assert_eq!(host.profile().borrow().seed_counts(), (1, 0));
+    host.run(&mut world, &dir, 1.0 / 60.0, 11.0 / 60.0);
+    assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 210.0);
+    assert_eq!(host.profile().borrow().seed_counts(), (0, 1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A project script that appears over a package's runs the next frame,
+/// whatever its mtime.** The seed asks the project's own folder first; a
+/// kind found in a package keeps being looked for there, and the frame a
+/// file of the same name lands in the project, that file is the source.
+/// Written with the package file's own mtime, so only the move says it is
+/// new.
+#[test]
+fn a_project_script_over_a_packages_runs_the_next_frame() {
+    let root = std::env::temp_dir().join(format!("floptle_seed_shadow_{}", std::process::id()));
+    let (dir, pkg) = (root.join("scripts"), root.join("pkg"));
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&pkg);
+    write_script(&pkg, "mover", "function update(n, dt) n.x = n.x + 1 end\n");
+    let (mut world, e) = world_with_script("mover");
+    let mut host = ScriptHost::new();
+    host.set_extra_script_dirs(vec![pkg.clone()]);
+    for f in 0..5 {
+        host.run(&mut world, &dir, 1.0 / 60.0, f as f32 / 60.0);
+    }
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 5.0);
+    write_script(&dir, "mover", "function update(n, dt) n.x = n.x + 100 end\n");
+    let same = std::fs::metadata(pkg.join("mover.lua")).unwrap().modified().unwrap();
+    std::fs::File::options().write(true).open(dir.join("mover.lua")).unwrap().set_modified(same).unwrap();
+    host.run(&mut world, &dir, 1.0 / 60.0, 5.0 / 60.0);
+    assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 105.0, "the package's copy kept running");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **An idle crowd is passed by, even beside scripts that reach other
+/// environments.** A script that mentions `getfenv` could replace anybody's
+/// `node`, so every instance used to be seeded again every frame; now each
+/// is asked whether its `node` and `params` are still the ones it was
+/// given, and passed by when they are. `perf.counts()` says which way each
+/// went: a crowd at rest reads all skipped, one new node one seeded, and a
+/// node another script cleared is put back (seeded) on the next frame.
+#[test]
+fn an_idle_crowd_is_passed_by_and_counted_beside_scripts_that_reach_environments() {
+    let dir = std::env::temp_dir().join(format!("floptle_seed_counts_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(&dir, "idle", "defaults = { speed = 1 }\nfunction update(n, dt) end\n");
+    write_script(&dir, "lib", "defaults = { speed = 1 }\nfunction hasNode() return type(node) == 'table' end\n");
+    write_script(
+        &dir,
+        "peek",
+        "clears = false\n\
+         function update(n, dt)\n\
+           local h = find('Lib'):getscript('lib')\n\
+           if h.hasNode() then n.x = n.x + 1 end\n\
+           if clears then getfenv(h.hasNode).node = nil clears = false end\n\
+         end\n",
+    );
+    let inst = |kind: &str| floptle_core::ScriptInst {
+        kind: kind.into(),
+        enabled: true,
+        params: vec![("speed".into(), 2.0)],
+        refs: Vec::new(),
+        strs: Vec::new(),
+        pinned_bools: None,
+    };
+    let mut world = World::default();
+    for _ in 0..100 {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Scripts(vec![inst("idle")]));
+    }
+    let lib = world.spawn();
+    world.insert(lib, Transform::IDENTITY);
+    world.insert(lib, floptle_core::Name("Lib".into()));
+    world.insert(lib, Scripts(vec![inst("lib")]));
+    let peek = world.spawn();
+    world.insert(peek, Transform::IDENTITY);
+    world.insert(peek, Scripts(vec![inst("peek")]));
+    let mut host = ScriptHost::new();
+    let counts = |host: &ScriptHost| -> (u32, u32) {
+        host.lua.load("local c = perf.counts() return c.scriptsSeeded, c.scriptsSeedSkipped").eval().unwrap()
+    };
+    let mut f = 0;
+    let mut frame = |host: &mut ScriptHost, world: &mut World| {
+        host.run(world, &dir, 1.0 / 60.0, f as f32 / 60.0);
+        f += 1;
+    };
+    frame(&mut host, &mut world);
+    assert_eq!(counts(&host), (102, 0), "the first frame seeds every instance");
+    for _ in 0..3 {
+        frame(&mut host, &mut world);
+    }
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(counts(&host), (0, 102), "a crowd at rest was seeded again");
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![inst("idle")]));
+    frame(&mut host, &mut world);
+    assert_eq!(counts(&host), (1, 102), "a new node is seeded, and only it");
+    // Cleared through its function environment: put back next frame, and
+    // seen there by the next call.
+    let env = host.envs.borrow().get(&(peek.index(), "peek".to_string())).map(|r| host.lua.registry_value::<mlua::Table>(r).unwrap());
+    env.expect("peek is published").set("clears", true).unwrap();
+    frame(&mut host, &mut world);
+    assert_eq!(counts(&host), (0, 103));
+    let x0 = world.get::<Transform>(peek).unwrap().translation.x;
+    frame(&mut host, &mut world);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(counts(&host), (1, 102), "the cleared `node` was not put back");
+    assert_eq!(
+        world.get::<Transform>(peek).unwrap().translation.x,
+        x0 + 1.0,
+        "the library saw its `node` missing on the frame after it was cleared"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A sleeper rebuilt while asleep has its `params` from the frame it
+/// wakes.** The seed passes by an instance it has not given `params` only
+/// while it sleeps; the frame it is woken, the seed gives them before any
+/// `update`, so a script running ahead of it in the frame reads them through
+/// its handle rather than a nil.
+#[test]
+fn a_sleeper_rebuilt_while_asleep_has_its_params_the_frame_it_wakes() {
+    let dir = std::env::temp_dir().join(format!("floptle_seed_sleeper_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let sleeper = "defaults = { speed = 1 }\nfunction update(n, dt) script.sleep() end\n";
+    write_script(&dir, "sleeper", sleeper);
+    write_script(
+        &dir,
+        "reader",
+        "function update(n, dt)\n\
+           local p = find('Sleeper'):getscript('sleeper').params\n\
+           n.x = p and p.speed or -1\n\
+         end\n",
+    );
+    let inst = |kind: &str| floptle_core::ScriptInst {
+        kind: kind.into(),
+        enabled: true,
+        params: vec![("speed".into(), 2.0)],
+        refs: Vec::new(),
+        strs: Vec::new(),
+        pinned_bools: None,
+    };
+    let mut world = World::default();
+    let reader = world.spawn();
+    world.insert(reader, Transform::IDENTITY);
+    world.insert(reader, Scripts(vec![inst("reader")]));
+    let s = world.spawn();
+    world.insert(s, Transform::IDENTITY);
+    world.insert(s, floptle_core::Name("Sleeper".into()));
+    world.insert(s, Scripts(vec![inst("sleeper")]));
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(world.get::<Transform>(reader).unwrap().translation.x, 2.0);
+    assert!(host.sleepers.borrow().is_asleep(s.index(), "sleeper"));
+    rewrite_script(&dir, "sleeper", &format!("{sleeper}-- edited\n"), 10);
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    assert_eq!(world.get::<Transform>(reader).unwrap().translation.x, -1.0, "rebuilt asleep: no params yet");
+    host.sleepers.borrow_mut().wake(s.index(), None);
+    host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(
+        world.get::<Transform>(reader).unwrap().translation.x,
+        2.0,
+        "the woken sleeper's params were not seeded before the frame's updates"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A scene of thousands of scripted nodes runs.
 ///
 /// It used to panic — `out of auxiliary stack space (used 7999 slots)` —
