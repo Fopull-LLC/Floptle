@@ -1333,6 +1333,41 @@ pub(crate) fn note_shadow_casters(
     prof.set_counts(c);
 }
 
+/// How many of each field slot the scene asked for this frame, beside what
+/// the raymarch globals hold, for [`note_field_slots`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FieldAsked {
+    /// Volumes `fill_terrain_volumes` had no slot for.
+    pub volumes_dropped: usize,
+    /// Blobs the frame would draw, before the slot cap.
+    pub blobs: usize,
+    /// Field Shapes past the slot cap (`sync_field_shapes`).
+    pub shapes_dropped: usize,
+}
+
+/// What the SDF field holds this frame, into the counts a game reads
+/// (`perf.counts()`): its volume, blob and Field Shape slots used, and what
+/// each ceiling left out. Read from the globals the frame uploads, so the
+/// numbers are what the GPU was given.
+pub(crate) fn note_field_slots(
+    prof: &mut floptle_core::profile::FrameProfile,
+    rm: &floptle_render::RaymarchGlobals,
+    asked: FieldAsked,
+) {
+    let mut c = prof.counts();
+    // Kinds as `field.wgsl` names them: 1 drawn and 3 meshed terrain are
+    // matter in the field; 2 is an occluder bake that only casts.
+    let kind = |w: f32| if w < 0.5 { 0 } else if (w - 2.0).abs() < 0.5 { 2 } else { 1 };
+    c.field_volumes_terrain = rm.vol_center.iter().filter(|v| kind(v[3]) == 1).count();
+    c.field_volumes_shadow_only = rm.vol_center.iter().filter(|v| kind(v[3]) == 2).count();
+    c.field_volumes_dropped = asked.volumes_dropped;
+    c.blobs = (rm.params[1] as usize).min(floptle_render::MAX_BLOBS);
+    c.blobs_dropped = asked.blobs.saturating_sub(c.blobs);
+    c.field_shapes = (rm.shape_meta[0] as usize).min(floptle_render::MAX_FIELD_SHAPES);
+    c.field_shapes_dropped = asked.shapes_dropped;
+    prof.set_counts(c);
+}
+
 /// What the raster passes were given this frame, into the counts a game reads
 /// (`perf.counts()`): the sun map's casters drawn and left out, and the
 /// triangles the colour pass was handed. After `sun_shadow_pass`.
@@ -2256,6 +2291,80 @@ mod proxy_tests {
         note_shadow_casters(&mut prof, none, &floptle_render::RaymarchGlobals::default());
         let c = prof.counts();
         assert_eq!((c.shadow_proxies, c.shadow_proxies_dropped, c.shadow_volumes), (0, 0, 0), "shadows off sends nothing");
+    }
+
+    /// `perf.counts()` says what each of the SDF field's fixed slots holds and
+    /// what its ceiling left out. One terrain, two blobs and a Field Shape
+    /// read as just that; a seventeenth blob, or a fifth Field Shape, reads as
+    /// one dropped rather than as a thing that silently is not there.
+    #[test]
+    fn the_field_slot_counts_are_what_the_frame_was_given() {
+        use floptle_core::Transform;
+        use floptle_render::{Projection, RenderCamera};
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle-field-slots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("shaders")).unwrap();
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shaders/examples/wobbleOrb.flsl");
+        std::fs::copy(&src, dir.join("shaders/wobbleOrb.flsl")).unwrap();
+        ed.project_root = dir.clone();
+        ed.script_host.profile().borrow_mut().enable(true);
+
+        let ground = ed.world.spawn();
+        ed.world.insert(ground, Transform::IDENTITY);
+        ed.world.insert(ground, Matter::Terrain { id: 1, collision: Default::default() });
+        let mut field = floptle_field::ChunkField::new(1.0);
+        field.fill_slab(Vec3::new(-8.0, -4.0, -8.0), Vec3::new(8.0, 0.0, 8.0), 0.0, [0.4, 0.5, 0.3]);
+        ed.terrains.insert(ground, crate::terrain_edit::EditorTerrain::new(field));
+        ed.terrain_gpu_dirty = true;
+        let blob = |ed: &mut crate::Editor, x: f64| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Transform::from_translation(DVec3::new(x, 2.0, 0.0)));
+            ed.world.insert(e, Matter::Blob { scale: 0.5 });
+        };
+        let shape = |ed: &mut crate::Editor, x: f64| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Transform::from_translation(DVec3::new(x, 2.0, -3.0)));
+            ed.world.insert(e, Matter::FieldShape { radius: 1.5 });
+            ed.world.insert(e, Material { shader: Some("shaders/wobbleOrb.flsl".into()), ..Default::default() });
+        };
+        blob(&mut ed, -1.0);
+        blob(&mut ed, 1.0);
+        shape(&mut ed, 0.0);
+        let cam = RenderCamera::new(DVec3::new(0.0, 4.0, 12.0), floptle_core::math::Quat::IDENTITY, Projection::of_camera(1.0, false, 6.0, 0.05, 1000.0));
+        // The terrain's shadow volume lands over frames; settle it first.
+        for _ in 0..20_000 {
+            ed.sync_terrain_gpu();
+            let g = ed.gpu.as_ref().unwrap();
+            g.queue.submit(None);
+            let _ = g.device.poll(wgpu::PollType::wait_indefinitely());
+            if !ed.raymarch.as_ref().unwrap().atlas_building() && !ed.terrain_gpu_dirty && !ed.terrain_slots.is_empty() {
+                break;
+            }
+        }
+        let counts = |ed: &mut crate::Editor| {
+            for _ in 0..2 {
+                crate::shot::render_frame_pixels(ed, &cam, None, 32, 32, !0, false).expect("a frame");
+            }
+            let c = ed.script_host.profile().borrow().counts();
+            (
+                (c.field_volumes_terrain, c.field_volumes_shadow_only, c.field_volumes_dropped),
+                (c.blobs, c.blobs_dropped),
+                (c.field_shapes, c.field_shapes_dropped),
+            )
+        };
+        assert_eq!(counts(&mut ed), ((1, 0, 0), (2, 0), (1, 0)), "one terrain, two blobs, one Field Shape");
+
+        for i in 0..15 {
+            blob(&mut ed, -8.0 + i as f64);
+        }
+        for i in 0..4 {
+            shape(&mut ed, -6.0 + 3.0 * i as f64);
+        }
+        let (_, blobs, shapes) = counts(&mut ed);
+        assert_eq!(blobs, (floptle_render::MAX_BLOBS, 1), "seventeen blobs: sixteen in the field, one dropped");
+        assert_eq!(shapes, (floptle_render::MAX_FIELD_SHAPES, 1), "five Field Shapes: four in the field, one dropped");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A box body casts at the size it collides at. Physics scales its half

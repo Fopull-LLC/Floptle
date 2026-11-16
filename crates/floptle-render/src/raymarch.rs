@@ -414,10 +414,10 @@ impl Default for RaymarchGlobals {
 }
 
 /// Max Field Shapes (authored SDF shaders) folded into the field per scene.
-pub const MAX_FIELD_SHAPES: usize = 4;
+pub const MAX_FIELD_SHAPES: usize = floptle_core::profile::FIELD_SHAPE_SLOTS;
 
 /// Max blobs the raymarch shader folds together in one pass.
-pub const MAX_BLOBS: usize = 16;
+pub const MAX_BLOBS: usize = floptle_core::profile::FIELD_BLOB_SLOTS;
 
 /// Max baked volumes (terrains / mesh bakes) folded together in one pass. Each keeps
 /// its native voxel resolution inside a shared 3D atlas.
@@ -427,7 +427,7 @@ pub const MAX_BLOBS: usize = 16;
 /// shader walks per step, not what the atlas holds. A caller shares a region
 /// by writing `region + 1` into an instance's `vol_atlas[i].w`; zero means the
 /// instance's own slot, in upload order.
-pub const MAX_VOLUMES: usize = 32;
+pub const MAX_VOLUMES: usize = floptle_core::profile::FIELD_VOLUME_SLOTS;
 
 /// Max distinct bakes the atlas holds at once. Each costs VRAM for its voxels
 /// (6 bytes each: a 16-bit distance and an RGBA8 colour — about 12 MB for a

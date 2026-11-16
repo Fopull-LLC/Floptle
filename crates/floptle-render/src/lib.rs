@@ -82,7 +82,7 @@ pub use raster::{
 };
 pub use terrain_palette::{terrain_layer_size, SlotPictures, TerrainPalette, TERRAIN_LAYER_SIZE, TERRAIN_LAYER_SIZES};
 pub use raymarch::{
-    AtlasRefused, AtlasVolume, Raymarch, RaymarchGlobals, MAX_FIELD_SHAPES, MAX_SHADOW_PROXIES, MAX_VOLUMES, TERRAIN_SLOTS,
+    AtlasRefused, AtlasVolume, Raymarch, RaymarchGlobals, MAX_BLOBS, MAX_FIELD_SHAPES, MAX_SHADOW_PROXIES, MAX_VOLUMES, TERRAIN_SLOTS,
 };
 pub use retro::Retro;
 

@@ -684,6 +684,7 @@ impl Editor {
             .collect();
         shapes.sort_by_key(|(e, _)| e.index());
         let truncated = shapes.len() > floptle_render::MAX_FIELD_SHAPES;
+        self.field_shapes_dropped = shapes.len().saturating_sub(floptle_render::MAX_FIELD_SHAPES);
         shapes.truncate(floptle_render::MAX_FIELD_SHAPES);
 
         let mut paths: Vec<String> = shapes.iter().map(|(_, p)| p.clone()).collect();

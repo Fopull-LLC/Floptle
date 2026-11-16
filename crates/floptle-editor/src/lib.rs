@@ -3902,6 +3902,8 @@ struct Editor {
     flsl_shape_slots: HashMap<Entity, usize>,
     /// The (entity, shader, generation) set the current splice was built from.
     flsl_field_key: Vec<(Entity, String, u64)>,
+    /// Field Shapes past the field's slots, left out (`perf.counts().fieldShapes.dropped`).
+    field_shapes_dropped: usize,
     /// The ◈ Shaders tab: the node-graph view of one `.flsl`.
     #[cfg(feature = "editor-ui")]
     shader_graph: shader_graph::ShaderGraphState,

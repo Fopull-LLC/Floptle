@@ -671,18 +671,24 @@ impl Editor {
             // air was invisible under a plain-colour sky until it had terrain.
             || atmo_meta[0] >= 1.0
             || !self.flsl_shape_slots.is_empty();
-        let rm = {
+        let (rm, volumes_dropped) = {
             let mut g = make_rm(if show_blobs { &blobs } else { &[] });
             crate::shading::stamp_air_style(&mut g, &light_node, &self.world, cam.world_position);
-            Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_regions, self.project.shadow_volumes, &self.world, &mut g, cam.world_position);
+            let volumes_dropped = Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_regions, self.project.shadow_volumes, &self.world, &mut g, cam.world_position);
             crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, None);
             // Baked GI. The renderer owns the probe texture; these four lanes
             // are only where the volume is, and they have to be stamped per
             // view because the field is camera-relative.
             raymarch.gi().apply(&mut g, cam.world_position.into());
-            g
+            (g, volumes_dropped)
         };
         crate::shading::note_shadow_casters(&mut profile.borrow_mut(), prox_count, &rm);
+        let asked = crate::shading::FieldAsked {
+            volumes_dropped,
+            blobs: if show_blobs { blobs.len() } else { 0 },
+            shapes_dropped: self.field_shapes_dropped,
+        };
+        crate::shading::note_field_slots(&mut profile.borrow_mut(), &rm, asked);
 
         Some(FrameGather {
             shadow_casters,
