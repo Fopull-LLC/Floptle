@@ -2712,7 +2712,10 @@ fn sky_slice_open(p: vec3<f32>, n: vec3<f32>, base: f32, far: f32, fa: f32, fb: 
     // promises everything inside the box: the field at the face (that
     // reading less the height) less the height again to get back to the
     // centre. Further than `volume_d` reads into the box it is the box
-    // distance alone, which runs ahead of nothing.
+    // distance alone, which runs ahead of nothing. The face reading is
+    // taken half a voxel inside the face, so over a box the centre is a
+    // little further from what it reads than its height: one more cell
+    // (twice the margin) covers that on top of the stand-in running ahead.
     let at = p + n * h;
     var over = 0.0;
     let vols = min(u32(G.params.w), 32u);
@@ -2724,7 +2727,7 @@ fn sky_slice_open(p: vec3<f32>, n: vec3<f32>, base: f32, far: f32, fa: f32, fb: 
             over = max(over, box_d);
         }
     }
-    return field_set_d(at, pieces, 0u) - 2.0 * over > r + margin;
+    return field_set_d(at, pieces, 0u) - 2.0 * over - select(0.0, 2.0 * margin, over > 0.0) > r + margin;
 }
 
 // How far `sky_visibility` looks for cover when it falls back to

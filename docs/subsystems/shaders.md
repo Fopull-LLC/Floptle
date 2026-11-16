@@ -461,7 +461,7 @@ holds `skyOcclusion(worldPos, up, 24)` to within nine times the cost of six
 settled by the two reads above the point; what is left marches, mostly
 water within reach of the land, the overhang and the proxies. The same file
 checks the answers against the four rays marched with no early outs at all:
-within 0.1 everywhere, and within 0.02 on all but a few pixels in a million,
+within 0.15 everywhere, and within 0.02 on all but about one pixel in a hundred thousand,
 where a march started past a stretch already proved clear samples its
 penumbra at other places.
 
