@@ -824,7 +824,8 @@ impl Editor {
             self.draw_lines_over(&cv, [w.max(1), h.max(1)], cam.view_proj(aspect), cam.world_position, &depth);
         }
         // ---- game UI: the docked Game view shows exactly what a build shows ----
-        self.draw_game_ui_overlay(&cv, w.max(1), h.max(1), target_samplable);
+        // Its draw lists built, packed and drawn: `uiDraw`, inside `untimed`.
+        self.timed_wait("uiDraw", |ed| ed.draw_game_ui_overlay(&cv, w.max(1), h.max(1), target_samplable));
     }
 
     /// What the Inspector should draw for the current selection's preview.

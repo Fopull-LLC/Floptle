@@ -131,6 +131,41 @@ impl Editor {
         out
     }
 
+    /// The start of a stretch of the frame to name inside `untimed`, for a
+    /// stretch that cannot be one closure (it declares the locals the rest of
+    /// the frame reads). `None` while collection is off. Closed by
+    /// [`Self::close_wait`], with the same netting as [`Self::timed_wait`].
+    pub(crate) fn open_wait(&self) -> Option<(floptle_core::profile::Span, f32)> {
+        let p = self.script_host.profile().borrow();
+        p.enabled().then(|| (floptle_core::profile::Span::new(), p.frame_measured()))
+    }
+
+    /// Name the stretch since `open` as `what`, net of any bucket recorded
+    /// inside it.
+    pub(crate) fn close_wait(&self, open: Option<(floptle_core::profile::Span, f32)>, what: &'static str) {
+        let Some((span, before)) = open else { return };
+        let ms = span.ms();
+        let mut p = self.script_host.profile().borrow_mut();
+        let inside = p.frame_measured() - before;
+        p.record_wait(what, (ms - inside).max(0.0));
+    }
+
+    /// [`Self::close_wait`] for a stretch that belongs in `bucket`: counted
+    /// there, net of the buckets inside it, and named `part` within it.
+    pub(crate) fn close_into(
+        &self,
+        open: Option<(floptle_core::profile::Span, f32)>,
+        bucket: floptle_core::profile::Bucket,
+        part: &'static str,
+    ) {
+        let Some((span, before)) = open else { return };
+        let ms = span.ms();
+        let mut p = self.script_host.profile().borrow_mut();
+        let net = (ms - (p.frame_measured() - before)).max(0.0);
+        p.record(bucket, net);
+        p.record_part(part, net);
+    }
+
     /// Frames in a row a game may rebuild the script mirror before the Console
     /// says so: half a second at 60 fps. A one-off rebuild (a scene swap, a
     /// burst of renames) never reaches it.
@@ -446,6 +481,9 @@ impl Editor {
     }
 
     pub(crate) fn play_step(&mut self, dt: f32, game_focused: bool) {
+        // What the step publishes before the scripts' frame begins is part of
+        // feeding it: counted into `frameFeed` with the clock and the input.
+        let feed = self.open_wait();
         self.publish_water_worlds();
         // **`app.*` is driven from inside the step, not around it.** There are
         // two hosts that run gameplay — the windowed frame and `floptle run`'s
@@ -468,6 +506,7 @@ impl Editor {
         if let Some(rm) = self.raymarch.as_mut() {
             rm.set_fog_debug(fog_paths);
         }
+        self.close_wait(feed, "frameFeed");
         // Play mode: advance the (pausable) script clock and run the Lua scripts
         // attached to nodes. Scripts hot-reload as their files change.
         if self.playing {
@@ -2367,5 +2406,73 @@ mod frame_phase_tests {
         for piece in SETTLE_PIECES {
             assert!(r.parts.iter().any(|(n, _)| *n == piece), "{piece} is not named: {:?}", r.parts);
         }
+    }
+
+    /// **A build's game UI names its draw** (card 0755): its draw lists
+    /// built, packed and drawn over the frame, `uiDraw` inside `untimed`,
+    /// where before it was counted nowhere.
+    #[test]
+    fn a_builds_game_ui_draw_is_named() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.script_host.profile().borrow_mut().enable(true);
+        let gpu = ed.gpu.as_ref().unwrap();
+        let (color, depth) = crate::viewports::offscreen_textures(gpu, 320, 180, "ui-draw", wgpu::TextureUsages::COPY_SRC);
+        ed.end_profile_frame();
+        for _ in 0..2 {
+            ed.script_rects = (0..64)
+                .map(|i| floptle_script::DrawRect {
+                    rect: [(i % 8) as f32 * 30.0, (i / 8) as f32 * 20.0, 24.0, 14.0],
+                    color: [0.9, 0.5, 0.2, 1.0],
+                    outline: 0.0,
+                    radius: 3.0,
+                    seq: i,
+                })
+                .collect();
+            ed.script_host.profile().borrow_mut().begin_frame();
+            let (cv, dv) = (color.create_view(&Default::default()), depth.create_view(&Default::default()));
+            let d = depth.clone();
+            ed.timed_into(floptle_core::profile::Bucket::Render, |ed| {
+                ed.render_game_into(cv, dv, Some(d), [0.0, 0.0], [320.0, 180.0], 0.0, true, false);
+            });
+            ed.end_profile_frame();
+        }
+        let p = ed.script_host.profile().borrow();
+        let r = p.recent_frames(1).next().expect("a frame");
+        assert!(r.parts.iter().any(|(n, ms)| *n == "uiDraw" && *ms > 0.0), "the game UI's draw is not named: {:?}", r.parts);
+    }
+
+    /// **What lies between a build's buckets is named too** (card 0755): the
+    /// pacing, the clock and the syncs before the step, what the step
+    /// publishes before the scripts run, the input pump and the compute jobs.
+    /// Each stretch is named inside `untimed`, so `untimed` minus its parts is
+    /// what nothing names. (Asserted by name rather than by share: at a few
+    /// microseconds a frame, a share of a headless frame measures the
+    /// machine's load, not the code.)
+    #[test]
+    fn a_builds_frame_names_what_lies_between_its_buckets() {
+        let mut ed = crate::Editor::default();
+        ed.toggle_play();
+        ed.script_host.profile().borrow_mut().enable(true);
+        ed.end_profile_frame();
+        for _ in 0..2 {
+            ed.script_host.profile().borrow_mut().begin_frame();
+            let _ = ed.player_frame(false);
+            ed.end_profile_frame();
+        }
+        let p = ed.script_host.profile().borrow();
+        let r = p.recent_frames(1).next().expect("a frame");
+        for part in ["frameSetup", "inputPump", "computeJobs", "frameFeed"] {
+            assert!(r.parts.iter().any(|(n, _)| *n == part), "{part} is not named: {:?}", r.parts);
+        }
+        // Named inside `untimed`, never beside it: the parts add up to no
+        // more than the bucket they are in.
+        let untimed = r.buckets.iter().find(|(b, _)| *b == floptle_core::profile::Bucket::Other).map_or(0.0, |(_, ms)| *ms);
+        let named: f32 = r
+            .parts
+            .iter()
+            .filter(|(n, _)| ["frameSetup", "inputPump", "computeJobs"].contains(n))
+            .map(|(_, ms)| ms)
+            .sum();
+        assert!(named <= untimed + 1e-3, "the parts ({named} ms) are more than untimed ({untimed} ms): {:?}", r.parts);
     }
 }

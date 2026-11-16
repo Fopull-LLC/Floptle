@@ -127,8 +127,16 @@ impl Editor {
         // The frame's own work starts here; the time before it, back to the
         // last frame's end, was the window system and the OS.
         self.script_host.profile().borrow_mut().begin_frame();
+        // The frame's pacing: `frameSetup`, with a frame cap's wait inside it
+        // named `frameCap`.
+        let setup = self.open_wait();
         self.publish_pacing_setup();
         self.pace_frame();
+        self.close_wait(setup, "frameSetup");
+        // From here to the input pump: the editor's own upkeep, named
+        // `editorUpkeep` inside `untimed` (the terrain and asset work in it
+        // keeps its own buckets).
+        let upkeep = self.open_wait();
         // A held selection the world has emptied — the node deleted, the scene
         // switched — releases here, before anything draws. The lock's only
         // switch is on the Inspector's name row, so a lock over nothing would
@@ -265,18 +273,23 @@ impl Editor {
         // when both tabs show, input goes to whichever viewport the mouse is over and the
         // Scene view stays fully interactive.
         let game_focused = self.game_view() || self.game_trap;
+        self.close_wait(upkeep, "editorUpkeep");
 
         // Poll the gamepads and refresh the action layer's device levels. Must
         // run before anything resolves, and before the early-out below so a pad
         // plugged in during startup is already slotted.
-        self.pump_input_devices();
-        self.poll_input_map_reload();
+        self.timed_wait("inputPump", |ed| {
+            ed.pump_input_devices();
+            ed.poll_input_map_reload();
+        });
         // The half of the live loop that ISN'T the editor's own push: a texture
         // rewritten by anything (Aseprite, a build script, a git checkout)
         // re-uploads here. See image_io.rs.
-        #[cfg(feature = "editor-ui")]
-        self.poll_aseprite_files();
-        self.poll_texture_hot_reload();
+        self.timed_wait("assetPoll", |ed| {
+            #[cfg(feature = "editor-ui")]
+            ed.poll_aseprite_files();
+            ed.poll_texture_hot_reload();
+        });
 
         // Nothing to drive until the window + GPU stack exist. (The borrows
         // themselves are taken per stage, and by the gather/draw core below.)
@@ -293,6 +306,7 @@ impl Editor {
             return;
         }
 
+        let upkeep = self.open_wait();
         // Which dock tab holds focus (from last frame's dock state — the raw winit
         // key handler runs between frames, so a one-frame-old read is exact). Lets
         // that handler route Delete/arrows/F to a focused timeline panel instead of
@@ -322,9 +336,10 @@ impl Editor {
         // undo history — and while recording (the world carries previewed clip
         // values then; edits go to the clip as keys, not to scene undo).
         self.begin_history_frame();
+        self.close_wait(upkeep, "editorUpkeep");
 
         self.play_step(dt, game_focused);
-        self.finish_input_frame();
+        self.timed_wait("inputPump", |ed| ed.finish_input_frame());
         // Register every texture + import every mesh the particle system needs
         // before the gather that resolves them (full &mut self here — no borrow
         // race, no frame lag on the open effect).
@@ -348,6 +363,7 @@ impl Editor {
         // the process down (see `Gpu::new`), so this is the only place it
         // becomes visible — and it has to, or a pass that silently stops
         // drawing looks like the feature never worked.
+        let bakes = self.open_wait();
         self.report_gpu_errors();
         // Baked GI: push any pending probe upload, then advance a bake by one
         // frame's slice. Both run before the gathers below, so this frame's
@@ -369,6 +385,7 @@ impl Editor {
         self.step_reflection_probes();
         self.apply_project_vsync();
         self.sync_field_shapes();
+        self.close_wait(bakes, "bakes");
 
         // Edit-mode animation preview (Animating tab): pose the bound node at the
         // playhead. This must run before anything gathers draw data — the UI
@@ -378,6 +395,7 @@ impl Editor {
         // bindings apply transiently and are restored after the main draw list is
         // built (except while recording — see `restore_preview` below), so a
         // preview never dirties the authored scene.
+        let upkeep = self.open_wait();
         if !self.playing {
             if self.anim_ui.tab_visible {
                 if let (Some(target), Some(state)) =
@@ -430,6 +448,7 @@ impl Editor {
             }
             self.anim_ui.tab_visible = false; // re-armed by the tab each frame it draws
         }
+        self.close_wait(upkeep, "editorUpkeep");
 
         // Game-UI layers: gather + solve on the CPU while `self` is free (the
         // draw core borrows the GPU stack); drawn over the finished frame below.
@@ -442,6 +461,7 @@ impl Editor {
         // pointer there, so screen-space canvases blinked out of the Scene view
         // whenever the mouse crossed into the game.
         let ui_view = self.game_fullscreen();
+        let ui_draw = self.open_wait();
         // Screen-space overlay layers (game view only). gather_game_ui skips
         // world-space layers — those live in the scene below.
         let ui_layers = if ui_view {
@@ -472,6 +492,7 @@ impl Editor {
         } else {
             Vec::new()
         };
+        self.close_wait(ui_draw, "uiDraw");
 
         // Offscreen previews render last (after play_step advanced this frame's poses
         // and particles, and after ensure_vfx_assets registered their textures/meshes):
@@ -489,6 +510,11 @@ impl Editor {
         // …or dynamic resolution, which is driven by the same timings.
         let perf_on = self.playing && profile.borrow().enabled();
         let live = perf_on || self.wants_gpu_for_resolution();
+        // The offscreen views, through to the UI shaders' clock: render work
+        // (each view's own gather and passes record `render` themselves), and
+        // the rest of it — a docked Game view's post chain and its game UI,
+        // the previews — named `renderViews` inside it.
+        let views = self.open_wait();
         let mut landed = None;
         let timing = (self.gpu_timing_open || live)
             && self.gpu_timer.as_mut().map(|t| {
@@ -530,6 +556,7 @@ impl Editor {
         if let Some(uir) = self.ui_render.as_mut() {
             uir.set_time(elapsed);
         }
+        self.close_into(views, floptle_core::profile::Bucket::Render, "renderViews");
 
         // Terrain surface material, resolved before the GPU destructure borrows `self.raster`
         // out (`terrain_material` is `&self`): the meshed terrain draws with it in the raster
@@ -577,8 +604,12 @@ impl Editor {
 
         // What this frame's scripts queued, under the timer's marks, before
         // anything that draws its results.
-        self.run_compute_jobs(timing);
-        let Some((gather, ui)) = self.build_frame_ui(
+        self.timed_wait("computeJobs", |ed| ed.run_compute_jobs(timing));
+        // The editor's UI pass: egui run over the editor (or, in a build run
+        // from the editor binary, over the little a build shows), named
+        // `editorUi` inside `untimed`.
+        let editor_ui = self.open_wait();
+        let built = self.build_frame_ui(
             gather,
             elapsed,
             game_focused,
@@ -586,7 +617,9 @@ impl Editor {
             preview_view,
             &profile,
             &window,
-        ) else {
+        );
+        self.close_wait(editor_ui, "editorUi");
+        let Some((gather, ui)) = built else {
             return;
         };
         self.draw_frame(gather, ui, timing, elapsed, &profile, ui_layers, ui_world, &window);
@@ -1192,8 +1225,12 @@ impl Editor {
                     p.record_part("renderPasses", ms);
                 }
 
+                // Named inside `untimed`: what the frame spends with nothing
+                // nested in it, so a plain span is the whole of it.
+                let wait = |what: &'static str, t: floptle_core::profile::Span| profile.borrow_mut().record_wait(what, t.ms());
                 // ---- game UI: over the finished frame (native res), before
                 // the editor's own chrome. One instanced pass per frame.
+                let ui_t = floptle_core::profile::Span::new();
                 if !ui_layers.is_empty()
                     && let Some(uir) = self.ui_render.as_mut()
                 {
@@ -1225,10 +1262,12 @@ impl Editor {
                     // cleared to black. Draw the UI over the finished frame.
                     uir.draw(gpu, &frame.view, vp, &ui_instances, &ui_batches, raster);
                 }
+                wait("uiDraw", ui_t);
 
                 // Selection outline: mask the selected object's silhouette (full
                 // frame res, so it stays crisp over the retro scene) then edge-detect
                 // it onto the frame. Works for meshes and the SDF blob alike.
+                let mask_t = floptle_core::profile::Span::new();
                 let masked = if !mask_mesh.is_empty() {
                     raster.draw_mask(gpu, outline.mask_view(), globals, &mask_mesh, &mask_skins);
                     true
@@ -1241,8 +1280,10 @@ impl Editor {
                 if masked {
                     outline.composite(gpu, &frame.view, [1.0, 1.0, 1.0, 1.0], 1.3);
                 }
+                wait("selectionMask", mask_t);
 
                 // egui composited over the final frame
+                let egui_t = floptle_core::profile::Span::new();
                 let ppp = egui_ppp;
                 let tris = ctx.tessellate(shapes, ppp);
                 let screen = egui_wgpu::ScreenDescriptor {
@@ -1252,46 +1293,57 @@ impl Editor {
                 for (id, delta) in &textures_delta.set {
                     egui.renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
                 }
-                // The theme's moving backdrops, into the textures the panels
-                // just asked for: before egui draws, after the UI has said
-                // where they are. Nothing at all when no visible panel has one.
-                gpu_mark!("theme backdrops");
-                egui.backdrop.render(
-                    &gpu.device,
-                    &gpu.queue,
-                    &mut egui.renderer,
-                    &ctx,
-                    [gpu.config.width, gpu.config.height],
-                    &self.themes.prefs,
-                    self.playing && self.themes.prefs.pause_while_playing,
-                );
-                gpu_mark!("editor UI");
-                let mut encoder = gpu
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("egui") });
-                egui.renderer.update_buffers(&gpu.device, &gpu.queue, &mut encoder, &tris, &screen);
-                {
-                    let mut pass = encoder
-                        .begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("egui"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &frame.view,
-                                depth_slice: None,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
-                            depth_stencil_attachment: None,
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            multiview_mask: None,
-                        })
-                        .forget_lifetime();
-                    egui.renderer.render(&mut pass, &tris, &screen);
+                // A game run from the editor binary (`floptle play`) shows
+                // egui only for a moment at the start, or while the
+                // multiplayer window, a session's overlay, a toast or a
+                // script's own overlay is up; most frames it paints nothing
+                // at all. Such a frame skips the backdrops, the buffer upload,
+                // the pass and its submit. Asked of what egui actually
+                // produced rather than of which windows are open, so anything
+                // that draws through it, now or later, is drawn.
+                let paints = egui_paints(&tris);
+                if paints {
+                    // The theme's moving backdrops, into the textures the panels
+                    // just asked for: before egui draws, after the UI has said
+                    // where they are. Nothing at all when no visible panel has one.
+                    gpu_mark!("theme backdrops");
+                    egui.backdrop.render(
+                        &gpu.device,
+                        &gpu.queue,
+                        &mut egui.renderer,
+                        &ctx,
+                        [gpu.config.width, gpu.config.height],
+                        &self.themes.prefs,
+                        self.playing && self.themes.prefs.pause_while_playing,
+                    );
+                    gpu_mark!("editor UI");
+                    let mut encoder = gpu
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("egui") });
+                    egui.renderer.update_buffers(&gpu.device, &gpu.queue, &mut encoder, &tris, &screen);
+                    {
+                        let mut pass = encoder
+                            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("egui"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &frame.view,
+                                    depth_slice: None,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                                multiview_mask: None,
+                            })
+                            .forget_lifetime();
+                        egui.renderer.render(&mut pass, &tris, &screen);
+                    }
+                    gpu.queue.submit([encoder.finish()]);
                 }
-                gpu.queue.submit([encoder.finish()]);
                 // ⏱ Close the frame before `present`: what happens after this is
                 // the display's business, and the panel's job is to account for
                 // the work the engine asked for.
@@ -1301,6 +1353,7 @@ impl Editor {
                 for id in &textures_delta.free {
                     egui.renderer.free_texture(id);
                 }
+                wait("editorUiDraw", egui_t);
                 dump_presented_frame(gpu, &frame.surface.texture, self.frame_no);
                 let present_t = floptle_core::profile::Span::new();
                 frame.present();
@@ -1332,6 +1385,9 @@ impl Editor {
             want_save_all,
             want_save_project,
         } = after;
+        // What the frame's UI asked for, acted on: named `editorCommands`
+        // inside `untimed`, up to the frame's close below.
+        let commands = self.open_wait();
         if want_save_all {
             // Quit-time full save (scene + project + scripts), with its own toast.
             self.save_all();
@@ -1416,6 +1472,7 @@ impl Editor {
         {
             self.script_host.profile().borrow_mut().enable(on);
         }
+        self.close_wait(commands, "editorCommands");
 
         // The frame is over: fold every bucket into its history.
         // Once, at the very end, so a subsystem that reported in several pieces —
@@ -1571,4 +1628,74 @@ pub(crate) fn pack_script_quads(
         }
     }
     (verts, batches)
+}
+
+/// Whether egui's tessellated frame puts anything on the screen: a mesh with
+/// a triangle in it, or a paint callback, which draws whatever it likes.
+/// A frame that paints nothing skips egui's GPU half entirely.
+#[cfg(feature = "editor-ui")]
+pub(crate) fn egui_paints(tris: &[egui::ClippedPrimitive]) -> bool {
+    tris.iter().any(|p| match &p.primitive {
+        egui::epaint::Primitive::Mesh(m) => !m.indices.is_empty(),
+        egui::epaint::Primitive::Callback(_) => true,
+    })
+}
+
+#[cfg(all(test, feature = "editor-ui"))]
+mod egui_skip_tests {
+    use super::egui_paints;
+
+    /// One egui pass with `ui` in it, tessellated as the frame tessellates it.
+    fn pass(ui: impl FnMut(&mut egui::Ui)) -> Vec<egui::ClippedPrimitive> {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::definitions(&floptle_theme::default_theme(), &[]));
+        let mut ui = ui;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0))),
+            ..Default::default()
+        };
+        // Twice: an Area sizes itself on its first pass and shows on the next.
+        let _ = ctx.run_ui(raw.clone(), &mut ui);
+        let out = ctx.run_ui(raw, &mut ui);
+        ctx.tessellate(out.shapes, out.pixels_per_point)
+    }
+
+    /// **A frame whose UI shows nothing skips egui's draw, and one that shows
+    /// anything does not.** The skip is asked of what egui produced, so a
+    /// build's hint, the multiplayer window or a script's overlay, which all
+    /// draw through egui, are never lost to it.
+    #[test]
+    fn egui_is_drawn_exactly_when_it_paints() {
+        assert!(!egui_paints(&pass(|_| {})), "an empty pass painted");
+        // What a build's frame is once its hint has gone: the game's rect
+        // taken for input, nothing drawn over it.
+        assert!(
+            !egui_paints(&pass(|ui| {
+                let r = ui.max_rect();
+                let _ = ui.interact(r, egui::Id::new("game"), egui::Sense::click_and_drag());
+            })),
+            "an invisible input rect painted"
+        );
+        // The build's hint, as `ui_player_mode_hint` draws it.
+        assert!(egui_paints(&pass(|ui| {
+            egui::Area::new(egui::Id::new("player_hint"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -14.0])
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.small("F1 — multiplayer");
+                    });
+                });
+        })));
+        // A window, as the multiplayer menu is.
+        assert!(egui_paints(&pass(|ui| {
+            egui::Window::new("🌐 Multiplayer").show(ui.ctx(), |ui| {
+                ui.label("Host — friends join with a lobby code");
+            });
+        })));
+        // A bare line painted over the game, as a script overlay is.
+        assert!(egui_paints(&pass(|ui| {
+            ui.painter().line_segment([egui::pos2(10.0, 10.0), egui::pos2(200.0, 40.0)], egui::Stroke::new(2.0, egui::Color32::RED));
+        })));
+    }
 }

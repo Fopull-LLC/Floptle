@@ -272,6 +272,10 @@ impl Editor {
         // The frame's own work starts here; the time before it, back to the
         // last frame's end, was the window system and the OS.
         self.script_host.profile().borrow_mut().begin_frame();
+        // The pacing, the clock, the UI styles, the draw's reset and the map
+        // and tilemap syncs: named `frameSetup` inside `untimed` (a frame cap's
+        // wait names itself, `frameCap`).
+        let setup = self.open_wait();
         self.publish_pacing_setup();
         self.pace_frame();
         let now = Instant::now();
@@ -303,6 +307,7 @@ impl Editor {
         self.sync_map_meshes();
         self.sync_map_paint();
         self.sync_tilemaps();
+        self.close_wait(setup, "frameSetup");
         // Capture the dirty flag before `sync_terrain_gpu` consumes it, exactly
         // as the editor frame does — a structural change is a full re-mesh.
         let terrain_full_rebuild = self.terrain_gpu_dirty;
@@ -339,7 +344,7 @@ impl Editor {
             ed.sync_tex_paint_mirrors();
         });
         // Gamepads: polled once a frame, absent hardware is fine.
-        self.pump_input_devices();
+        self.timed_wait("inputPump", |ed| ed.pump_input_devices());
 
         // ---- the game ----
         // `true`: a build's window is the game, so input is never somebody
@@ -349,8 +354,8 @@ impl Editor {
         // it counted a second time as `scripts`.
         self.play_step(dt, true);
         // What this frame's scripts queued, before the frame that shows it.
-        self.run_compute_jobs(false);
-        self.finish_input_frame();
+        self.timed_wait("computeJobs", |ed| ed.run_compute_jobs(false));
+        self.timed_wait("inputPump", |ed| ed.finish_input_frame());
         // Times itself, as `models`.
         self.load_script_swapped_models();
 
@@ -362,7 +367,7 @@ impl Editor {
             ed.ensure_ui_shaders();
             ed.ensure_post_shaders();
         });
-        self.report_gpu_errors();
+        self.timed_wait("frameSetup", |ed| ed.report_gpu_errors());
         self.timed_into(Bucket::Render, |ed| {
             ed.refresh_gi();
             ed.step_reflection_probes();
@@ -372,7 +377,7 @@ impl Editor {
         });
 
         // ---- draw ----
-        self.apply_project_vsync();
+        self.timed_wait("frameSetup", |ed| ed.apply_project_vsync());
         // The swapchain image is acquired first and the device borrow dropped,
         // because the draw below needs the whole editor mutably.
         // Waiting for a swapchain image is waiting on the GPU (or, with vsync,
@@ -380,7 +385,7 @@ impl Editor {
         let Some(frame) = self.timed_into(Bucket::GpuWait, |ed| ed.gpu.as_mut().and_then(|g| g.acquire())) else {
             // A surface that was outdated or lost reconfigures itself and the
             // frame is skipped — the same answer the editor gives.
-            self.drain_script_logs();
+            self.timed_wait("frameSetup", |ed| ed.drain_script_logs());
             return None;
         };
         let (depth_view, depth_tex, w, h) = self.gpu.as_ref().map(|g| {
@@ -393,20 +398,26 @@ impl Editor {
             .gpu
             .as_ref()
             .is_some_and(|g| g.config.usage.contains(wgpu::TextureUsages::TEXTURE_BINDING));
-        let timed = self.begin_live_gpu_timing();
-        self.render_game_into(
-            frame.view.clone(),
-            depth_view,
-            Some(depth_tex),
-            [0.0, 0.0],
-            [w as f32, h as f32],
-            elapsed,
-            true,
-            samplable,
-        );
-        if timed {
-            self.end_live_gpu_timing();
-        }
+        // All of it render work: the world's own passes record `render`
+        // themselves, and the rest — the post chain, the upscale, the world
+        // canvases — was counted nowhere. The game UI drawn at its end names
+        // itself, `uiDraw`, inside `untimed`.
+        self.timed_into(Bucket::Render, |ed| {
+            let timed = ed.begin_live_gpu_timing();
+            ed.render_game_into(
+                frame.view.clone(),
+                depth_view,
+                Some(depth_tex),
+                [0.0, 0.0],
+                [w as f32, h as f32],
+                elapsed,
+                true,
+                samplable,
+            );
+            if timed {
+                ed.end_live_gpu_timing();
+            }
+        });
         // **Photographed before it is presented**, and out of the swapchain
         // image itself — so what lands in the PNG is the frame the player saw,
         // not a second render that resembles it.
@@ -418,7 +429,7 @@ impl Editor {
         // Anything the game's scripts printed reaches stderr (the Console
         // mirrors there in player mode), so a shipped build can still be
         // debugged from a terminal.
-        self.drain_script_logs();
+        self.timed_wait("frameSetup", |ed| ed.drain_script_logs());
         // The frame is over: fold every bucket into its history, once, exactly
         // as the editor frame does.
         self.end_profile_frame();

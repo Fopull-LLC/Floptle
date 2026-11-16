@@ -37,7 +37,7 @@ use floptle_core::transform::Transform;
 use floptle_core::{Entity, Material, Matter, World};
 use floptle_script::ScriptHost;
 use floptle_render::{
-    FlyCamera, Gpu, Grid, Input, MeshId, Outline, Raster, Raymarch, Retro, TexId,
+    FlyCamera, Gpu, Grid, Input, MeshId, Outline, Raster, Raymarch, Retro,
 };
 use floptle_scene::{
     MatterDoc, ProjectConfigDoc, SceneDoc,
@@ -188,6 +188,8 @@ mod arrival_tests;
 #[cfg(test)]
 mod quality_change_tests;
 #[cfg(test)]
+mod scene_texture_gate_tests;
+#[cfg(test)]
 mod tick_overload_tests;
 #[cfg(test)]
 mod underwater_look_tests;
@@ -316,6 +318,7 @@ mod shot;
 #[cfg(feature = "editor-ui")]
 mod templates;
 mod terrain_edit;
+mod texture_registry;
 #[cfg(feature = "editor-ui")]
 mod terrain_ui;
 mod terrain_far;
@@ -2432,7 +2435,9 @@ struct Editor {
     /// Pre-Play map geometry, restored on Stop (the terrain-snapshot pattern).
     play_maps: Option<HashMap<u32, floptle_map::MapMesh>>,
     /// Material textures registered on the GPU, keyed by image path ⏵ handle.
-    texture_registry: HashMap<String, TexId>,
+    /// Counts its own changes, so the passes that read it can tell a frame
+    /// that changed nothing from one that did.
+    texture_registry: texture_registry::TextureRegistry,
     /// The game-UI render pass (instanced quads + glyph atlas).
     ui_render: Option<floptle_render::Ui>,
     /// This frame's Scene-view UI overlay (projected element rects).
@@ -3880,6 +3885,10 @@ struct Editor {
     frame_no: u64,
     /// The frame `ensure_scene_textures` last ran on.
     textures_warmed_frame: u64,
+    /// What `ensure_scene_textures` last saw: a frame where no material, model
+    /// override, patch or tilemap changed and no texture was dropped asks
+    /// only about the paths still missing.
+    scene_tex_gate: scene_sync::SceneTexGate,
     /// The tuning view: show only the baked bounce, with every direct light
     /// switched off. A view flag rather than a scene setting — like the ortho
     /// grid or the gizmo filter, it is about what you are looking at, not about

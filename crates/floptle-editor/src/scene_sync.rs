@@ -17,6 +17,33 @@ fn occluder_key(k: &crate::shading::OccKey, b: &std::sync::Arc<floptle_field::Ba
     h.finish() | 1 << 63
 }
 
+/// What [`Editor::ensure_scene_textures`] saw the last time it looked, so a
+/// frame where nothing it reads changed does not look again.
+///
+/// It reads four components and one map: the scene's `Material`s,
+/// `ObjectMaterials` overrides, `MaterialPatch`es (a script's
+/// `node:setMaterial` on a model) and `Matter` (for a tilemap's tileset), and
+/// the texture registry. A change to any component arrives through the
+/// world's change log — an Inspector edit, a script, an undo, a paste, a
+/// prefab, a scene load all write through the world, and the log sees every
+/// write — and a texture dropped from the registry through its eviction
+/// count. Nothing else can make a registered path need registering again.
+#[derive(Default)]
+pub(crate) struct SceneTexGate {
+    /// The world's change log as of the last look. `None`: look at everything.
+    cursor: Option<floptle_core::ChangeCursor>,
+    /// The registry's eviction count as of the last look.
+    evictions: u64,
+    /// Paths a material names that could not be registered: asked for again
+    /// every frame until they can.
+    pub(crate) missing: Vec<String>,
+    /// Tilesets the scene's tilemaps use, whose sheets are checked every frame.
+    tilesets: Vec<String>,
+    /// Looks taken, at every material or at the few that changed: what a test
+    /// reads to see a quiet frame take none.
+    pub(crate) looks: u64,
+}
+
 impl Editor {
     /// Per-frame GPU sync for SDF matter: upload structurally-changed terrain
     /// volumes + shadow-occluder bakes into the shared 3D atlas (or just the
@@ -538,8 +565,8 @@ impl Editor {
     /// `render_world_into` would otherwise photograph a scene wearing the wrong
     /// textures, and say nothing about it.
     ///
-    /// Idempotent and cheap: every entry is skipped once registered, so the
-    /// steady-state cost is one hash lookup per material per frame.
+    /// Idempotent, and on a quiet frame it reads no material at all: see
+    /// [`SceneTexGate`] for what makes it look again, and at what.
     pub(crate) fn ensure_scene_textures(&mut self) {
         // Once per frame, however many views ask. `render_world_into` is called
         // six times for six cube faces during a GI bake or a reflection
@@ -550,6 +577,33 @@ impl Editor {
             return;
         }
         self.textures_warmed_frame = self.frame_no;
+        // `None`: look at every material. `Some`: only the nodes whose
+        // materials, overrides, patches or matter may have changed since the
+        // last look. A texture dropped from the registry (reloaded from disk,
+        // given new import settings, freed) is wanted again by whatever names
+        // it, so that looks at everything; so does a change log that cannot
+        // say what happened, a new scene among them.
+        let only: Option<std::collections::HashSet<u32>> = match self.scene_tex_gate.cursor {
+            Some(cursor) if self.scene_tex_gate.evictions == self.texture_registry.evictions() => {
+                self.world.changes_since(cursor).map(|changes| {
+                    use std::any::TypeId;
+                    let read = [
+                        TypeId::of::<Material>(),
+                        TypeId::of::<floptle_core::ObjectMaterials>(),
+                        TypeId::of::<floptle_core::MaterialPatch>(),
+                        TypeId::of::<Matter>(),
+                    ];
+                    changes
+                        .iter()
+                        .filter(|c| matches!(c.kind, floptle_core::ChangeKind::Component(t) if read.contains(&t)))
+                        .map(|c| c.index)
+                        .collect()
+                })
+            }
+            _ => None,
+        };
+        self.scene_tex_gate.cursor = Some(self.world.change_cursor());
+        self.scene_tex_gate.evictions = self.texture_registry.evictions();
         // Node Materials and per-object override materials — an override's
         // texture is as much a texture as the node's. The surface maps too —
         // normal, roughness, metallic, occlusion. They go through the same
@@ -558,11 +612,18 @@ impl Editor {
         // and the only sign was that it looked like every other flat surface.
         // And a script's patch over a model's own materials names images too.
         //
-        // Every path is looked up by reference and only a miss is copied: this
-        // runs every frame over every material in the scene, and copying each
-        // path to ask whether it is already loaded was most of what it cost.
-        let mut tex_paths: Vec<String> = Vec::new();
-        {
+        // Every path is looked up by reference and only a miss is copied.
+        // A path that could not be registered last time (its file not there
+        // yet, a render target not made yet) is asked for again every frame,
+        // as it always was: only the paths that resolved are taken on trust.
+        let mut tex_paths: Vec<String> = std::mem::take(&mut self.scene_tex_gate.missing);
+        tex_paths.retain(|p| !self.texture_registry.contains_key(p));
+        let mut tilesets = std::mem::take(&mut self.scene_tex_gate.tilesets);
+        if only.is_none() {
+            tilesets.clear();
+        }
+        if only.as_ref().is_none_or(|o| !o.is_empty()) {
+            self.scene_tex_gate.looks += 1;
             let reg = &self.texture_registry;
             let mut want = |p: Option<&String>| {
                 if let Some(p) = p
@@ -578,14 +639,44 @@ impl Editor {
                     want(p);
                 }
             };
-            for (_, m) in self.world.query::<Material>() {
-                images(m);
-            }
-            for (_, om) in self.world.query::<floptle_core::ObjectMaterials>() {
-                om.0.values().for_each(&mut images);
-            }
-            for (_, p) in self.world.query::<floptle_core::MaterialPatch>() {
-                images(&p.mat);
+            let mut tileset = |m: &Matter| {
+                if let Matter::Tilemap { tileset, .. } = m
+                    && !tilesets.contains(tileset)
+                {
+                    tilesets.push(tileset.clone());
+                }
+            };
+            match &only {
+                None => {
+                    for (_, m) in self.world.query::<Material>() {
+                        images(m);
+                    }
+                    for (_, om) in self.world.query::<floptle_core::ObjectMaterials>() {
+                        om.0.values().for_each(&mut images);
+                    }
+                    for (_, p) in self.world.query::<floptle_core::MaterialPatch>() {
+                        images(&p.mat);
+                    }
+                    for (_, m) in self.world.query::<Matter>() {
+                        tileset(m);
+                    }
+                }
+                Some(nodes) => {
+                    for e in nodes.iter().filter_map(|&i| self.world.entity_at(i)) {
+                        if let Some(m) = self.world.get::<Material>(e) {
+                            images(m);
+                        }
+                        if let Some(om) = self.world.get::<floptle_core::ObjectMaterials>(e) {
+                            om.0.values().for_each(&mut images);
+                        }
+                        if let Some(p) = self.world.get::<floptle_core::MaterialPatch>(e) {
+                            images(&p.mat);
+                        }
+                        if let Some(m) = self.world.get::<Matter>(e) {
+                            tileset(m);
+                        }
+                    }
+                }
             }
         }
         // …and every sheet of every tileset a tilemap in this scene uses.
@@ -597,19 +688,24 @@ impl Editor {
         // `tilemap_draws` resolves a page by path against this registry, so a
         // path that never gets here is a page that silently renders as
         // untextured.
-        let sheets: Vec<String> = self
-            .world
-            .query::<Matter>()
-            .filter_map(|(_, m)| match m {
-                Matter::Tilemap { tileset, .. } => self.tiles.get(tileset),
-                _ => None,
-            })
-            .flat_map(|s| s.pages_iter().map(|(_, t, ..)| t.to_string()).collect::<Vec<_>>())
-            .filter(|p| !p.trim().is_empty() && !self.texture_registry.contains_key(p))
-            .collect();
-        tex_paths.extend(sheets);
+        //
+        // Read every frame from the tilesets the scene's tilemaps were last
+        // seen using: a sheet added in the Tiles tab changes the tileset, not
+        // the world, and a frame with no tilemap reads nothing.
+        for ts in &tilesets {
+            let Some(set) = self.tiles.get(ts) else { continue };
+            for (_, t, ..) in set.pages_iter() {
+                if !t.trim().is_empty() && !self.texture_registry.contains_key(t) && !tex_paths.iter().any(|p| p == t) {
+                    tex_paths.push(t.to_string());
+                }
+            }
+        }
+        self.scene_tex_gate.tilesets = tilesets;
         for p in tex_paths {
             self.ensure_texture(&p);
+            if !self.texture_registry.contains_key(&p) {
+                self.scene_tex_gate.missing.push(p);
+            }
         }
     }
 

@@ -112,7 +112,7 @@ impl FlslPool {
 pub(crate) struct FlslGate {
     /// The world's change log as of the last walk. `None`: walk next frame.
     cursor: Option<floptle_core::ChangeCursor>,
-    /// Shader compiles so far, and the texture registry's fingerprint, as of
+    /// Shader compiles so far, and the texture registry's revision, as of
     /// the last walk.
     seen: (u64, u64),
     /// Every shader the last walk found in use, re-checked for edits each
@@ -129,18 +129,6 @@ pub(crate) struct FlslGate {
     /// `false` before the first write, which keeps the passes' own).
     pub(crate) pipelines_unsaved: bool,
     pipelines_saved_once: bool,
-}
-
-/// A number that changes whenever any path in the texture registry moves to
-/// a different image. Order-free, because the registry is a hash map.
-fn registry_fingerprint(registry: &HashMap<String, TexId>) -> u64 {
-    use std::hash::{Hash, Hasher};
-    registry.iter().fold(registry.len() as u64, |acc, (k, v)| {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        k.hash(&mut h);
-        v.0.hash(&mut h);
-        acc.wrapping_add(h.finish())
-    })
 }
 
 /// A plan for one live `.flsl` material binding — shared by whole-node
@@ -311,7 +299,7 @@ impl Editor {
         for p in self.flsl_gate.paths.clone() {
             self.ensure_flsl_shader(&p);
         }
-        let seen = (self.flsl_gate.compiles, registry_fingerprint(&self.texture_registry));
+        let seen = (self.flsl_gate.compiles, self.texture_registry.revision());
         // `None`: walk everything. `Some`: the entity indices that may have
         // changed since the last walk.
         let only: Option<HashSet<u32>> = match self.flsl_gate.cursor {
@@ -481,7 +469,7 @@ impl Editor {
         self.flsl_gate.planned += obj_seen.len() as u64;
         retire_binds(&mut self.obj_flsl_binds, &mut self.flsl_pool, |k, _| !wanted(&k.0) || obj_seen.contains(k));
 
-        self.flsl_gate.seen = (self.flsl_gate.compiles, registry_fingerprint(&self.texture_registry));
+        self.flsl_gate.seen = (self.flsl_gate.compiles, self.texture_registry.revision());
         self.flsl_gate.cursor = (!missing).then(|| self.world.change_cursor());
     }
 
