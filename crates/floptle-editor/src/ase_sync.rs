@@ -48,7 +48,7 @@ impl Editor {
     /// Import every `.aseprite` whose sheet is missing or older than it.
     pub(crate) fn poll_aseprite_files(&mut self) {
         let now = Instant::now();
-        if self.ase_poll_at.is_some_and(|t| now.duration_since(t) < POLL_EVERY) {
+        if self.ase_poll_at.is_some_and(|t| now.duration_since(t) < self.asset_poll_every(POLL_EVERY)) {
             return;
         }
         self.ase_poll_at = Some(now);
