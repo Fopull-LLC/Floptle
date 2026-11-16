@@ -551,6 +551,14 @@ struct Instance {
     /// and one per instance put a hard ceiling of a few thousand scripted nodes
     /// on a scene — reached as a panic.
     node: Option<(RegistryKey, crate::env::NodeStamp)>,
+    /// The same table, held weakly, once no hook will ever be handed it
+    /// again — a script whose only hook is `start`, after `start` ran. Kept
+    /// (`me = node`), it is still alive and still drained and stamped every
+    /// pass; not kept, the collector takes it, and from then on there is
+    /// nothing anyone could see to keep current. Holding it strongly made
+    /// every `start`-only instance pay a node stamp per pass forever. The
+    /// key into [`ScriptHost::weak_nodes`].
+    node_weak: Option<(i32, crate::env::NodeStamp)>,
     /// Which lifecycle hooks this script's environment defines, read once when
     /// the chunk is built (and again on hot reload — a rebuild is a new
     /// `Instance`). A pass the script has no hook for skips everything but the
@@ -578,7 +586,25 @@ struct Instance {
     /// always gave an undeclared, frame-local param — and declared params come
     /// back through the ECS write in `flush_writes`, as they always have.
     params_dirty: bool,
+    /// The seed has found `env.params` set (or set it). The seed only ever
+    /// fills an unset `params`, so once it is set the seed has nothing left
+    /// to do for this instance.
+    seeded: bool,
+    /// Whether this script's `node` or `params` global might be replaced
+    /// after the seed put it there: its own source might assign one
+    /// (`node = n`, `params = nil`; read once when the chunk is built,
+    /// conservative in the same direction as [`source_writes_params`]), or
+    /// another script has set one through its handle (`Shared::rebound`).
+    /// The seed puts both back every frame for such a script, as it always
+    /// did for every script. For the rest it does that once, when the
+    /// environment is built: what it put there is still there.
+    rebinds_globals: bool,
 }
+
+/// A script kind's name, interned: instances are keyed by `(node, kind id)`,
+/// so finding one is a hash of two integers, not a `String` built per
+/// instance per pass. Ids are handed out in first-seen order and never reused.
+type KindId = u32;
 
 /// The lifecycle hooks a script's environment defines — see [`Instance::hooks`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -652,6 +678,51 @@ fn source_writes_params(src: &str) -> bool {
     false
 }
 
+/// Might this source text assign the global `name` (`node`, `params`)?
+///
+/// The seed resets those two globals in every environment every frame. For a
+/// script that never assigns them that reset puts back what is already there,
+/// so it is done once instead; this decides which scripts are which.
+/// Conservative, like [`source_writes_params`]: a false "might" costs the old
+/// per-frame reset, a false "does not" would change what the script reads.
+/// So `local node = …` counts, a `node` that may be an assignment list's
+/// (`node, x = …`, `a, node = …`) counts, so does `function node(`, and any
+/// script that reaches its environment some other way (`getfenv`, `setfenv`,
+/// `rawset`, `_ENV`, `loadstring`) counts whatever it says.
+fn source_may_assign_global(src: &str, name: &str) -> bool {
+    if ["getfenv", "setfenv", "rawset", "_ENV", "loadstring"].iter().any(|w| src.contains(w)) {
+        return true;
+    }
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let bytes = src.as_bytes();
+    let mut from = 0;
+    while let Some(i) = src[from..].find(name) {
+        let at = from + i;
+        from = at + name.len();
+        // A whole identifier, and not a field (`self.node`, `x:node`).
+        if at > 0 && (ident(bytes[at - 1]) || bytes[at - 1] == b'.' || bytes[at - 1] == b':') {
+            continue;
+        }
+        if from < bytes.len() && ident(bytes[from]) {
+            continue;
+        }
+        let before = src[..at].trim_end();
+        let rest = src[from..].trim_start();
+        if rest.starts_with('=') && !rest.starts_with("==") {
+            return true;
+        }
+        if before.ends_with("function") {
+            return true;
+        }
+        // In a list: an assignment's targets, unless it opens an argument
+        // list (`function update(node, dt)`).
+        if rest.starts_with(',') && !before.ends_with('(') {
+            return true;
+        }
+    }
+    false
+}
+
 /// Fingerprint the seed an instance's `params` table is built from.
 ///
 /// `structure` is the scene's structural revision as of the last full mirror
@@ -685,6 +756,13 @@ pub(crate) type IgnorePairs = Rc<RefCell<Vec<(u32, u32, Option<f32>)>>>;
 /// Embeds Lua and runs the scripts attached to a world's nodes.
 pub struct ScriptHost {
     lua: Lua,
+    /// [`env::stamp_unchanged_lua`], compiled once: whether a kept `node`
+    /// table can skip its drain and re-stamp — see [`env::stamp_unchanged`].
+    stamp_unchanged: mlua::Function,
+    /// Weak-valued: the `node` tables no hook will be handed again — see
+    /// [`Instance::node_weak`] — by a key from `weak_next`.
+    weak_nodes: mlua::Table,
+    weak_next: std::cell::Cell<i32>,
     /// Extra folders a script name may resolve in, after the project's own
     /// `scripts/`: the script folders of the project's installed **packages**,
     /// in load order. Set by the editor when packages load.
@@ -693,7 +771,11 @@ pub struct ScriptHost {
     /// an existing script name means.
     extra_script_dirs: Vec<std::path::PathBuf>,
     sources: HashMap<String, Source>,
-    instances: HashMap<(u32, String), Instance>,
+    instances: rustc_hash::FxHashMap<(u32, KindId), Instance>,
+    /// Every script kind seen, by name — see [`KindId`].
+    kind_ids: rustc_hash::FxHashMap<String, KindId>,
+    /// The names behind [`KindId`]s, indexed by id.
+    kind_names: Vec<String>,
     errors: Vec<String>,
     /// Captured `print`/`log` output (and errors) since the last drain — the editor
     /// Console reads these. Shared with the Lua `print`/`log` closures.
@@ -837,6 +919,9 @@ pub struct ScriptHost {
     /// Live per-(entity, script) environments, for script handles. Registry
     /// keys — see the note on the `Shared` copy of this field.
     envs: Rc<RefCell<HashMap<(u32, String), RegistryKey>>>,
+    /// Instances whose `node` or `params` global another script set through
+    /// a script handle (`h.node = …`) — see the `Shared` copy.
+    rebound: Rc<RefCell<Vec<(u32, String)>>>,
     /// Script kinds that failed to load — shared with the reference layer, which
     /// reads it to tell a broken script apart from a missing export. See the
     /// `Shared` copy.
@@ -936,7 +1021,7 @@ pub struct ScriptHost {
     /// Each script kind's source generation as of this frame (`None`: no such
     /// file), so the file is looked at once per kind rather than once per
     /// instance. Cleared at the start of every frame pass.
-    kinds_this_frame: HashMap<String, Option<u64>>,
+    kinds_this_frame: rustc_hash::FxHashMap<KindId, Option<u64>>,
     /// The scripts folder the last pass ran from, so a spawn's callback can
     /// load the new node's scripts before it runs (see `call_spawn_callback`).
     last_scripts_dir: Option<std::path::PathBuf>,
@@ -2671,6 +2756,13 @@ struct Shared {
     /// editor, where unsaved work lives. The registry is an
     /// ordinary Lua table with no such bound, and the key drops itself.
     envs: Rc<RefCell<HashMap<(u32, String), RegistryKey>>>,
+    /// Instances whose `node` or `params` global another script set through
+    /// a script handle (`h.node = …`, `h.params = nil`). The seed resets those
+    /// two globals only for a script whose own source might assign them
+    /// ([`Instance::rebinds_globals`]); a write from outside is told here, and
+    /// the instance is reset every frame from then on, as every instance
+    /// used to be.
+    rebound: Rc<RefCell<Vec<(u32, String)>>>,
     /// `node.model = ...` writes (entity index → asset path), applied to `Matter::Mesh`.
     model_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node.material = ...` writes (entity index → preset name / asset path).

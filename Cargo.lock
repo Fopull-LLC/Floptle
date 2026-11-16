@@ -2085,6 +2085,7 @@ dependencies = [
  "image",
  "mlua",
  "ron",
+ "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "ureq",
