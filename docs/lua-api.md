@@ -39,7 +39,7 @@ each group, and meant to be searched.
 - [physics controls — pause & step](#physics-controls--pause--step) — 5
 - [frame cost — perf.*](#frame-cost--perf) — 26
 - [accessibility — access.*](#accessibility--access) — 11
-- [persistence — save.*](#persistence--save) — 10
+- [persistence — save.*](#persistence--save) — 11
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
 - [components — getcomponent](#components--getcomponent) — 129
@@ -3928,7 +3928,7 @@ save.flush([{ wait = true }]) — hand the store to the writer NOW (checkpoints,
 
 ### `save.get`
 
-save.get("gold" [, default]) — the stored value, else the default, else nil. save.get("who").hp reads into stored tables. A table comes back as a fresh copy every call, yours to change; for reading a large one often, save.peek is free after the first call.
+save.get("gold" [, default]) — the stored value, else the default, else nil. save.get("who").hp reads into stored tables. A table comes back as a fresh copy every call, yours to change. To read one often without that copy: save.peek hands back one shared read-only table, or keep your own copy and read again only when save.version(key) moved.
 
 ### `save.peek`
 
@@ -3950,6 +3950,10 @@ save.slot("slot2") — switch the active save slot; save.slot() reads the curren
 ### `save.slots`
 
 save.slots() — the names of the slots saved on disk, sorted: a "load game" list, autosave rotation. The active slot is in it once written (save.flush{ wait = true } to be sure).
+
+### `save.version`
+
+save.version("crew") — a number that moves every time what save.get("crew") returns may have changed: a save.set or save.delete of the key from any script, a slot load or switch, save.copySlot onto the active slot, save.deleteSlot of the active slot. Reading never moves it. Keep your own copy with the number it was read at, and read again only when the number moved: `if save.version("crew") ~= seen then crew = save.get("crew") seen = save.version("crew") end`. A key never set has a number too, which moves when it is set. The number is never 0, so 0 works as "not read yet"; compare it only with one from the same Play session.
 
 ## timers — after, every, tween
 
