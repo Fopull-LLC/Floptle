@@ -2528,7 +2528,19 @@ fn sky_ray_lift(i: u32, base: f32) -> f32 {
 // and no temporal filter is needed. The penumbra estimator is kept hard
 // (k = 8), so a ray skimming flat open ground at the cone's widest angle
 // still counts as open.
+//
+// Where the scene's sky cache is on and answers this reach (`sky_cache.rs`),
+// the still world comes from the cache instead: eight cells round the point
+// (`sky_cached`), each holding the cone's answer for the six axis directions.
+// Where the cache holds nothing for the point (outside its last level, or not
+// yet filled), the rays march as they always have.
 fn sky_occlusion(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
+    if (skyc_word(SKYC_ON) != 0u && abs(reach - skyc_f(SKYC_REACH)) < 0.5) {
+        let c = sky_cached(p, n);
+        if (c.y > 0.0) {
+            return c.x * sky_unbaked(p, n, reach);
+        }
+    }
     return sky_cone(p, n, reach, FIELD_ALL);
 }
 
@@ -2591,15 +2603,26 @@ fn skyc_tag(l: u32, s: vec3<u32>) -> u32 {
     return 1u | (((t & 7u) ^ wrap) << 2u) | (((t >> 3u) & 7u) << 5u);
 }
 
+// A lobe the fill could not answer for (`skyc_fill`).
+const SKYC_UNSURE: u32 = 255u;
+
 // The cone's answer facing `n` from one cell: the six axis lobes weighted by
 // the normal's squared components (an ambient cube), so a normal on an axis
-// reads that axis's cone exactly.
-fn skyc_lobes(c: vec2<u32>, n: vec3<f32>) -> f32 {
-    let w = n * n / max(dot(n, n), 1e-12);
-    let lx = select((c.x >> 8u) & 255u, c.x & 255u, n.x >= 0.0);
-    let ly = select((c.x >> 24u) & 255u, (c.x >> 16u) & 255u, n.y >= 0.0);
-    let lz = select((c.y >> 8u) & 255u, c.y & 255u, n.z >= 0.0);
-    return (w.x * f32(lx) + w.y * f32(ly) + w.z * f32(lz)) / 255.0;
+// reads that axis's cone exactly. (the answer, the share of the weight
+// whose lobes the cell could answer for.)
+fn skyc_lobes(c: vec2<u32>, n: vec3<f32>) -> vec2<f32> {
+    var w = n * n / max(dot(n, n), 1e-12);
+    let l = vec3<u32>(
+        select((c.x >> 8u) & 255u, c.x & 255u, n.x >= 0.0),
+        select((c.x >> 24u) & 255u, (c.x >> 16u) & 255u, n.y >= 0.0),
+        select((c.y >> 8u) & 255u, c.y & 255u, n.z >= 0.0),
+    );
+    w = select(w, vec3<f32>(0.0), l == vec3<u32>(SKYC_UNSURE));
+    let sum = w.x + w.y + w.z;
+    if (sum <= 1e-4) {
+        return vec2<f32>(1.0, 0.0);
+    }
+    return vec2<f32>(dot(w, vec3<f32>(l)) / (254.0 * sum), sum);
 }
 
 // The still world's share of the sky for camera-relative `p` facing `n`,
@@ -2609,49 +2632,85 @@ fn skyc_lobes(c: vec2<u32>, n: vec3<f32>) -> f32 {
 // The finest level whose window holds all eight cells round the point
 // answers. A cell counts only once it is filled for where it stands now and
 // its centre is outside solid matter, so rock never bleeds under a slab
-// beside it. A cell further from the point than the field's distance at its
-// centre (with a quarter cell's slack) may have a surface between the two,
-// the roof of a plank over the water seen from above it: it counts a
-// twentieth as much as the cells on the point's own side.
+// beside it; and of its lobes, only those it could answer for (`skyc_fill`),
+// so a cell just under a plank does not light the water further under it.
 fn sky_cached(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
     for (var l = 0u; l < SKYC_LEVELS; l = l + 1u) {
-        let o = SKYC_LEVEL + l * SKYC_LEVEL_WORDS;
-        let cell = skyc_f(o + 3u);
-        let q = p + n * (0.25 * cell);
-        let u = (q - skyc_corner(l)) / cell - vec3<f32>(0.5);
-        let base = floor(u);
-        if (any(base < vec3<f32>(0.0)) || any(base > vec3<f32>(f32(SKYC_DIMS) - 2.0))) {
+        let r = skyc_level(l, p, n);
+        if (r.y < 0.0) {
+            // Filled, and none can answer: the point is too near matter
+            // for these cells, and a coarser level's cells, further off,
+            // see past it. March.
+            return vec2<f32>(1.0, 0.0);
+        }
+        if (r.y <= 1e-4) {
             continue;
         }
-        let f = u - base;
-        let b = vec3<u32>(base);
-        let m = skyc_mod(l);
-        var sum = 0.0;
-        var wsum = 0.0;
-        for (var k = 0u; k < 8u; k = k + 1u) {
-            let corner = vec3<u32>(k & 1u, (k >> 1u) & 1u, (k >> 2u) & 1u);
-            let s = (b + corner + m) % vec3<u32>(SKYC_DIMS);
-            let c = skyc_cell(l, s);
-            let flags = c.y >> 24u;
-            if ((flags & 0xFDu) != skyc_tag(l, s) || (flags & 2u) == 0u) {
-                continue;
+        // Within two cells of the window's edge, toward the next level's
+        // answer, so the hand-over between levels is not a seam.
+        if (r.z < 2.0 && l + 1u < SKYC_LEVELS) {
+            let next = skyc_level(l + 1u, p, n);
+            if (next.y > 1e-4) {
+                return vec2<f32>(mix(next.x, r.x, r.z * 0.5), r.y);
             }
-            let cf = vec3<f32>(corner);
-            let t = mix(vec3<f32>(1.0) - f, f, cf);
-            var w = t.x * t.y * t.z;
-            let centre_off = (cf - f) * cell;
-            let d = f32((c.y >> 16u) & 255u) / 64.0 * cell;
-            if (length(centre_off) > d + 0.25 * cell) {
-                w = w * 0.05;
-            }
-            sum = sum + w * skyc_lobes(c, n);
-            wsum = wsum + w;
         }
-        if (wsum > 1e-4) {
-            return vec2<f32>(sum / wsum, wsum);
-        }
+        return r.xy;
     }
     return vec2<f32>(1.0, 0.0);
+}
+
+// Level `l`'s answer for `p` facing `n` (`sky_cached`): (the answer, the
+// weight of the cells that held it, how many cells in from the window's
+// usable edge the point is). No weight where the window does not hold all
+// eight cells round the point, or some are not filled yet; a weight below
+// zero where all are filled and too few can answer for `n` (under 30% of
+// the point's trilinear weight).
+fn skyc_level(l: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let o = SKYC_LEVEL + l * SKYC_LEVEL_WORDS;
+    let cell = skyc_f(o + 3u);
+    let q = p + n * (0.25 * cell);
+    let u = (q - skyc_corner(l)) / cell - vec3<f32>(0.5);
+    let base = floor(u);
+    let top = f32(SKYC_DIMS) - 2.0;
+    if (any(base < vec3<f32>(0.0)) || any(base > vec3<f32>(top))) {
+        return vec3<f32>(1.0, 0.0, 0.0);
+    }
+    let lo = min(u, vec3<f32>(top + 1.0) - u);
+    let edge = min(lo.x, min(lo.y, lo.z));
+    let f = u - base;
+    let b = vec3<u32>(base);
+    let m = skyc_mod(l);
+    var sum = 0.0;
+    var wsum = 0.0;
+    var usable = 0.0;
+    var filled = 0u;
+    for (var k = 0u; k < 8u; k = k + 1u) {
+        let corner = vec3<u32>(k & 1u, (k >> 1u) & 1u, (k >> 2u) & 1u);
+        let s = (b + corner + m) % vec3<u32>(SKYC_DIMS);
+        let c = skyc_cell(l, s);
+        let flags = c.y >> 24u;
+        if ((flags & 0xFDu) != skyc_tag(l, s)) {
+            continue;
+        }
+        filled = filled + 1u;
+        if ((flags & 2u) == 0u) {
+            continue;
+        }
+        let cf = vec3<f32>(corner);
+        let t = mix(vec3<f32>(1.0) - f, f, cf);
+        var w = t.x * t.y * t.z;
+        let lobe = skyc_lobes(c, n);
+        usable = usable + w * lobe.y;
+        w = w * lobe.y;
+        sum = sum + w * lobe.x;
+        wsum = wsum + w;
+    }
+    // Too few of them can answer: an answer from those would lean on the
+    // cells beside the cover rather than in it.
+    if (wsum <= 1e-4 || (filled == 8u && usable < 0.3)) {
+        return vec3<f32>(1.0, select(0.0, -1.0, filled == 8u), edge);
+    }
+    return vec3<f32>(sum / wsum, wsum, edge);
 }
 
 // What the cache leaves out, for a point it answered: collider proxies the
@@ -2689,11 +2748,22 @@ fn skyc_fill(c: vec3<f32>, cell: f32, tag: u32, reach: f32) -> vec2<u32> {
     if (d <= 0.0) {
         return vec2<u32>(0u, (dist << 16u) | (tag << 24u));
     }
+    // A cone's rays start a lift off its point, along its axis. Where
+    // matter lies inside that stretch (the centre just under a plank), the
+    // rays start in it or past it, and both read open what a point a little
+    // further from the plank reads covered: the lobe says it cannot answer,
+    // and the cells round a point that can answer do. The sphere half way
+    // along the stretch holds all of it.
+    let lift = sky_ray_lift(3u, shadow_lift_base(c));
     var lobe: array<u32, 6>;
     for (var a = 0u; a < 6u; a = a + 1u) {
         var axis = vec3<f32>(0.0);
         axis[a >> 1u] = select(1.0, -1.0, (a & 1u) == 1u);
-        lobe[a] = u32(round(clamp(sky_cone(c, axis, reach, pieces), 0.0, 1.0) * 255.0));
+        if (d < lift && field_set_d(c + axis * (0.5 * lift), pieces, 0u) < 0.5 * lift) {
+            lobe[a] = SKYC_UNSURE;
+            continue;
+        }
+        lobe[a] = u32(round(clamp(sky_cone(c, axis, reach, pieces), 0.0, 1.0) * 254.0));
     }
     let x = lobe[0] | (lobe[1] << 8u) | (lobe[2] << 16u) | (lobe[3] << 24u);
     let y = lobe[4] | (lobe[5] << 8u) | (dist << 16u) | ((tag | 2u) << 24u);

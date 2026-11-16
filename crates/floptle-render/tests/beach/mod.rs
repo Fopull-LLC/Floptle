@@ -211,6 +211,27 @@ pub enum Layout {
     Crowd,
 }
 
+/// A pier: a flat bed three units down and, 0.6 over the water, a plank
+/// 0.2 thick and six across, thinner than the cache's finest cell. Seen
+/// from the knolls' view. Distances are exact, in eighth-unit cells.
+pub fn pier() -> BakedSdf {
+    let (dims, center, half) = ([128u32, 40, 128], [0.0f32, -1.0, 0.0], [8.0f32, 2.5, 8.0]);
+    let n = (dims[0] * dims[1] * dims[2]) as usize;
+    let mut distance = Vec::with_capacity(n);
+    for iz in 0..dims[2] {
+        for iy in 0..dims[1] {
+            for ix in 0..dims[0] {
+                let at = |i: u32, a: usize| center[a] - half[a] + (i as f32 + 0.5) / dims[a] as f32 * 2.0 * half[a];
+                let p = Vec3::new(at(ix, 0), at(iy, 1), at(iz, 2));
+                let q = (p - Vec3::new(0.0, 0.7, 0.0)).abs() - Vec3::new(3.0, 0.1, 3.0);
+                let plank = q.max(Vec3::ZERO).length() + q.max_element().min(0.0);
+                distance.push((p.y + 3.0).min(plank));
+            }
+        }
+    }
+    BakedSdf { dims, center, half_extent: half, distance, color: vec![[120, 110, 90, 0]; n] }
+}
+
 pub struct Beach {
     pub gpu: Gpu,
     pub raster: Raster,
@@ -339,6 +360,17 @@ impl Beach {
         (globals, eye, rm)
     }
 
+    /// The op through `call`, and the same with no early outs and no cache
+    /// (`FULL_MARCH`), as each pixel reads.
+    pub fn both(&mut self, globals: Globals, eye: DVec3, call: &str) -> (Vec<Option<f32>>, Vec<Option<f32>>) {
+        let fast = self.shader_with(call, Some(("sky_occlusion(", "sky_occlusion(")), "");
+        self.draw(globals, eye, fast);
+        let a = self.read();
+        let full = self.shader_with(call, Some(("sky_occlusion(", "sky_full(")), FULL_MARCH);
+        self.draw(globals, eye, full);
+        (a, self.read())
+    }
+
     /// Refresh the sky cache for a camera at `eye`, the lattice anchored
     /// at the world origin.
     pub fn refresh(&mut self, rm: RaymarchGlobals, eye: DVec3) {
@@ -351,6 +383,19 @@ impl Beach {
     pub fn settle(&mut self, rm: RaymarchGlobals, eye: DVec3) {
         for _ in 0..90 {
             self.refresh(rm, eye);
+        }
+        self.gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+    }
+
+    /// Refresh the sky cache at `eye` until every proxy that holds still
+    /// is baked in and every refill is done (or a thousand frames pass).
+    pub fn settle_all(&mut self, rm: RaymarchGlobals, eye: DVec3) {
+        for k in 0..1000 {
+            self.refresh(rm, eye);
+            let st = self.raymarch.sky_cache_stats(0).unwrap_or_default();
+            if k > 60 && st.boxes == 0 && st.moving == 0 {
+                break;
+            }
         }
         self.gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
     }
