@@ -101,10 +101,12 @@ The same list lives on the tab's **§ Docs** page.
   script name + line — double-click to jump to the source.
 - **Hot-reload:** just save. The script re-runs in a fresh environment, so avoid
   relying on state surviving a reload mid-Play.
-- **A loop without an exit stops the script, not the editor.** A pass into your
-  scripts may use **2 seconds** of its own CPU time (500 ms on a dedicated
-  server); past that the pass is abandoned with an error saying how long it
-  ran, in CPU and wall time, and the script runs again next frame. A script
+- **A loop without an exit stops the script, not the editor.** Each script's
+  hook may use **2 seconds** of CPU time in a pass (500 ms on a dedicated
+  server); past that its pass is abandoned with an error saying how long it
+  ran, in CPU and wall time, and the script runs again next frame. Each
+  script is timed on its own: the scripts that run after one that overran
+  start with the whole budget, and are not blamed for it. A script
   that overruns **3 passes in a row** is stopped, and is not called again
   until you edit its file, so one slow pass never loses a script for the rest
   of a game, and a loop that never ends costs three budgets, not forever. The clock is the script thread's CPU time, so a machine busy

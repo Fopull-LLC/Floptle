@@ -7614,6 +7614,9 @@ impl ScriptHost {
                     // but two per instance per pass is still not free.
                     let heap0 = self.alloc_track.get().then(|| self.lua.used_memory());
                     self.charge_memory_to(Some(&inst.kind));
+                    // This script's own clock: what the ones before it spent
+                    // is not its time — see `budget`.
+                    self.budget.restart();
                     let called = self.tick_instance(
                         *e, &inst.kind, &inst.params, &inst.refs, &inst.strs,
                         inst.pinned_bools.as_deref(), &mut tr, dt, time, pass,

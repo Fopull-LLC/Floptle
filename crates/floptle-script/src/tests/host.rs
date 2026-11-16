@@ -1535,6 +1535,140 @@ fn a_loaded_machine_does_not_stop_an_honest_script() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **Only the script that runs over its budget is stopped and blamed.** A
+/// looping script sits between four quick ones in the frame pass. The pass
+/// shared one clock, so once the loop had used it up, every script after it
+/// raised the budget's error at its first check and was struck towards being
+/// stopped for good. Now each script has the clock to itself: one error a
+/// frame, naming the loop, and every quick script runs, on that frame and
+/// the next.
+#[test]
+fn only_the_script_that_runs_over_is_stopped_and_blamed() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_bystanders_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(&dir, "spinner", "function update(node, dt) while true do end end\n");
+    write_script(
+        &dir,
+        "quick",
+        "passes = 0\nfunction update(node, dt)\n  local x = 0\n  for i = 1, 5000 do x = x + i % 7 end\n  \
+         passes = passes + 1\nend\n",
+    );
+    let mut world = World::default();
+    let mut quick = Vec::new();
+    for kind in ["quick", "spinner", "quick", "quick", "quick"] {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst::new(kind)]));
+        if kind == "quick" {
+            quick.push(e);
+        }
+    }
+    let mut host = ScriptHost::new();
+    host.set_script_budget(std::time::Duration::from_millis(100));
+    for frame in 1..=2i64 {
+        host.run(&mut world, &dir, 1.0 / 60.0, frame as f32 / 60.0);
+        let errors = host.errors().to_vec();
+        assert_eq!(errors.len(), 1, "frame {frame}: one script ran over, these were raised: {errors:#?}");
+        assert!(
+            errors[0].starts_with("spinner") && crate::budget::Budget::is_timeout(&errors[0]),
+            "frame {frame}: {}",
+            errors[0]
+        );
+        for e in &quick {
+            let passes: i64 = host.instance_env(e.index(), "quick").unwrap().get("passes").unwrap();
+            assert_eq!(passes, frame, "frame {frame}: a quick script beside the loop did not run");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A timer that runs over does not take the timers after it down with
+/// it.** Timers due on the same tick run one after another under one clock;
+/// once a looping one had used it up, the next raised the budget's error
+/// too. The clock starts again after an overrun.
+#[test]
+fn a_timer_that_runs_over_leaves_the_next_timer_its_budget() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_timer_overrun_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(&dir, "spinner", "function start(node) after(0, function() while true do end end) end\n");
+    write_script(
+        &dir,
+        "quick",
+        "hits = 0\nfunction start(node)\n  after(0, function()\n    local x = 0\n    \
+         for i = 1, 5000 do x = x + i % 7 end\n    hits = hits + 1\n  end)\nend\n",
+    );
+    let mut world = World::default();
+    let mut q = None;
+    for kind in ["spinner", "quick"] {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst::new(kind)]));
+        if kind == "quick" {
+            q = Some(e);
+        }
+    }
+    let mut host = ScriptHost::new();
+    host.set_script_budget(std::time::Duration::from_millis(100));
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let _ = host.drain_logs();
+    host.run_fixed(&mut world, 1.0 / 60.0, 1.0 / 60.0);
+    let errors: Vec<String> =
+        host.drain_logs().into_iter().filter(|l| l.level == LogLevel::Error).map(|l| l.msg).collect();
+    assert_eq!(errors.len(), 1, "one timer ran over, these were raised: {errors:#?}");
+    let hits: i64 = host.instance_env(q.unwrap().index(), "quick").unwrap().get("hits").unwrap();
+    assert_eq!(hits, 1, "the quick timer after the loop did not finish");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **Two scripts that each use most of the budget both keep running.**
+/// Each spends about 60% of the budget, in the same pass: on one clock for
+/// the pass the second ran over the moment the first had finished. Each
+/// script is timed by what it spent itself.
+#[test]
+#[cfg(any(unix, windows))]
+fn scripts_that_each_use_most_of_the_budget_both_keep_running() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_own_clock_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "worker",
+        "passes = 0\nfunction update(node, dt)\n  local x = 0\n  for i = 1, N do x = x + i % 7 end\n  \
+         passes = passes + 1\nend\n",
+    );
+    let mut world = World::default();
+    let mut workers = Vec::new();
+    for _ in 0..2 {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst::new("worker")]));
+        workers.push(e);
+    }
+    let budget = std::time::Duration::from_millis(200);
+    let mut host = ScriptHost::new();
+    host.set_script_budget(budget);
+    // Calibrate N to about 60% of the budget of this thread's CPU per script.
+    host.lua.globals().set("N", 100_000).unwrap();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    let c0 = crate::budget::thread_cpu().expect("this platform has a thread clock");
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    let per = (crate::budget::thread_cpu().unwrap() - c0).as_secs_f64().max(1e-4) / 2.0;
+    let n = (100_000.0 * budget.as_secs_f64() * 0.6 / per) as i64;
+    host.lua.globals().set("N", n).unwrap();
+    for f in 0..3 {
+        host.run(&mut world, &dir, 1.0 / 60.0, f as f32 / 60.0);
+        assert!(host.errors().is_empty(), "frame {f}: {:?}", host.errors());
+    }
+    for e in &workers {
+        let passes: i64 = host.instance_env(e.index(), "worker").unwrap().get("passes").unwrap();
+        assert_eq!(passes, 5, "a worker stopped running");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **A planet a script asks for without naming a generator is made by the
 /// project's.** The host's version reaches `generatePlanet` (which carries it
 /// to the engine), and `planetRivers` answers with the rivers of the world
