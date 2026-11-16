@@ -1846,21 +1846,32 @@ fn shadow_volumes_d(p: vec3<f32>) -> f32 {
     return d;
 }
 
-// The voxel size of the shadow-only volume containing `p` (0 when none) — the
-// shadow-ray lift must clear the occluder bake's own fattened sheet, or a mesh
-// standing in its bake would blanket self-shadow.
-fn shadow_vol_eps(p: vec3<f32>) -> f32 {
-    var h = 0.0;
+// What volume `i` asks of a shadow ray's lift off `p`: its voxel size when
+// `p` is in (or just outside) its brick, 0 when not. The field's own
+// granularity (`field_eps`) for the render and terrain volumes; unclamped
+// for a shadow-only occluder bake, since the lift must clear the bake's own
+// fattened sheet or a mesh standing in its bake would blanket self-shadow.
+fn vol_lift_voxel(i: u32, p: vec3<f32>) -> f32 {
+    let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
+    if (max(q.x, max(q.y, q.z)) >= 0.08) {
+        return 0.0;
+    }
+    let voxel = 2.0 * G.vol_half[i].xyz / max(G.vol_dims[i].xyz, vec3<f32>(1.0));
+    let v = max(voxel.x, max(voxel.y, voxel.z));
+    return select(clamp(v, 0.02, 1.0), v, vol_occluder(i));
+}
+
+// A shadow ray's base lift off `p`, from the voxel sizes of the volumes
+// around it (`vol_lift_voxel`). Every field shadow ray starts from this:
+// `light_vis`, `point_field_vis`, and `sky_occlusion` by way of `field_near`.
+fn shadow_lift_base(p: vec3<f32>) -> f32 {
+    var h = 0.012;
     let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (!vol_occluder(i)) { continue; }
-        let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
-        if (max(q.x, max(q.y, q.z)) < 0.08) {
-            let voxel = 2.0 * G.vol_half[i].xyz / max(G.vol_dims[i].xyz, vec3<f32>(1.0));
-            h = max(h, max(voxel.x, max(voxel.y, voxel.z)));
-        }
+        if (vol_absent(i)) { continue; }
+        h = max(h, vol_lift_voxel(i, p));
     }
-    return h;
+    return max(0.03, h * 1.6);
 }
 
 // Rotate `v` by the CONJUGATE (inverse, for unit quats) of quaternion `q` —
@@ -1949,6 +1960,167 @@ fn shadow_field_d(p: vec3<f32>, vmask: u32, blobs: bool) -> f32 {
     return min(field, sd);
 }
 
+// The pieces of the field one shadow ray (or a group of them) has to look
+// at: volumes and collider proxies by bit, blobs and Field Shapes as a whole,
+// and where along the ray the last of them ends.
+struct FieldSet {
+    vmask: u32,
+    pmask: u32,
+    blobs: bool,
+    shapes: bool,
+    t_end: f32,
+};
+
+// Every piece there is: what a ray sweeps when nothing has narrowed it yet.
+const FIELD_ALL = FieldSet(0xffffffffu, 0xffffffffu, true, true, 0.0);
+
+// ---- Relevance sweep: which of `within`'s pieces can this ray possibly
+// matter for? "Matter" is wider than "hit": the k*d/t penumbra estimator dims
+// for pieces the ray merely passes NEAR — within t/k at range t — so every
+// bound is expanded by (distance along the ray to the piece)/k, the
+// estimator's exact reach at that range. Without this, shadows clip to their
+// caster's raw bound (a box shadow rounds into its bounding-sphere's ellipse).
+fn field_sweep(ro: vec3<f32>, l: vec3<f32>, max_d: f32, k: f32, within: FieldSet) -> FieldSet {
+    let inv = safe_inv(l);
+    let pen_k = max(k, 1.0);
+    var vmask = 0u;
+    var pmask = 0u;
+    var blobs = false;
+    var t_end = 0.0;
+    let vols = min(u32(G.params.w), 32u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if ((within.vmask & (1u << i)) == 0u) { continue; }
+        if (vol_absent(i)) { continue; } // every present kind casts (1, 2 and 3 alike)
+        // Tight content box, not the brick: a sun ray from open ground exits the
+        // terrain at its true top, so t_end stops just past the hills instead of
+        // marching to the brick's roof.
+        let pen = max(dot(G.vol_tight_c[i].xyz - ro, l), 0.0) / pen_k;
+        let s = slab_span(ro, inv, G.vol_tight_c[i].xyz, G.vol_tight_h[i].xyz + vec3<f32>(vol_pad(i) + pen));
+        if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
+            vmask = vmask | (1u << i);
+            t_end = max(t_end, min(s.y, max_d));
+        }
+    }
+    let bc = select(0u, min(u32(G.params.y), 16u), within.blobs);
+    for (var i = 0u; i < bc; i = i + 1u) {
+        let pen = max(dot(G.blobs[i].xyz - ro, l), 0.0) / pen_k;
+        let s = sphere_span(ro, l, G.blobs[i].xyz, blob_bound(i) + pen);
+        if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
+            blobs = true;
+            t_end = max(t_end, min(s.y, max_d));
+        }
+    }
+    let pc = min(u32(G.prox_count.x), 32u);
+    for (var i = 0u; i < pc; i = i + 1u) {
+        if ((within.pmask & (1u << i)) == 0u) { continue; }
+        let bnd = prox_bound(i);
+        let pen = max(dot(bnd.xyz - ro, l), 0.0) / pen_k;
+        let s = sphere_span(ro, l, bnd.xyz, bnd.w + pen);
+        if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
+            pmask = pmask | (1u << i);
+            t_end = max(t_end, min(s.y, max_d));
+        }
+    }
+    // Field Shapes cast too: penumbra-expanded bounding spheres, exactly like
+    // blobs (the k·d/t estimator's reach — see the sweep comment above).
+    var shapes = false;
+    let sc = select(0u, min(u32(G.shape_meta.x), 4u), within.shapes);
+    for (var i = 0u; i < sc; i = i + 1u) {
+        let pen = max(dot(G.shape_pos[i].xyz - ro, l), 0.0) / pen_k;
+        let s = sphere_span(ro, l, G.shape_pos[i].xyz, G.shape_aux[i].x + pen);
+        if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
+            shapes = true;
+            t_end = max(t_end, min(s.y, max_d));
+        }
+    }
+    return FieldSet(vmask, pmask, blobs, shapes, t_end);
+}
+
+// The pieces whose bounds come within `r` of `p`, penumbra reach included:
+// one sweep standing in for several rays that all start near `p` and stay
+// within `r` of it. It keeps every piece any of those rays' own sweeps
+// (`field_sweep`) could keep — the penumbra pad is measured the same way, to
+// the piece's centre, from a start at most `lift` off `p` — so narrowing a
+// ray's sweep to this set changes nothing it finds. Everything it leaves out
+// is at least `r` from `p`.
+//
+// It also gives `shadow_lift_base(p)`, from the same pass over the volumes.
+struct FieldNear {
+    pieces: FieldSet,
+    base: f32,
+};
+
+fn field_near(p: vec3<f32>, r: f32, lift: f32, k: f32) -> FieldNear {
+    let pen_k = max(k, 1.0);
+    var vmask = 0u;
+    var pmask = 0u;
+    var blobs = false;
+    var h = 0.012;
+    let vols = min(u32(G.params.w), 32u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if (vol_absent(i)) { continue; }
+        h = max(h, vol_lift_voxel(i, p));
+        let c = G.vol_tight_c[i].xyz;
+        let pen = (length(c - p) + lift) / pen_k;
+        let q = max(abs(p - c) - G.vol_tight_h[i].xyz - vec3<f32>(vol_pad(i) + pen), vec3<f32>(0.0));
+        if (dot(q, q) < r * r) {
+            vmask = vmask | (1u << i);
+        }
+    }
+    // A sphere of radius `s` is kept when its centre is closer than
+    // s + (d + lift)/k + r, its pad growing with its own distance d: that is
+    // d < (s + lift/k + r) / (1 - 1/k), compared squared.
+    let grow = 1.0 / (1.0 - 1.0 / pen_k);
+    let reach = (lift / pen_k + r) * grow;
+    let bc = min(u32(G.params.y), 16u);
+    for (var i = 0u; i < bc; i = i + 1u) {
+        let c = G.blobs[i].xyz - p;
+        let keep = blob_bound(i) * grow + reach;
+        if (dot(c, c) < keep * keep) {
+            blobs = true;
+        }
+    }
+    let pc = min(u32(G.prox_count.x), 32u);
+    for (var i = 0u; i < pc; i = i + 1u) {
+        let bnd = prox_bound(i);
+        let c = bnd.xyz - p;
+        let keep = bnd.w * grow + reach;
+        if (dot(c, c) < keep * keep) {
+            pmask = pmask | (1u << i);
+        }
+    }
+    var shapes = false;
+    let sc = min(u32(G.shape_meta.x), 4u);
+    for (var i = 0u; i < sc; i = i + 1u) {
+        let c = G.shape_pos[i].xyz - p;
+        let keep = G.shape_aux[i].x * grow + reach;
+        if (dot(c, c) < keep * keep) {
+            shapes = true;
+        }
+    }
+    return FieldNear(FieldSet(vmask, pmask, blobs, shapes, 0.0), max(0.03, h * 1.6));
+}
+
+// The shadow march's own field at `p` over `pieces`: the fused
+// field, Field Shapes and collider proxies, minus the proxies in `skip`.
+fn field_set_d(p: vec3<f32>, pieces: FieldSet, skip: u32) -> f32 {
+    var d = shadow_field_d(p, pieces.vmask, pieces.blobs);
+    if (pieces.shapes) {
+        d = min(d, custom_d(p));
+    }
+    // Only the proxies this ray passes near, found by their set bits: a
+    // loop over all 32 slots testing each bit cost a lit floor beside a
+    // building several times what the same floor cost in the open, even
+    // when the ray was near three boxes.
+    var m = pieces.pmask & ~skip;
+    while (m != 0u) {
+        let i = firstTrailingBit(m);
+        m = m & (m - 1u);
+        d = min(d, prox_d(i, p));
+    }
+    return d;
+}
+
 // Visibility of the sun from surface point `p` with normal `n`: 1 = fully lit,
 // 0 = fully shadowed, in between = analytic penumbra. Marches the fused field
 // PLUS the proxy occluders toward the light, tracking iq's `min(k·d/t)` — the
@@ -1970,77 +2142,32 @@ fn shadow_field_d(p: vec3<f32>, vmask: u32, blobs: bool) -> f32 {
 // is the half a screen-space trace structurally cannot do: **an occluder the
 // camera cannot see**. A wall behind you is not in the depth buffer and is very
 // much in the field.
+//
+// The sweep and the march are separate functions so `sky_occlusion` can
+// narrow its four rays' sweeps to one shared set first; the march is the
+// same code either way.
 fn field_vis(ro: vec3<f32>, l: vec3<f32>, max_d: f32, k: f32, pen_t0: f32, lift: f32, steps: i32) -> f32 {
-    // ---- Relevance sweep: which pieces can this ray possibly matter for?
-    // "Matter" is wider than "hit": the k*d/t penumbra estimator dims for pieces
-    // the ray merely passes NEAR — within t/k at range t — so every bound is
-    // expanded by (distance along the ray to the piece)/k, the estimator's exact
-    // reach at that range. Without this, shadows clip to their caster's raw
-    // bound (a box shadow rounds into its bounding-sphere's ellipse).
-    let inv = safe_inv(l);
-    let pen_k = max(k, 1.0);
-    var vmask = 0u;
-    var pmask = 0u;
-    var blobs = false;
-    var t_end = 0.0;
-    let vols = min(u32(G.params.w), 32u);
-    for (var i = 0u; i < vols; i = i + 1u) {
-        if (vol_absent(i)) { continue; } // every present kind casts (1, 2 and 3 alike)
-        // Tight content box, not the brick: a sun ray from open ground exits the
-        // terrain at its true top, so t_end stops just past the hills instead of
-        // marching to the brick's roof.
-        let pen = max(dot(G.vol_tight_c[i].xyz - ro, l), 0.0) / pen_k;
-        let s = slab_span(ro, inv, G.vol_tight_c[i].xyz, G.vol_tight_h[i].xyz + vec3<f32>(vol_pad(i) + pen));
-        if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
-            vmask = vmask | (1u << i);
-            t_end = max(t_end, min(s.y, max_d));
-        }
-    }
-    let bc = min(u32(G.params.y), 16u);
-    for (var i = 0u; i < bc; i = i + 1u) {
-        let pen = max(dot(G.blobs[i].xyz - ro, l), 0.0) / pen_k;
-        let s = sphere_span(ro, l, G.blobs[i].xyz, blob_bound(i) + pen);
-        if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
-            blobs = true;
-            t_end = max(t_end, min(s.y, max_d));
-        }
-    }
-    let pc = min(u32(G.prox_count.x), 32u);
-    for (var i = 0u; i < pc; i = i + 1u) {
-        let bnd = prox_bound(i);
-        let pen = max(dot(bnd.xyz - ro, l), 0.0) / pen_k;
-        let s = sphere_span(ro, l, bnd.xyz, bnd.w + pen);
-        if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
-            pmask = pmask | (1u << i);
-            t_end = max(t_end, min(s.y, max_d));
-        }
-    }
-    // Field Shapes cast too: penumbra-expanded bounding spheres, exactly like
-    // blobs (the k·d/t estimator's reach — see the sweep comment above).
-    var shapes = false;
-    let sc = min(u32(G.shape_meta.x), 4u);
-    for (var i = 0u; i < sc; i = i + 1u) {
-        let pen = max(dot(G.shape_pos[i].xyz - ro, l), 0.0) / pen_k;
-        let s = sphere_span(ro, l, G.shape_pos[i].xyz, G.shape_aux[i].x + pen);
-        if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
-            shapes = true;
-            t_end = max(t_end, min(s.y, max_d));
-        }
-    }
-    if (vmask == 0u && pmask == 0u && !blobs && !shapes) {
+    return field_march(ro, l, k, pen_t0, lift, lift, steps, field_sweep(ro, l, max_d, k, FIELD_ALL));
+}
+
+// The march half of `field_vis`, over the pieces a sweep found, from `t0`
+// along the ray: `lift`, unless the caller already knows the stretch before
+// it holds nothing that could hit or dim the ray.
+fn field_march(ro: vec3<f32>, l: vec3<f32>, k: f32, pen_t0: f32, lift: f32, t0: f32, steps: i32, pieces: FieldSet) -> f32 {
+    if (pieces.vmask == 0u && pieces.pmask == 0u && !pieces.blobs && !pieces.shapes) {
         return 1.0; // nothing anywhere along this ray — fully lit, no march
     }
+    let t_end = pieces.t_end;
     // A proxy containing the start point is the caster this fragment belongs to
     // (a character standing inside its own capsule) — skip it so meshes don't
     // blanket-shadow themselves; it still casts on everything else.
     var skip = 0u;
-    var near = pmask;
+    var near = pieces.pmask;
     while (near != 0u) {
         let i = firstTrailingBit(near);
         near = near & (near - 1u);
         if (prox_d(i, ro) < lift) { skip = skip | (1u << i); }
     }
-    let march = pmask & ~skip;
     // Everything the sweep found was this fragment's OWN proxy, and the field
     // holds nothing else — so there is genuinely nothing to march and the ray
     // is lit. Without this the march below runs with no occluder in it, the
@@ -2049,10 +2176,10 @@ fn field_vis(ro: vec3<f32>, l: vec3<f32>, max_d: f32, k: f32, pen_t0: f32, lift:
     // terrain, no blobs and no baked volumes — a plane and a character, which
     // is what an ordinary game scene is and what every probe here had a hill in
     // front of.
-    if (vmask == 0u && !blobs && !shapes && march == 0u) {
+    if (pieces.vmask == 0u && !pieces.blobs && !pieces.shapes && (pieces.pmask & ~skip) == 0u) {
         return 1.0;
     }
-    var t = lift;
+    var t = t0;
     var vis = 1.0;
     // Why the march ended, because the two endings mean opposite things and the
     // rule at the bottom cannot tell them apart from `t` alone.
@@ -2065,21 +2192,7 @@ fn field_vis(ro: vec3<f32>, l: vec3<f32>, max_d: f32, k: f32, pen_t0: f32, lift:
     // cleared the start surface's own noise floor (keyed to the UNSCALED lift so
     // ordinary ground keeps tight contact shadows).
     for (var s = 0; s < steps; s = s + 1) {
-        let q = ro + l * t;
-        var d = shadow_field_d(q, vmask, blobs);
-        if (shapes) {
-            d = min(d, custom_d(q));
-        }
-        // Only the proxies this ray passes near, found by their set bits: a
-        // loop over all 32 slots testing each bit cost a lit floor beside a
-        // building several times what the same floor cost in the open, even
-        // when the ray was near three boxes.
-        var m = march;
-        while (m != 0u) {
-            let i = firstTrailingBit(m);
-            m = m & (m - 1u);
-            d = min(d, prox_d(i, q));
-        }
+        let d = field_set_d(ro + l * t, pieces, skip);
         if (d < 0.001) { return 0.0; }   // hard hit — fully occluded
         if (d > 1e8) { escaped = true; break; } // nothing along this ray — fully lit
         if (t > pen_t0) {
@@ -2117,7 +2230,7 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     // boost the lift there, but leave ordinary sun angles alone so contact
     // shadows stay tight. (Computed before the relevance sweep: the sweep must
     // test the ACTUAL march ray, which starts at `ro`, not at the surface.)
-    let base = max(0.03, max(field_eps(p), shadow_vol_eps(p)) * 1.6);
+    let base = shadow_lift_base(p);
     // Absolute cap: the voxel-scaled grazing boost reached 6+ units on coarse
     // planet proxies — far enough to START the ray past a cave roof or a whole
     // terrain feature, which lit sealed caves from the inside (2026-07-20).
@@ -2151,7 +2264,7 @@ fn point_field_vis(p: vec3<f32>, n: vec3<f32>, i: u32) -> f32 {
         return 1.0;
     }
     let l = to / dist;
-    let base = max(0.03, max(field_eps(p), shadow_vol_eps(p)) * 1.6);
+    let base = shadow_lift_base(p);
     let lift = min(base * clamp(0.5 / max(dot(n, l), 0.125), 1.0, 4.0), 3.0);
     // The emitter's radius over the distance to it IS its apparent half-size,
     // and `k` is that reciprocal. A point emitter (radius 0) lands on the clamp
@@ -2317,6 +2430,27 @@ fn scene_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
     return 1.0;
 }
 
+// Direction `i` of `sky_occlusion`'s four, around `n` (with `t` and `b` the
+// other two axes): equal-area rings of the projected disc, so the cosine
+// weighting is in where the rays point and each counts the same.
+fn sky_ray_dir(i: u32, t: vec3<f32>, b: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let u = (f32(i) + 0.5) / 4.0;
+    let sin_t = sqrt(u);
+    let phi = f32(i) * 2.39996323; // the golden angle
+    return t * (sin_t * cos(phi)) + b * (sin_t * sin(phi)) + n * sqrt(1.0 - u);
+}
+
+// The furthest any of `sky_occlusion`'s rays lifts off its point.
+const SKY_LIFT_CAP: f32 = 3.0;
+
+// `light_vis`'s lift for direction `i`: off the start surface's own noise,
+// more for a grazing ray, never past a cave roof. The last ray grazes most,
+// so it lifts furthest.
+fn sky_ray_lift(i: u32, base: f32) -> f32 {
+    let cos_t = sqrt(1.0 - (f32(i) + 0.5) / 4.0);
+    return min(base * clamp(0.5 / max(cos_t, 0.125), 1.0, 4.0), SKY_LIFT_CAP);
+}
+
 // The share of a small cone of sky rays from camera-relative `p` that get
 // away, 0..1, for a surface facing `n`: four directions, cosine-weighted
 // around `n`, each marched up to `reach` against exactly what a sun-shadow
@@ -2326,36 +2460,70 @@ fn scene_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
 //
 // It needs no switch to be on, which is the point: a streamed terrain with
 // screen-space AO and no probe volume still shadows its caves from the sun,
-// and this asks the same question of the sky. It is four shadow rays, so it
-// costs several times a sun shadow; `sky_visibility` only reaches for it
-// where the engine has no occlusion of its own to give.
+// and this asks the same question of the sky. Where something is within
+// reach it is four shadow rays, several times a sun shadow; where nothing is
+// (open water, open ground) it settles that with one sweep and one field
+// read and marches nothing. `sky_visibility` only reaches for it where the
+// engine has no occlusion of its own to give.
 //
 // The directions are fixed, not jittered: a pool reads the same every frame
 // and no temporal filter is needed. The penumbra estimator is kept hard
 // (k = 8), so a ray skimming flat open ground at the cone's widest angle
 // still counts as open.
 fn sky_occlusion(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
-    let base = max(0.03, max(field_eps(p), shadow_vol_eps(p)) * 1.6);
+    const K: f32 = 8.0;
+    let far = max(reach, 0.01);
+    // How far from `p` anything can matter to a ray. It starts `lift` off
+    // `p` and samples the field no further along than `far` (or its first
+    // step at `lift`, if that is further), and the penumbra estimator dims
+    // for what passes within t/K of it at range t. So matter further than
+    // lift + max(lift, far)·(1 + 1/K) from `p` cannot darken it.
+    //
+    // One sweep for the four rays, at the largest lift there can be (the
+    // lifts come from the same pass): only the pieces whose bounds come that
+    // close. Nothing does (open ground far from every piece): open.
+    let near = field_near(p, SKY_LIFT_CAP + max(SKY_LIFT_CAP, far) * (1.0 + 1.0 / K), SKY_LIFT_CAP, K);
+    let pieces = near.pieces;
+    if (pieces.vmask == 0u && pieces.pmask == 0u && !pieces.blobs && !pieces.shapes) {
+        return 1.0;
+    }
+    let base = near.base;
+    let lift_max = sky_ray_lift(3u, base);
+    let r = lift_max + max(lift_max, far) * (1.0 + 1.0 / K);
+    // One read of the same field at `p` itself. The stored field never reads
+    // further than the true surface (a generated one reads nearer), so if it
+    // says the nearest matter is further than any ray can feel, nothing is in
+    // reach: open sea over a deep bed inside the terrain's bound, which the
+    // sweep alone cannot tell from a cave pool. This is the common case for
+    // a short reach, and it costs one sample instead of four marches.
+    let d0 = field_set_d(p, pieces, 0u);
+    if (d0 > r) {
+        return 1.0;
+    }
     let side = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(n.x) > 0.9);
     let t = normalize(cross(side, n));
     let b = cross(n, t);
-    let far = max(reach, 0.01);
     var vis = 0.0;
     for (var i = 0u; i < 4u; i = i + 1u) {
-        // Equal-area rings of the projected disc: the cosine weighting is in
-        // where the rays point, so each counts the same.
-        let u = (f32(i) + 0.5) / 4.0;
-        let sin_t = sqrt(u);
-        let cos_t = sqrt(1.0 - u);
-        let phi = f32(i) * 2.39996323; // the golden angle
-        let dir = t * (sin_t * cos(phi)) + b * (sin_t * sin(phi)) + n * cos_t;
-        // `light_vis`'s lift: off the start surface's own noise, more for a
-        // grazing ray, never past a cave roof. Twenty-four steps: the widest
-        // ray over flat open ground grows its step by about a third each time
-        // and needs about twenty to leave a 32-unit reach, and a ray that runs
-        // out of steps counts as blocked.
-        let lift = min(base * clamp(0.5 / max(cos_t, 0.125), 1.0, 4.0), 3.0);
-        vis = vis + field_vis(p + n * lift, dir, far, 8.0, base * 3.0, lift, 24);
+        let dir = sky_ray_dir(i, t, b, n);
+        let lift = sky_ray_lift(i, base);
+        let ro = p + n * lift;
+        // Each ray's own sweep, over the shared set only: the same pieces and
+        // the same end it would have found over everything.
+        let mine = field_sweep(ro, dir, far, K, pieces);
+        // The same read says how far along this ray is certainly clear: a
+        // sample at range t is at most lift + t from `p`, so while
+        // d0 - lift - t stays over t/K it can neither hit nor dim. The march
+        // starts there, and a ray clear past its end needs no march at all.
+        let clear = max(lift, (d0 - lift) / (1.0 + 1.0 / K));
+        if (clear > max(lift, mine.t_end)) {
+            vis = vis + 1.0;
+            continue;
+        }
+        // Twenty-four steps: the widest ray over flat open ground grows its
+        // step by about a third each time and needs about twenty to leave a
+        // 32-unit reach, and a ray that runs out of steps counts as blocked.
+        vis = vis + field_march(ro, dir, K, base * 3.0, lift, clear, 24, mine);
     }
     return vis / 4.0;
 }

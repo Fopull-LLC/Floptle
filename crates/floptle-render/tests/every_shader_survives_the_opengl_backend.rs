@@ -62,7 +62,20 @@ fn modules() -> Vec<(&'static str, String)> {
         // swell: the vertex and the pixel stage both loop over the waves in
         // the material's own parameter block.
         ("raster.wgsl + field.wgsl + a water shader reading the swell", swell_material_module()),
+        // A surface shader that asks the field how open the sky is: the cone
+        // of sky rays, with its shared sweep and early outs, and the share
+        // that falls back to it.
+        ("raster.wgsl + field.wgsl + a pool darkened under cover", covered_pool_module()),
     ]
+}
+
+fn covered_pool_module() -> String {
+    let compiled = floptle_shader::compile_fragment(
+        "shader pool {\n  stage fragment\n  let open = skyOcclusion(worldPos, vec3(0, 1, 0), 0.05) * skyVisibility(worldPos, normal)\n  \
+         output color = vec4(skyRadiance(reflect(-viewDir, normal)) * open, 1)\n}\n",
+    )
+    .expect("a covered pool shader compiles");
+    format!("{}\n{}\n{}", floptle_render::raster::pass_prelude(), floptle_shader::stdlib::SUPPORT_WGSL, compiled.chunk)
 }
 
 fn swell_material_module() -> String {

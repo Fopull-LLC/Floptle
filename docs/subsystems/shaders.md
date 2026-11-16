@@ -389,7 +389,10 @@ engine's own lighting it is missing, in the same units as `skyRadiance` and
   sun shadow marches (terrain, blobs, Field Shapes, baked mesh occluders and
   collider proxies). Cover past `reach` does not count. It needs no setting
   and no bake, so a cave in a streamed terrain lit with screen-space AO reads
-  dark, but it is four shadow rays a pixel.
+  dark. Where anything is within reach it is four shadow rays a pixel; where
+  nothing is (open water over a deep bed, open ground), one sweep of the
+  field's pieces and one read of the field at the point settle it and
+  nothing is marched.
 - `localLight(worldPos, n)` is the placed lights alone (point, spot and area
   lamps, with their shadows and the same ambient occlusion the lit path puts
   on them) on a matte surface: no sun, no sky. `albedo * localLight(worldPos,
@@ -434,6 +437,18 @@ back in a scene with neither, or `skyOcclusion` itself, about 2.3 ms. A pool
 covers far less of a real frame than that, and the cone's cost grows with
 what its rays pass near (a terrain volume costs more per step than the
 probe's blobs and one box).
+
+Where nothing is within reach the cone is nearly free. The guard in
+`crates/floptle-render/tests/sky_occlusion_costs_little_in_the_open.rs` draws
+a 1280x720 frame of open sea inside a terrain volume, with a row of collider
+boxes far off, and holds `skyOcclusion(worldPos, up, 0.05)` to within 0.1 ms
+of the same shader without it (on an RTX 4060, about 0.02 ms with one
+terrain volume alone and 0.08 ms with eight boxes, where it was 0.4 and
+0.9 ms). What is left grows with how many field volumes and collider
+proxies the scene has, since every pixel still checks each one's bound
+once: with all 32 of each in use it is still 0.7 to 1 ms, about a fifth
+of what it was.
+At a reach that gets to the bed the rays march, as under cover.
 
 ### 4.5 Moving the surface: `output offset`
 
