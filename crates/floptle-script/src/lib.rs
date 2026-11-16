@@ -551,14 +551,6 @@ struct Instance {
     /// and one per instance put a hard ceiling of a few thousand scripted nodes
     /// on a scene — reached as a panic.
     node: Option<(RegistryKey, crate::env::NodeStamp)>,
-    /// The same table, held weakly, once no hook will ever be handed it
-    /// again — a script whose only hook is `start`, after `start` ran. Kept
-    /// (`me = node`), it is still alive and still drained and stamped every
-    /// pass; not kept, the collector takes it, and from then on there is
-    /// nothing anyone could see to keep current. Holding it strongly made
-    /// every `start`-only instance pay a node stamp per pass forever. The
-    /// key into [`ScriptHost::weak_nodes`].
-    node_weak: Option<(i32, crate::env::NodeStamp)>,
     /// Which lifecycle hooks this script's environment defines, read once when
     /// the chunk is built (and again on hot reload — a rebuild is a new
     /// `Instance`). A pass the script has no hook for skips everything but the
@@ -759,10 +751,6 @@ pub struct ScriptHost {
     /// [`env::stamp_unchanged_lua`], compiled once: whether a kept `node`
     /// table can skip its drain and re-stamp — see [`env::stamp_unchanged`].
     stamp_unchanged: mlua::Function,
-    /// Weak-valued: the `node` tables no hook will be handed again — see
-    /// [`Instance::node_weak`] — by a key from `weak_next`.
-    weak_nodes: mlua::Table,
-    weak_next: std::cell::Cell<i32>,
     /// Extra folders a script name may resolve in, after the project's own
     /// `scripts/`: the script folders of the project's installed **packages**,
     /// in load order. Set by the editor when packages load.
@@ -776,6 +764,11 @@ pub struct ScriptHost {
     kind_ids: rustc_hash::FxHashMap<String, KindId>,
     /// The names behind [`KindId`]s, indexed by id.
     kind_names: Vec<String>,
+    /// Some loaded script reaches environments by function (`getfenv`,
+    /// `setfenv`), so it could replace any script's `node` or `params`, not
+    /// only its own: from then on the seed puts both back for every instance
+    /// every frame, as it used to (see [`Instance::rebinds_globals`]).
+    any_fenv: bool,
     errors: Vec<String>,
     /// Captured `print`/`log` output (and errors) since the last drain — the editor
     /// Console reads these. Shared with the Lua `print`/`log` closures.

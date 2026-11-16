@@ -3570,15 +3570,9 @@ impl ScriptHost {
             .set_name("=stamp_unchanged")
             .eval::<mlua::Function>()
             .expect("the stamp check compiles");
-        let weak_nodes = lua.create_table().expect("a table");
-        let weak_mt = lua.create_table().expect("a table");
-        let _ = weak_mt.raw_set("__mode", "v");
-        weak_nodes.set_metatable(Some(weak_mt));
         Self {
             lua,
             stamp_unchanged,
-            weak_nodes,
-            weak_next: Cell::new(0),
             extra_script_dirs: Vec::new(),
             sources: HashMap::new(),
             alloc_by_kind: RefCell::new(HashMap::new()),
@@ -3589,6 +3583,7 @@ impl ScriptHost {
             instances: Default::default(),
             kind_ids: Default::default(),
             kind_names: Vec::new(),
+            any_fenv: false,
             errors: Vec::new(),
             logs,
             input,
@@ -9067,7 +9062,7 @@ impl ScriptHost {
         let kid = self.intern_kind(name);
         let Some(generation) = self.kind_generation(kid, name, scripts_dir) else { return false };
         let Some(inst) = self.instances.get_mut(&(e.index(), kid)) else { return false };
-        if inst.generation != generation || inst.entity != e || !inst.seeded || inst.rebinds_globals {
+        if inst.generation != generation || inst.entity != e || !inst.seeded || inst.rebinds_globals || self.any_fenv {
             return false;
         }
         inst.seen = true;
@@ -9137,6 +9132,9 @@ impl ScriptHost {
                     let writes_params = source_writes_params(&src);
                     let rebinds_globals =
                         source_may_assign_global(&src, "node") || source_may_assign_global(&src, "params");
+                    if src.contains("getfenv") || src.contains("setfenv") {
+                        self.any_fenv = true;
+                    }
                     // A fresh instance has told nobody anything yet, even
                     // under an entity index a destroyed node used to hold.
                     self.destroy_told.remove(&key);
@@ -9151,7 +9149,6 @@ impl ScriptHost {
                                     started: false,
                                     seen: true,
                                     node: None,
-                                    node_weak: None,
                                     hooks,
                                     writes_params,
                                     seed_fp: 0,
@@ -9179,8 +9176,9 @@ impl ScriptHost {
         let Some(inst) = self.instances.get_mut(&id) else { return false };
         inst.seen = true;
         // Published, with its `node` handle, when it was built: both are
-        // still there unless the script itself may have replaced its `node`.
-        if !needs_build && !inst.rebinds_globals {
+        // still there unless something may have replaced its `node`: the
+        // script itself, or one that reaches environments by function.
+        if !needs_build && !inst.rebinds_globals && !self.any_fenv {
             return true;
         }
         let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return false };
@@ -9492,9 +9490,7 @@ impl ScriptHost {
         };
         if wants {
             Hookless::No
-        } else if (inst.node.is_none() && inst.node_weak.is_none())
-            || (!self.stopped.is_empty() && self.stopped.contains(name))
-        {
+        } else if inst.node.is_none() || (!self.stopped.is_empty() && self.stopped.contains(name)) {
             Hookless::Nothing
         } else {
             Hookless::Refresh((eid, kid))
@@ -9506,65 +9502,17 @@ impl ScriptHost {
     /// hook has been handed yet.
     fn refresh_hookless(&mut self, key: (u32, KindId), name: &str, tr: &mut Transform) {
         let Some(inst) = self.instances.get_mut(&key) else { return };
-        let weak = inst.node_weak;
-        let mut slot = match (inst.node.take(), weak) {
-            (Some(slot), _) => Some(slot),
-            (None, None) => return,
-            // Held weakly: refreshed through a key made for the moment, if
-            // the collector has not taken it — and if it has, nobody holds
-            // it, and there is nothing left to do for it ever.
-            (None, Some((i, stamp))) => match self.weak_nodes.raw_get::<Option<Table>>(i) {
-                Ok(Some(t)) => match self.lua.create_registry_value(&t) {
-                    Ok(k) => Some((k, stamp)),
-                    Err(_) => return,
-                },
-                _ => {
-                    inst.node_weak = None;
-                    return;
-                }
-            },
-        };
-        let id0 = slot.as_ref().map(|(k, _)| k.id());
+        if inst.node.is_none() {
+            return;
+        }
+        let mut slot = inst.node.take();
         let body = self.bodies.borrow().get(&key.0).copied();
         let r = self.refresh_node(key.0, tr, body, &mut slot);
         if let Some(inst) = self.instances.get_mut(&key) {
-            match (weak, slot) {
-                (None, slot) => inst.node = slot,
-                // Still the table it held weakly: keep holding it weakly. A
-                // fresh one (`__id` overwritten) is a table no script has.
-                (Some((i, _)), Some((k, stamp))) if Some(k.id()) == id0 => {
-                    inst.node_weak = Some((i, stamp));
-                    let _ = self.lua.remove_registry_value(k);
-                }
-                (Some((i, _)), _) => {
-                    inst.node_weak = None;
-                    let _ = self.weak_nodes.raw_set(i, Value::Nil);
-                }
-            }
+            inst.node = slot;
         }
         if let Err(err) = r {
             self.fail(name, format!("{name}: {err}"));
-        }
-    }
-
-    /// Hold this instance's `node` table weakly from now on, if no hook will
-    /// ever be handed it again — see [`Instance::node_weak`].
-    fn hold_node_weakly_if_done(&mut self, key: (u32, KindId)) {
-        let Some(inst) = self.instances.get_mut(&key) else { return };
-        let h = inst.hooks;
-        if !inst.started || h.update || h.fixed || h.late || inst.node.is_none() {
-            return;
-        }
-        let Some((k, stamp)) = inst.node.take() else { return };
-        let i = self.weak_next.get();
-        self.weak_next.set(i.wrapping_add(1));
-        if let Ok(t) = self.lua.registry_value::<Table>(&k)
-            && self.weak_nodes.raw_set(i, t).is_ok()
-        {
-            inst.node_weak = Some((i, stamp));
-            let _ = self.lua.remove_registry_value(k);
-        } else {
-            inst.node = Some((k, stamp));
         }
     }
 
@@ -9724,10 +9672,6 @@ impl ScriptHost {
                 inst.seed_fp = fp;
                 inst.params_dirty = false;
             }
-        }
-        // A `start`-only script's table is handed out once, here.
-        if first {
-            self.hold_node_weakly_if_done(key);
         }
         match result {
             // Only a hook that ran can have written into `params`, and only a
