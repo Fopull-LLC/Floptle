@@ -468,11 +468,10 @@ fn a_hookless_pass_still_drains_a_timer_write_to_the_node() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **A `start`-only script's kept `node` table outlives the collector, and
-/// stays exact.** No hook will be handed the table again after `start`, so
-/// the engine holds it only weakly from then on and stops stamping it once
-/// nobody else holds it. A script that kept it (`me = node`) holds it, so a
-/// full collection must leave it alive and live: a timer's write through it
+/// **A `start`-only script's kept `node` table stays live and exact, through
+/// a collection too.** No hook will be handed the table again after `start`,
+/// but a script that kept it (`me = node`) still reads and writes it, so it
+/// is drained and stamped every pass: a timer's write through it
 /// still lands, it reads the node where something else moved it, and a body
 /// field set raw on a node with no body is cleared by the next stamp, as
 /// every stamp always cleared it — even with the node at rest, where the
@@ -530,6 +529,50 @@ fn a_kept_node_table_survives_the_collector_and_stays_live() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **A write from a one-shot callback lands even if the collector runs
+/// first.** A `start`-only script hands its `node` table to an `after`
+/// closure and to a tween; each writes through it once at the end and lets
+/// go. The write reaches the world at the next pass's drain, so the engine
+/// must hold the table until then. Held only weakly (as it briefly was), a collection between the
+/// callback and the drain (here forced by an earlier node's `fixedUpdate`)
+/// took the table and the write with it: the door `after` should open stayed
+/// shut and the tween stopped short of its end.
+#[test]
+fn a_one_shot_callback_write_survives_a_collection_before_the_drain() {
+    let dir = std::env::temp_dir().join(format!("floptle_oneshot_gc_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(&dir, "collector", "function fixedUpdate(node, dt) collectgarbage('collect') end\n");
+    write_script(&dir, "door", "function start(node) after(0.01, function() node.x = 5 end) end\n");
+    write_script(&dir, "slide", "function start(node) tween(0.02, function(a) node.x = 10 * a end, 'smooth') end\n");
+    let mut world = World::default();
+    let mut spawn = |kind: &str| {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: kind.into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
+        );
+        e
+    };
+    // The collector first in the scene, so its collection falls between
+    // the scheduler's callbacks and the others' drains.
+    spawn("collector");
+    let door = spawn("door");
+    let slide = spawn("slide");
+    let mut host = ScriptHost::new();
+    for f in 0..4 {
+        let t = f as f32 / 60.0;
+        host.run(&mut world, &dir, 1.0 / 60.0, t);
+        host.run_fixed(&mut world, 1.0 / 60.0, t);
+        host.run_late(&mut world, 1.0 / 60.0, t);
+    }
+    host.run(&mut world, &dir, 1.0 / 60.0, 4.0 / 60.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(world.get::<Transform>(door).unwrap().translation.x, 5.0, "the `after` closure's write was lost");
+    assert_eq!(world.get::<Transform>(slide).unwrap().translation.x, 10.0, "the tween's last step was lost");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **A frozen `node` table is reported, not fatal.** The check that lets a
 /// table at rest skip its stamp sets the table's metatable aside for a moment,
 /// which a frozen table refuses; it must take the full road instead, which
@@ -574,6 +617,7 @@ fn a_script_that_overwrites_node_or_params_has_them_reset_each_frame() {
     );
     // Never assigns either itself: another script does, through its handle.
     write_script(&dir, "quiet", "function hasNode() return type(node) == 'table' end\n");
+    write_script(&dir, "hushed", "function hasNode() return type(node) == 'table' end\n");
     write_script(
         &dir,
         "caller",
@@ -582,6 +626,9 @@ fn a_script_that_overwrites_node_or_params_has_them_reset_each_frame() {
            local q = find('Quiet'):getscript('quiet')\n\
            if q.hasNode() then n.z = n.z + 1 end\n\
            q.node = nil\n\
+           local h = find('Hushed'):getscript('hushed')\n\
+           if h.hasNode() then n.x = n.x + 1 end\n\
+           getfenv(h.hasNode).node = nil\n\
          end\n",
     );
     let (mut world, e) = world_with_script("rebinder");
@@ -591,6 +638,13 @@ fn a_script_that_overwrites_node_or_params_has_them_reset_each_frame() {
     world.insert(
         lib,
         Scripts(vec![floptle_core::ScriptInst { kind: "lib".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
+    );
+    let hushed = world.spawn();
+    world.insert(hushed, Transform::IDENTITY);
+    world.insert(hushed, floptle_core::Name("Hushed".into()));
+    world.insert(
+        hushed,
+        Scripts(vec![floptle_core::ScriptInst { kind: "hushed".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let quiet = world.spawn();
     world.insert(quiet, Transform::IDENTITY);
@@ -616,6 +670,11 @@ fn a_script_that_overwrites_node_or_params_has_them_reset_each_frame() {
         world.get::<Transform>(caller).unwrap().translation.z,
         3.0,
         "`node` set from another script's handle was not put back each frame"
+    );
+    assert_eq!(
+        world.get::<Transform>(caller).unwrap().translation.x,
+        3.0,
+        "`node` set through another script's function environment was not put back each frame"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
