@@ -1458,6 +1458,9 @@ pub struct Raster {
     /// The shared vertex and index buffers coloured dynamic slots take their
     /// ranges from ([`geom_arena`]), so a run of terrain chunks binds them once.
     arena: GeomArena,
+    /// Bytes [`Raster::maintain_geometry`] moves a call, at most
+    /// ([`ARENA_MOVE_BUDGET`] unless a test sets less).
+    move_budget: u64,
     /// Put new coloured dynamic slots in the arena (the default). Off gives
     /// each its own buffers, as before: a debug switch for tests that compare
     /// the two.
@@ -2588,6 +2591,7 @@ impl Raster {
             instances_gen: 1,
             arena: GeomArena::new(gpu),
             use_arena: true,
+            move_budget: ARENA_MOVE_BUDGET,
             empty_geom: None,
             meshes: Vec::new(),
             sun_map_casts: (0, 0),
@@ -4755,39 +4759,70 @@ impl Raster {
     /// taken before any copy is recorded, so a page that grows to take them
     /// is copied before the slots' vertices land in it.
     pub fn maintain_geometry(&mut self, gpu: &Gpu) -> u64 {
+        // A page with no slot in it goes first: one left empty would read
+        // as the emptiest page of all and be chosen every frame, with
+        // nothing in it to move, and nothing else would ever be compacted.
+        self.arena.drop_empty();
         let Some(victim) = self.arena.victim() else { return 0 };
         let vb = geom_arena::VERTEX_BYTES;
-        self.arena.make_room_for(gpu, victim);
-        // Largest first: power-of-two blocks taken largest first pack a page
-        // with no gaps.
-        let mut on_victim: Vec<(usize, u32)> = (0..self.meshes.len())
-            .filter_map(|i| {
-                let r = self.meshes[i].dynamic.as_ref()?.arena.filter(|r| r.page == victim)?;
-                Some((i, r.v_cap))
-            })
+        // This call's share of the victim's slots, largest first:
+        // power-of-two blocks taken largest first pack a page with no gaps.
+        let mut on_victim: Vec<(usize, ArenaRange)> = (0..self.meshes.len())
+            .filter_map(|i| Some((i, self.meshes[i].dynamic.as_ref()?.arena.filter(|r| r.page == victim)?)))
             .collect();
-        on_victim.sort_by_key(|&(i, cap)| (std::cmp::Reverse(cap), i));
-        let mut moves: Vec<(usize, ArenaRange, ArenaRange)> = Vec::new();
+        on_victim.sort_by_key(|&(i, r)| (std::cmp::Reverse(r.v_cap), i));
+        let mut chosen: Vec<(usize, ArenaRange)> = Vec::new();
         let mut moved = 0u64;
-        for (i, _) in on_victim {
-            if moved >= ARENA_MOVE_BUDGET {
+        for (i, old) in on_victim {
+            if moved >= self.move_budget {
                 break;
             }
-            let Some(d) = self.meshes[i].dynamic.as_ref() else { continue };
-            let Some(old) = d.arena.filter(|r| r.page == victim) else { continue };
-            let bytes = d.verts as u64 * vb + d.indices.len() as u64 * 4;
-            let (new, grown) = self.arena.alloc(gpu, old.v_cap, old.i_cap, Some(victim));
-            if let Some(page) = grown {
-                self.refresh_page(page);
+            let d = self.meshes[i].dynamic.as_ref().expect("a dynamic slot");
+            moved += d.verts as u64 * vb + d.indices.len() as u64 * 4;
+            chosen.push((i, old));
+        }
+        // First into pages that already have the room; then, for what is
+        // left, one page sized to what is left, so a page started here
+        // always takes a slot; then wherever the arena finds room.
+        let mut moves: Vec<(usize, ArenaRange, ArenaRange)> = Vec::new();
+        let mut left: Vec<(usize, ArenaRange)> = Vec::new();
+        for (i, old) in chosen {
+            match self.arena.alloc_existing(old.v_cap, old.i_cap, victim) {
+                Some(new) => moves.push((i, old, new)),
+                None => left.push((i, old)),
             }
-            let Some(new) = new else { break };
-            // Taken now, so the next alloc cannot hand it out again.
+        }
+        if !left.is_empty() {
+            let (v, ix) = left.iter().fold((0u32, 0u32), |(v, ix), (_, r)| (v.saturating_add(r.v_cap), ix.saturating_add(r.i_cap)));
+            let page = self.arena.new_page(gpu, v, ix);
+            for (i, old) in left {
+                let new = match self.arena.alloc_in(page, old.v_cap, old.i_cap) {
+                    Some(new) => Some(new),
+                    None => {
+                        let (new, grown) = self.arena.alloc(gpu, old.v_cap, old.i_cap, Some(victim));
+                        if let Some(p) = grown {
+                            self.refresh_page(p);
+                        }
+                        new
+                    }
+                };
+                let Some(new) = new else { break };
+                moves.push((i, old, new));
+            }
+        }
+        // Taken now: the slots record their new ranges before any copy.
+        for &(i, _, new) in &moves {
             if let Some(d) = self.meshes[i].dynamic.as_mut() {
                 d.arena = Some(new);
             }
-            moves.push((i, old, new));
-            moved += bytes;
         }
+        let moved: u64 = moves
+            .iter()
+            .map(|&(i, _, _)| {
+                let d = self.meshes[i].dynamic.as_ref().expect("a dynamic slot");
+                d.verts as u64 * vb + d.indices.len() as u64 * 4
+            })
+            .sum();
         let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("arena-compact") });
         for &(i, old, new) in &moves {
             let d = self.meshes[i].dynamic.as_ref().expect("a dynamic slot");
@@ -4832,6 +4867,13 @@ impl Raster {
     /// A debug switch, for tests that compare the two.
     pub fn set_geometry_arena(&mut self, on: bool) {
         self.use_arena = on;
+    }
+
+    /// Move at most `bytes` of slot geometry a [`Self::maintain_geometry`]
+    /// call (it always finishes the slot it is on). For tests that want to
+    /// watch compaction spread over several calls.
+    pub fn set_geometry_move_budget(&mut self, bytes: u64) {
+        self.move_budget = bytes;
     }
 
     /// Hold an arena page to at most `verts` vertices and `indices` indices

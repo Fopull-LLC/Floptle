@@ -583,3 +583,56 @@ fn emptied_pages_give_their_memory_back() {
     bad.indices[5] = bad.vertices.len() as u32;
     assert!(!on.replace_dynamic(&gpu, chunks_on[16], &bad), "a mesh indexing past its own vertices went into the arena");
 }
+
+/// **A page started to take moved slots is never left empty and in the
+/// way.** Compaction used to start a page whenever the other pages lacked
+/// room for ALL of an emptying page's live ranges, then moved only a
+/// call's worth, first into the pages that had room: the new page could
+/// take nothing. A page that never held a slot was never let go, and,
+/// grown past a first page and empty, it read as the emptiest page of all:
+/// it was chosen every call, held nothing to move, and the sparse page
+/// behind it was never compacted again. Here the moves of each call (one
+/// slot, by the budget) fit where room already is while the whole page's
+/// would not; compaction must still run to the end, and no page may be
+/// left empty.
+#[test]
+fn compaction_never_strands_an_empty_page() {
+    let gpu = Gpu::headless(SIZE, SIZE);
+    if !gpu.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
+        // CI's OpenGL cannot build the raster pass.
+        return;
+    }
+    let mut r = Raster::new(&gpu);
+    // 8,192 vertices a slot, 131,072 a page: sixteen slots a page.
+    r.set_geometry_page_limit(1 << 17, 1 << 18);
+    let (_, chunks, half) = coloured_scene(&gpu, &mut r, 32, 150);
+    assert!(r.geometry_arena_stats().pages >= 2, "the fixture: two full pages");
+    // The first page: two big slots stay, fourteen shrink to one box (under
+    // a quarter full, and more live than the second page has free).
+    for (i, &id) in chunks.iter().enumerate().take(16).skip(2) {
+        assert!(r.replace_dynamic(&gpu, id, &chunk_mesh(i, half, 1, 0)));
+    }
+    // The second page: one big slot gone, room for exactly one more.
+    r.free_dynamic(chunks[31]);
+    // One slot a call.
+    r.set_geometry_move_budget(1);
+    let start = r.geometry_arena_stats();
+    let mut calls = 0;
+    while r.maintain_geometry(&gpu) > 0 {
+        calls += 1;
+        assert!(calls < 100, "compaction never settled");
+    }
+    // One more call, past the end, as every later frame makes.
+    r.maintain_geometry(&gpu);
+    let end = r.geometry_arena_stats();
+    // All sixteen slots of the first page moved, one a call, and it went.
+    assert!(
+        calls >= 16 && end.bytes < start.bytes,
+        "compaction stopped after {calls} moves with {} bytes held in {} pages for {} live (started at {} in {})",
+        end.bytes,
+        end.pages,
+        end.live,
+        start.bytes,
+        start.pages
+    );
+}
