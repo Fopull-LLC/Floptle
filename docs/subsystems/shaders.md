@@ -472,10 +472,13 @@ cone's answer in a grid round the camera (`crates/floptle-render/src/sky_cache.r
 four nested cubes of 48 cells, 1 to 8 units across, each cell holding the
 cone along the six axis directions, refilled on the GPU only where
 something changed (a scroll, an edit, a volume or blob that moved, a proxy
-that came to rest or started moving), a few thousand cells a frame. A pixel
-then reads the eight cells round it. It answers one reach (calls at any
+that came to rest or started moving), never more than a budget of 4096
+cells a frame, so even starting again costs no frame more than any other.
+One view keeps a cache (the first to ask for it); any other camera's
+passes march, as without it. A pixel then reads the eight cells round it. It answers one reach (calls at any
 other reach march), holds the terrain, the volumes, the blobs and the
-proxies that have held still for half a second; a proxy that moves is read
+proxies that have held still for half a second (still against where they
+were baked in, so a slow drift adds up and is caught); a proxy that moves is read
 per pixel through a short-range term instead, approximate by design. A
 scene with Field Shapes is not cached. Where a cell centre sits too near
 matter for its own rays (just under a plank, inside rock) it is not read,
@@ -485,8 +488,9 @@ mean difference from the march is under 0.01 and 95% of the sea is within
 0.03. It is off by default, so a project looks exactly as it did; it is
 not yet a project setting. `sky_occlusion_from_the_cache.rs` holds its
 answers against the march (still terrain, a thin plank, the crowded beach,
-a dock pushed along) and its cost against six field reads: no more than
-twice, where the march on the crowded beach costs six to eight times.
+a deck pushed along) and its cost against six field reads: no more than
+two and a half times, where the march on the crowded beach costs six to
+eight times.
 
 ### 4.5 Moving the surface: `output offset`
 

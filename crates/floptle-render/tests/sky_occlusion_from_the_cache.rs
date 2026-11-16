@@ -47,13 +47,12 @@ fn sky_fill_check(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
         if (any(u < vec3<f32>(0.0)) || any(u > vec3<f32>(f32(SKYC_DIMS) - 1.0))) {
             continue;
         }
-        let s = (vec3<u32>(u) + skyc_mod(l)) % vec3<u32>(SKYC_DIMS);
-        let c = skyc_cell(l, s);
-        let flags = c.y >> 24u;
-        if ((flags & 0xFDu) != skyc_tag(l, s)) {
+        let off = vec3<u32>(u);
+        let c = skyc_cell(l, (off + skyc_mod(l)) % vec3<u32>(SKYC_DIMS));
+        if (!skyc_filled(l, off, c)) {
             return 0.8;
         }
-        if ((flags & 2u) == 0u) {
+        if ((c.y & (2u << 24u)) == 0u) {
             return 0.6;
         }
         let centre = skyc_corner(l) + (u + vec3<f32>(0.5)) * cell;
@@ -477,4 +476,105 @@ fn sky_lvl0(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
         let b = t[0].min(t[5]);
         println!("{view:?}: served {:.1}%; six {:.3} op {:.3} cache-only {:.3} level0-only {:.3}", 100.0 * s as f32 / n as f32, t[1].min(t[6]) - b, t[2].min(t[7]) - b, t[3].min(t[8]) - b, t[4].min(t[9]) - b);
     }
+}
+
+/// Cells written so far: those with their filled bit, in a read-back buffer.
+fn written(words: &[u32]) -> usize {
+    use floptle_render::sky_cache::{SKY_CELLS, SKY_HEADER_WORDS};
+    (0..SKY_CELLS as usize).filter(|i| (words[SKY_HEADER_WORDS + i * 4 + 1] >> 24) & 1 == 1).count()
+}
+
+/// From a cache starting from nothing, the GPU fills no more than the
+/// budget's worth of cells in any frame (half again for the dither's
+/// unevenness), fills every cell in the end, and once full, a camera
+/// standing still writes nothing at all.
+#[test]
+fn the_fill_keeps_to_its_budget_and_a_still_camera_writes_nothing() {
+    use floptle_render::sky_cache::{SKY_BUDGET, SKY_CELLS, SKY_HEADER_WORDS};
+    let Some(mut beach) = Beach::new(terrain()) else { return };
+    beach.raymarch.set_sky_cache(&beach.gpu, Some(24.0));
+    let (_, eye, rm) = beach.stage_with(View::EyeLevel, Layout::Empty, DVec3::ZERO);
+    let (mut last, mut most) = (0usize, 0usize);
+    for _ in 0..200 {
+        beach.refresh(rm, eye);
+        let n = written(&beach.raymarch.read_sky_cache(&beach.gpu, 0).unwrap());
+        most = most.max(n - last);
+        last = n;
+    }
+    println!("most cells written in a frame {most} (budget {SKY_BUDGET}); {last} of {SKY_CELLS} written");
+    assert_eq!(last, SKY_CELLS as usize, "not every cell was filled");
+    assert!(most <= SKY_BUDGET as usize * 3 / 2, "a frame wrote {most} cells, over the budget of {SKY_BUDGET}");
+    let before = beach.raymarch.read_sky_cache(&beach.gpu, 0).unwrap();
+    for _ in 0..24 {
+        beach.refresh(rm, eye);
+    }
+    let after = beach.raymarch.read_sky_cache(&beach.gpu, 0).unwrap();
+    assert!(before[SKY_HEADER_WORDS..] == after[SKY_HEADER_WORDS..], "a still camera rewrote cells");
+}
+
+/// A walk of a hundred finest cells in steps of twenty-five, each under a
+/// level's width, so no level starts again and the cells a scroll exposes
+/// wait for their refill: every cell read as filled, after every step,
+/// holds the cone at its own centre. A cell's storage is reused every 48
+/// cells; one that only knew which wrap it was in would be read as filled
+/// 96 cells on.
+#[test]
+fn a_cell_is_never_read_for_a_place_it_was_not_filled_for() {
+    let Some(mut beach) = Beach::new(terrain()) else { return };
+    beach.raymarch.set_sky_cache(&beach.gpu, Some(24.0));
+    let (_, eye, rm) = beach.stage_with(View::EyeLevel, Layout::Empty, DVec3::new(-60.0, 0.0, 0.0));
+    beach.settle(rm, eye);
+    for step in 1..=4 {
+        let shift = DVec3::new(-60.0 + 25.0 * step as f64, 0.0, 0.0);
+        let (globals, eye, rm) = beach.stage_with(View::EyeLevel, Layout::Empty, shift);
+        beach.refresh(rm, eye);
+        let bind = beach.shader_with("skyOcclusion(worldPos, vec3(0, 1, 0), 24)", Some(("sky_occlusion(", "sky_fill_check(")), FILL_CHECK);
+        beach.draw(globals, eye, bind);
+        let (mut held, mut worst) = (0usize, 0.0f32);
+        for v in beach.read().into_iter().flatten() {
+            if v < 0.5 {
+                held += 1;
+                worst = worst.max(v / 4.0);
+            }
+        }
+        println!("step {step}: {held} px read a filled cell; worst {worst:.4}");
+        assert!(held > 1000, "step {step}: the fixture reads almost no filled cells");
+        assert!(worst <= 0.006, "step {step}: a cell read as filled differs from the cone at its centre by {worst:.4}");
+    }
+}
+
+/// One view keeps the cache. Another view refreshing binds none, so it
+/// marches and reads the march's answer, never the first view's cells;
+/// once the first view has stopped refreshing for long enough, the other
+/// takes the cache over.
+#[test]
+fn a_second_view_marches_until_the_first_has_gone() {
+    let Some(mut beach) = Beach::new(terrain()) else { return };
+    beach.raymarch.set_sky_cache(&beach.gpu, Some(24.0));
+    let (_, eye0, rm0) = beach.stage_with(View::EyeLevel, Layout::Empty, DVec3::ZERO);
+    beach.settle(rm0, eye0);
+    let call = "skyOcclusion(worldPos, vec3(0, 1, 0), 24)";
+    let served_by = |beach: &mut Beach, globals, eye| {
+        let s = beach.shader_with(call, Some(("sky_occlusion(", "sky_served(")), SERVED);
+        beach.draw(globals, eye, s);
+        let v = beach.read();
+        v.iter().flatten().filter(|x| **x > 0.5).count() as f32 / v.iter().flatten().count().max(1) as f32
+    };
+    let (g1, eye1, rm1) = beach.stage_with(View::Above, Layout::Empty, DVec3::ZERO);
+    beach.refresh_view(rm1, eye1, 1);
+    let served = served_by(&mut beach, g1, eye1);
+    let (fast, full) = beach.both(g1, eye1, call);
+    let worst = fast.iter().zip(&full).filter_map(|(a, b)| Some((a.as_ref()? - b.as_ref()?).abs())).fold(0.0f32, f32::max);
+    println!("second view: served {:.1}%, worst difference from the march {worst:.3}", served * 100.0);
+    assert_eq!(served, 0.0, "the second view read the first view's cache");
+    assert!(worst <= 0.15, "the second view's op differs from the march by {worst:.3}");
+    for _ in 0..floptle_render::SKY_EVICT + 1 {
+        beach.refresh_view(rm1, eye1, 1);
+    }
+    for _ in 0..200 {
+        beach.refresh_view(rm1, eye1, 1);
+    }
+    let served = served_by(&mut beach, g1, eye1);
+    println!("second view after taking over: served {:.1}%", served * 100.0);
+    assert!(served >= 0.9, "the second view never took the cache over: served {:.1}%", served * 100.0);
 }

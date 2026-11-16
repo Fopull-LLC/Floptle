@@ -476,7 +476,7 @@ fn surface_fog(e: Ext, color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3
 @group(2) @binding(12) var<storage, read> fog_buf: array<vec4<u32>>;
 // The sky cache (see `sky_cached` in field.wgsl). A buffer for the same
 // reason as the fog's.
-@group(2) @binding(13) var<storage, read> sky_buf: array<vec2<u32>>;
+@group(2) @binding(13) var<storage, read> sky_buf: array<vec4<u32>>;
 
 
 // `PI` itself lives in raymarch.wgsl, which this module is NOT concatenated

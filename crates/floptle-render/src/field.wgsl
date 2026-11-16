@@ -2548,26 +2548,26 @@ fn sky_occlusion(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
 //
 // `sky_buf` holds a header of 32-bit words the CPU writes each frame, then
 // the cells: four nested cubes of SKYC_DIMS cells round the camera, each
-// cell two words. The word offsets match `sky_cache.rs`'s `H_*`.
+// cell four words: the lobes, distance and flags, then the lattice cell it
+// was filled for (ten bits an axis) and the level's epoch then. The word offsets match `sky_cache.rs`'s `H_*`.
 const SKYC_ON: u32 = 0u;
 const SKYC_REACH: u32 = 1u;
 const SKYC_SETTLED: u32 = 2u;
 const SKYC_MOVING: u32 = 3u;
 const SKYC_BOXES: u32 = 4u;
 const SKYC_GRID_CELL: u32 = 5u;
-const SKYC_HEAL: u32 = 6u;
 const SKYC_GRID_ORIGIN: u32 = 8u;
 const SKYC_LEVEL: u32 = 16u;
 const SKYC_LEVEL_WORDS: u32 = 12u;
 const SKYC_BOX: u32 = 64u;
-const SKYC_GRID: u32 = 128u;
+const SKYC_GRID: u32 = 256u;
 const SKYC_GRID_DIMS: u32 = 16u;
-const SKYC_HEADER_WORDS: u32 = 4224u;
+const SKYC_HEADER_WORDS: u32 = 4352u;
 const SKYC_DIMS: u32 = 48u;
 const SKYC_LEVELS: u32 = 4u;
 
 fn skyc_word(w: u32) -> u32 {
-    return sky_buf[w >> 1u][w & 1u];
+    return sky_buf[w >> 2u][w & 3u];
 }
 
 fn skyc_f(w: u32) -> f32 {
@@ -2575,8 +2575,8 @@ fn skyc_f(w: u32) -> f32 {
 }
 
 // Level `l`'s cell in storage `s`.
-fn skyc_cell(l: u32, s: vec3<u32>) -> vec2<u32> {
-    return sky_buf[SKYC_HEADER_WORDS / 2u + ((l * SKYC_DIMS + s.z) * SKYC_DIMS + s.y) * SKYC_DIMS + s.x];
+fn skyc_cell(l: u32, s: vec3<u32>) -> vec4<u32> {
+    return sky_buf[SKYC_HEADER_WORDS / 4u + ((l * SKYC_DIMS + s.z) * SKYC_DIMS + s.y) * SKYC_DIMS + s.x];
 }
 
 // Level `l`'s window corner, camera-relative.
@@ -2591,18 +2591,20 @@ fn skyc_mod(l: u32) -> vec3<u32> {
     return vec3<u32>(skyc_word(o + 4u), skyc_word(o + 5u), skyc_word(o + 6u));
 }
 
-// The flags a cell in storage `s` of level `l` carries when it was filled
-// for the place it stands for now (its written bit, which wrap of the
-// lattice it belongs to on each axis, and the level's epoch), with the
-// valid bit left out: compared against `(cell.y >> 24) & 0xFD`.
-fn skyc_tag(l: u32, s: vec3<u32>) -> u32 {
-    return skyc_tag_of(skyc_mod(l), skyc_word(SKYC_LEVEL + l * SKYC_LEVEL_WORDS + 7u), s);
+// What a cell `off` cells into level `l`'s window carries when it was
+// filled for the place it stands for now: the low ten bits of its lattice
+// coordinate on each axis, packed, and the level's epoch. `low` is the
+// window corner's, from the header; a cell matches only both.
+fn skyc_place(low: u32, epoch: u32, off: vec3<u32>) -> vec2<u32> {
+    let c = (vec3<u32>(low & 1023u, (low >> 10u) & 1023u, (low >> 20u) & 1023u) + off) & vec3<u32>(1023u);
+    return vec2<u32>(c.x | (c.y << 10u) | (c.z << 20u), epoch);
 }
 
-// `skyc_tag` from the level's storage start `m` and tag word `t`, read once.
-fn skyc_tag_of(m: vec3<u32>, t: u32, s: vec3<u32>) -> u32 {
-    let wrap = select(0u, 1u, s.x < m.x) | select(0u, 2u, s.y < m.y) | select(0u, 4u, s.z < m.z);
-    return 1u | (((t & 7u) ^ wrap) << 2u) | (((t >> 3u) & 7u) << 5u);
+// Is cell `c`, `off` cells into level `l`'s window, filled for where it is?
+fn skyc_filled(l: u32, off: vec3<u32>, c: vec4<u32>) -> bool {
+    let o = SKYC_LEVEL + l * SKYC_LEVEL_WORDS;
+    let want = skyc_place(skyc_word(o + 7u), skyc_word(o + 8u), off);
+    return (c.y & (1u << 24u)) != 0u && all(c.zw == want);
 }
 
 // A lobe the fill could not answer for (`skyc_fill`).
@@ -2612,7 +2614,7 @@ const SKYC_UNSURE: u32 = 255u;
 // the normal's squared components (an ambient cube), so a normal on an axis
 // reads that axis's cone exactly. (the answer, the share of the weight
 // whose lobes the cell could answer for.)
-fn skyc_lobes(c: vec2<u32>, n: vec3<f32>) -> vec2<f32> {
+fn skyc_lobes(c: vec4<u32>, n: vec3<f32>) -> vec2<f32> {
     var w = n * n / max(dot(n, n), 1e-12);
     let l = vec3<u32>(
         select((c.x >> 8u) & 255u, c.x & 255u, n.x >= 0.0),
@@ -2682,21 +2684,21 @@ fn skyc_level(l: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let f = u - base;
     let b = vec3<u32>(base);
     let m = skyc_mod(l);
-    let tw = skyc_word(o + 7u);
+    let low = skyc_word(o + 7u);
+    let epoch = skyc_word(o + 8u);
     var sum = 0.0;
     var wsum = 0.0;
     var usable = 0.0;
     var filled = 0u;
     for (var k = 0u; k < 8u; k = k + 1u) {
         let corner = vec3<u32>(k & 1u, (k >> 1u) & 1u, (k >> 2u) & 1u);
-        let s = (b + corner + m) % vec3<u32>(SKYC_DIMS);
-        let c = skyc_cell(l, s);
-        let flags = c.y >> 24u;
-        if ((flags & 0xFDu) != skyc_tag_of(m, tw, s)) {
+        let off = b + corner;
+        let c = skyc_cell(l, (off + m) % vec3<u32>(SKYC_DIMS));
+        if ((c.y & (1u << 24u)) == 0u || any(c.zw != skyc_place(low, epoch, off))) {
             continue;
         }
         filled = filled + 1u;
-        if ((flags & 2u) == 0u) {
+        if ((c.y & (2u << 24u)) == 0u) {
             continue;
         }
         let cf = vec3<f32>(corner);
@@ -2778,15 +2780,15 @@ fn skyc_static(settled: u32) -> FieldSet {
     return FieldSet(vm, settled, true, false, 0.0);
 }
 
-// A cell's answer for the six axis directions and its flags, as the fill
-// pass writes it (`fs_sky_fill`): `c` is its centre, camera-relative, `cell`
-// its size and `tag` its flags (`skyc_tag`).
-fn skyc_fill(c: vec3<f32>, cell: f32, tag: u32, reach: f32) -> vec2<u32> {
+// A cell as the fill pass writes it (`fs_sky_fill`): its answer for the six
+// axis directions, its distance and flags, and `place` (`skyc_place`). `c`
+// is its centre, camera-relative, and `cell` its size.
+fn skyc_fill(c: vec3<f32>, cell: f32, place: vec2<u32>, reach: f32) -> vec4<u32> {
     let pieces = skyc_static(skyc_word(SKYC_SETTLED));
     let d = field_set_d(c, pieces, 0u);
     let dist = u32(clamp(d / cell * 64.0, 0.0, 255.0));
     if (d <= 0.0) {
-        return vec2<u32>(0u, (dist << 16u) | (tag << 24u));
+        return vec4<u32>(0u, (dist << 16u) | (1u << 24u), place);
     }
     // A cone's rays start a lift off its point, along its axis. Where
     // matter lies inside that stretch (the centre just under a plank), the
@@ -2816,8 +2818,8 @@ fn skyc_fill(c: vec3<f32>, cell: f32, tag: u32, reach: f32) -> vec2<u32> {
         lobe[a] = u32(round(clamp(sky_cone(c, axis, reach, pieces), 0.0, 1.0) * 254.0));
     }
     let x = lobe[0] | (lobe[1] << 8u) | (lobe[2] << 16u) | (lobe[3] << 24u);
-    let y = lobe[4] | (lobe[5] << 8u) | (dist << 16u) | ((tag | 2u) << 24u);
-    return vec2<u32>(x, y);
+    let y = lobe[4] | (lobe[5] << 8u) | (dist << 16u) | (3u << 24u);
+    return vec4<u32>(x, y, place);
 }
 
 // `sky_occlusion`'s cone over only the pieces in `within`: what the four

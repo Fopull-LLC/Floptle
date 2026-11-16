@@ -374,14 +374,19 @@ impl Beach {
     /// Refresh the sky cache for a camera at `eye`, the lattice anchored
     /// at the world origin.
     pub fn refresh(&mut self, rm: RaymarchGlobals, eye: DVec3) {
+        self.refresh_view(rm, eye, 0);
+    }
+
+    /// The same for view `view`.
+    pub fn refresh_view(&mut self, rm: RaymarchGlobals, eye: DVec3, view: u64) {
         let at = floptle_render::sky_cache::SkyView { cam: eye, anchor: DVec3::ZERO, anchor_id: 1 };
-        self.raymarch.refresh_sky_cache(&self.gpu, rm, at, 0);
+        self.raymarch.refresh_sky_cache(&self.gpu, rm, at, view);
     }
 
     /// Refresh the sky cache until a camera standing still at `eye` has
     /// filled every level.
     pub fn settle(&mut self, rm: RaymarchGlobals, eye: DVec3) {
-        for _ in 0..160 {
+        for _ in 0..200 {
             self.refresh(rm, eye);
         }
         self.gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
@@ -393,7 +398,7 @@ impl Beach {
         for k in 0..1000 {
             self.refresh(rm, eye);
             let st = self.raymarch.sky_cache_stats(0).unwrap_or_default();
-            if k > 160 && st.boxes == 0 && st.moving == 0 {
+            if k > 40 && st.boxes == 0 && st.waiting == 0 && st.moving == 0 {
                 break;
             }
         }

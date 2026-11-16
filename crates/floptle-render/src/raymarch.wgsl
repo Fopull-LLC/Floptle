@@ -48,7 +48,7 @@
 @group(0) @binding(13) var fog_sun_samp: sampler_comparison;
 // The sky cache's header and cells (see `sky_cached` in field.wgsl), which
 // the fill pass reads to know which cells are stale.
-@group(0) @binding(15) var<storage, read> sky_buf: array<vec2<u32>>;
+@group(0) @binding(15) var<storage, read> sky_buf: array<vec4<u32>>;
 
 
 // Baked GI probes (Matter::LightProbes): four texels per probe along x, holding
@@ -950,11 +950,10 @@ fn fog_to_pixel(px: vec2<u32>, pdims: vec2<u32>) -> vec4<u32> {
 // ---- The sky cache's fill (`Raymarch::refresh_sky_cache`) --------------------
 //
 // One texel of the atlas per cell, level by level, the levels' cells in the
-// same order as the buffer the atlas is copied into. A cell is filled when it
-// is due: stale (filled for another place, or never), and in this frame's
-// dither for its level; or in a dirty box and in that box's dither. A stale
-// cell that is not due is written empty, so it can never be read as filled
-// for a place it is not; everything else is left as it was.
+// same order as the buffer the atlas is copied into. A cell is filled when a
+// refilling box on its level holds it and it is in that box's dither this
+// frame. A stale cell (filled for another place, or never) that is not due
+// is written empty; everything else is left as it was.
 
 // The atlas's width, texels (`SKY_ATLAS_W`).
 const SKYC_ATLAS_W: u32 = 1536u;
@@ -978,37 +977,35 @@ fn fs_sky_fill(in: VOut) -> @location(0) vec4<u32> {
     let l = i / per;
     let r = i % per;
     let s = vec3<u32>(r % SKYC_DIMS, (r / SKYC_DIMS) % SKYC_DIMS, r / (SKYC_DIMS * SKYC_DIMS));
-    let old = sky_buf[SKYC_HEADER_WORDS / 2u + i];
-    let tag = skyc_tag(l, s);
-    let stale = ((old.y >> 24u) & 0xFDu) != tag;
-    let h = skyc_hash(i);
     let o = SKYC_LEVEL + l * SKYC_LEVEL_WORDS;
-    var due = false;
-    if (stale) {
-        due = skyc_word(SKYC_HEAL) != 0u || h % max(skyc_word(o + 8u), 1u) == skyc_word(o + 9u);
-    }
-    let cell = skyc_f(o + 3u);
     let off = (s + vec3<u32>(SKYC_DIMS) - skyc_mod(l)) % vec3<u32>(SKYC_DIMS);
+    let cell = skyc_f(o + 3u);
     let c = skyc_corner(l) + (vec3<f32>(off) + vec3<f32>(0.5)) * cell;
-    if (!due) {
-        let nb = min(skyc_word(SKYC_BOXES), 8u);
-        for (var k = 0u; k < nb; k = k + 1u) {
-            let b = SKYC_BOX + k * 8u;
-            let lo = vec3<f32>(skyc_f(b), skyc_f(b + 1u), skyc_f(b + 2u));
-            let hi = vec3<f32>(skyc_f(b + 4u), skyc_f(b + 5u), skyc_f(b + 6u));
-            if (all(c >= lo) && all(c <= hi) && h % max(skyc_word(b + 3u), 1u) == skyc_word(b + 7u)) {
-                due = true;
-                break;
-            }
+    let h = skyc_hash(i);
+    var due = false;
+    let nb = min(skyc_word(SKYC_BOXES), 16u);
+    for (var k = 0u; k < nb; k = k + 1u) {
+        let b = SKYC_BOX + k * 8u;
+        let pw = skyc_word(b + 3u);
+        if (((pw >> 24u) & (1u << l)) == 0u) {
+            continue;
+        }
+        let lo = vec3<f32>(skyc_f(b), skyc_f(b + 1u), skyc_f(b + 2u));
+        let hi = vec3<f32>(skyc_f(b + 4u), skyc_f(b + 5u), skyc_f(b + 6u));
+        if (all(c >= lo) && all(c <= hi) && h % max(pw & 0xFFFFFFu, 1u) == skyc_word(b + 7u)) {
+            due = true;
+            break;
         }
     }
+    let place = skyc_place(skyc_word(o + 7u), skyc_word(o + 8u), off);
     if (!due) {
-        if (stale && (old.x | old.y) != 0u) {
+        let old = sky_buf[SKYC_HEADER_WORDS / 4u + i];
+        if (any(old.zw != place) && any(old != vec4<u32>(0u))) {
             return vec4<u32>(0u);
         }
         discard;
     }
-    return vec4<u32>(skyc_fill(c, cell, tag, skyc_f(SKYC_REACH)), 0u, 0u);
+    return skyc_fill(c, cell, place, skyc_f(SKYC_REACH));
 }
 
 @fragment

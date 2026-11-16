@@ -677,9 +677,11 @@ pub struct Raymarch {
     fog_debug: bool,
     /// The sky cache (`sky_cache.rs`): the reach it answers, `None` while it
     /// is off; one cache per view that refreshes one (at most
-    /// [`SKY_VIEWS`]), and which of them the bind groups carry now.
+    /// [`SKY_VIEWS`]), and which of them the bind groups carry now;
+    /// refreshes by other views since the cached one last refreshed.
     sky_reach: Option<f32>,
     sky_slots: Vec<SkySlot>,
+    sky_idle: u32,
     sky_active: Option<usize>,
     sky_fill_pipeline: wgpu::RenderPipeline,
     /// What the sky binding holds while no cache is: a header that says off.
@@ -1047,6 +1049,7 @@ impl Raymarch {
             fog_debug: false,
             sky_reach: None,
             sky_slots: Vec::new(),
+            sky_idle: 0,
             sky_active: None,
             sky_fill_pipeline,
             sky_fallback,
@@ -2640,19 +2643,39 @@ impl Raymarch {
     /// (`SkyCache::plan`), write the header and run the fill pass over the
     /// cells due. `globals` are this view's, as the frame uploads them; call
     /// it after the volumes for the frame are uploaded and before the
-    /// passes that shade. `view` names the view: up to [`SKY_VIEWS`] keep a
-    /// cache of their own, and any more read none and march.
+    /// passes that shade. `view` names the view: one view keeps a cache,
+    /// the first to refresh; any other view binds none and marches, so
+    /// every view that draws must call this before its passes, or it reads
+    /// the last view's cache. A cached view that stops refreshing hands the
+    /// cache on after [`SKY_EVICT`] refreshes by others.
     ///
     /// Does nothing (and binds no cache) while the cache is off.
     pub fn refresh_sky_cache(&mut self, gpu: &Gpu, mut globals: RaymarchGlobals, at: crate::sky_cache::SkyView, view: u64) {
         let Some(reach) = self.sky_reach else { return };
         let slot = match self.sky_slots.iter().position(|s| s.view == view) {
-            Some(i) => Some(i),
+            Some(i) => {
+                self.sky_idle = 0;
+                Some(i)
+            }
             None if self.sky_slots.len() < SKY_VIEWS => {
                 self.sky_slots.push(SkySlot::new(&gpu.device, view, reach));
+                self.sky_idle = 0;
                 Some(self.sky_slots.len() - 1)
             }
-            None => None,
+            None => {
+                self.sky_idle += 1;
+                if self.sky_idle > SKY_EVICT {
+                    // The cached view has gone: this one takes the cache
+                    // over, from scratch.
+                    self.sky_slots.clear();
+                    self.sky_edits.clear();
+                    self.sky_slots.push(SkySlot::new(&gpu.device, view, reach));
+                    self.sky_idle = 0;
+                    Some(0)
+                } else {
+                    None
+                }
+            }
         };
         if self.sky_active != slot {
             self.sky_active = slot;
@@ -2682,10 +2705,8 @@ impl Raymarch {
                 edits.push(crate::sky_cache::SkyEdit { min: at(lo), max: at(hi) });
             }
         }
-        if self.sky_slots.len() <= 1 || slot + 1 == self.sky_slots.len() {
-            // Every cache has seen them once the last one has.
-            self.sky_edits.clear();
-        }
+        // The one cache has seen them.
+        self.sky_edits.clear();
         let s = &mut self.sky_slots[slot];
         let frame = s.cache.plan(&at, &globals, &keys, &edits);
         gpu.queue.write_buffer(&s.buf, 0, bytemuck::cast_slice(&frame.header));
@@ -3258,10 +3279,15 @@ pub(crate) fn fog_fallback_buffer(device: &wgpu::Device) -> wgpu::Buffer {
     })
 }
 
-/// The sky cache's atlas format: two 32-bit words a cell.
-const SKY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Uint;
-/// Views that can keep a sky cache of their own at once; any more march.
-pub const SKY_VIEWS: usize = 2;
+/// The sky cache's atlas format: four 32-bit words a cell. The same as the
+/// fog's: reading back an Rg32Uint target is not something every OpenGL ES
+/// driver promises.
+const SKY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Uint;
+/// Views that keep a sky cache at once; any other view marches.
+pub const SKY_VIEWS: usize = 1;
+/// Refreshes by other views after which a cached view that has stopped
+/// refreshing hands its cache on.
+pub const SKY_EVICT: u32 = 120;
 
 /// What the sky binding holds while no cache is: zeroes, whose header says
 /// the cache is off.
