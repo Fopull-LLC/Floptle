@@ -41,6 +41,7 @@ pub mod probe;
 pub mod raster;
 pub mod raymarch;
 pub mod retro;
+pub mod sky_cache;
 pub mod reflect;
 pub mod ssr;
 pub mod terrain_palette;
