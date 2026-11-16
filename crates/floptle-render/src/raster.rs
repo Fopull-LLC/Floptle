@@ -16,6 +16,12 @@ use crate::device::Gpu;
 use crate::mesh::{GpuMesh, MeshData, MeshId, TextureData, Vertex};
 
 mod texture_pool;
+mod geom_arena;
+mod view_plan;
+
+pub use view_plan::ViewPlan;
+use geom_arena::{ArenaRange, GeomArena};
+use view_plan::{ExtFlags, FlslClass};
 pub use texture_pool::{sizes_share_an_array, PoolLayer};
 
 /// How a texture is filtered (and, for `SmoothMipmaps`, minified). The default
@@ -918,6 +924,9 @@ struct DynSlot {
     tpaint_base: u32,
     /// Always == `cap_verts` when `tpaint_base != 0` (the block is sized to the slot).
     tpaint_cap: u32,
+    /// Its range in the shared geometry arena; `None` for a slot with
+    /// buffers of its own (the arena off, or a mesh too big for a page).
+    arena: Option<ArenaRange>,
 }
 
 /// What the raster passes put into their command encoders: draws, the state
@@ -951,6 +960,11 @@ pub struct EncodeStats {
     pub skipped: u32,
     /// Queue submits.
     pub submits: u32,
+    /// Draw records sorted into buckets (each one hashed by its mesh and
+    /// picture), every pass.
+    pub bucket_records: u32,
+    /// Bytes written into the instance buffer.
+    pub instance_bytes: u64,
     /// Milliseconds spent sorting the draws into buckets and uploading their
     /// instances, before a pass is recorded.
     pub bucket_ms: f32,
@@ -970,6 +984,8 @@ impl EncodeStats {
         self.index_sets += o.index_sets;
         self.skipped += o.skipped;
         self.submits += o.submits;
+        self.bucket_records += o.bucket_records;
+        self.instance_bytes += o.instance_bytes;
         self.bucket_ms += o.bucket_ms;
         self.record_ms += o.record_ms;
         self.submit_ms += o.submit_ms;
@@ -1062,7 +1078,7 @@ impl<'a> Bound<'a> {
     fn geometry(&mut self, rp: &mut wgpu::RenderPass<'_>, mesh: &'a GpuMesh, start: u32, count: u32) {
         self.vertex(rp, 0, &mesh.vbuf);
         self.index(rp, &mesh.ibuf);
-        rp.draw_indexed(0..mesh.index_count, 0, start..(start + count));
+        rp.draw_indexed(mesh.first_index..(mesh.first_index + mesh.index_count), 0, start..(start + count));
         self.n.draws += 1;
     }
 
@@ -1407,6 +1423,19 @@ pub struct Raster {
     mat_sets: HashMap<[u32; SURFACE_SLOTS], TexId>,
     instance_buf: wgpu::Buffer,
     instance_cap: u32,
+    /// Bumped whenever the start of `instance_buf` is written or the buffer
+    /// is made again, so a [`ViewPlan`] can tell it is no longer there.
+    instances_gen: u64,
+    /// The shared vertex and index buffers coloured dynamic slots take their
+    /// ranges from ([`geom_arena`]), so a run of terrain chunks binds them once.
+    arena: GeomArena,
+    /// Put new coloured dynamic slots in the arena (the default). Off gives
+    /// each its own buffers, as before: a debug switch for tests that compare
+    /// the two.
+    use_arena: bool,
+    /// One-element buffers a freed arena slot points at, so it holds no
+    /// page alive.
+    empty_geom: Option<(wgpu::Buffer, wgpu::Buffer)>,
     meshes: Vec<RegisteredMesh>,
     /// The last sun shadow map's opaque instances: how many it drew, and how
     /// many it was given ([`sun_map_draws`](Raster::sun_map_draws)).
@@ -2527,6 +2556,10 @@ impl Raster {
             mat_sets: HashMap::new(),
             instance_buf,
             instance_cap,
+            instances_gen: 1,
+            arena: GeomArena::new(gpu),
+            use_arena: true,
+            empty_geom: None,
             meshes: Vec::new(),
             sun_map_casts: (0, 0),
             sun_near_casts: (0, 0),
@@ -3274,11 +3307,6 @@ impl Raster {
     /// have been written in place: what the UI builds its mip chain from.
     pub(crate) fn texture_source(&self, id: TexId) -> Option<(&wgpu::Texture, TexSampling, u32)> {
         self.textures.get(id.0 as usize).map(|t| (&t._texture, t.sampling, t.revision.get()))
-    }
-
-    /// Which surface-extras entries blend ([`EXT_BLEND`]), by index.
-    fn ext_blends(&self) -> Vec<bool> {
-        self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| (c[1][0] as u32) & EXT_BLEND != 0).collect()
     }
 
     pub fn material_bind(&self, id: TexId) -> Option<&wgpu::BindGroup> {
@@ -4511,29 +4539,12 @@ impl Raster {
         raws: &mut Vec<InstanceRaw>,
         keep: impl Fn(&FlslShader, &InstanceRaw) -> bool,
     ) -> Vec<FlslBucket> {
-        let wanted = |bind: &FlslBindingId, raw: &InstanceRaw| {
+        view_plan::bucket_flsl_by(flsl, skins, raws, |bind, raw| {
             self.flsl_bindings
                 .get(bind.0 as usize)
                 .and_then(|b| self.flsl_shaders.get(b.shader.0 as usize))
                 .is_some_and(|sh| keep(sh, raw))
-        };
-        let groups = group_by_key(
-            flsl.iter()
-                .filter(|(_, _, bind, raw)| wanted(bind, raw))
-                .map(|(id, tex, bind, raw)| ((id.0 as usize, tex.map(|t| t.0), bind.0, false), *raw))
-                .chain(skins.iter().filter_map(|d| {
-                    let bind = d.flsl?;
-                    wanted(&bind, &d.instance)
-                        .then(|| ((d.mesh.0 as usize, d.tex.map(|t| t.0), bind.0, true), Self::skin_instance(d)))
-                })),
-        );
-        let mut buckets = Vec::with_capacity(groups.len());
-        for ((mesh_idx, tex_key, bind_id, skinned), members) in groups {
-            let start = raws.len() as u32;
-            raws.extend_from_slice(&members);
-            buckets.push((mesh_idx, tex_key, bind_id, skinned, start, members.len() as u32));
-        }
-        buckets
+        })
     }
 
     /// Skinned draws that wear no `.flsl` — those go through their shader's
@@ -4563,19 +4574,7 @@ impl Raster {
         raws: &mut Vec<InstanceRaw>,
         keep: impl Fn(&SkinDraw) -> bool,
     ) -> Vec<(usize, Option<u32>, u32, u32)> {
-        let groups = group_by_key(
-            skins
-                .iter()
-                .filter(|d| keep(d))
-                .map(|d| ((d.mesh.0 as usize, d.tex.map(|t| t.0)), Self::skin_instance(d))),
-        );
-        let mut out = Vec::with_capacity(groups.len());
-        for ((mesh_idx, tex_key), members) in groups {
-            let start = raws.len() as u32;
-            raws.extend_from_slice(&members);
-            out.push((mesh_idx, tex_key, start, members.len() as u32));
-        }
-        out
+        view_plan::bucket_skins_by(skins, raws, keep)
     }
 
     /// The paint block a registered mesh owns, or 0 if it imported unpainted.
@@ -4598,6 +4597,10 @@ impl Raster {
     /// Allocate (or re-use) a terrain-color block of exactly `cap` vertices, returning
     /// its base. Growth copies the live prefix on the GPU, so nothing is mirrored on
     /// the CPU. Returns 0 if `cap` is 0 or the store's f32-exact range is exhausted.
+    ///
+    /// Every block has one more word in front of it, at `base - 1`: the first
+    /// vertex of its slot's range in the geometry arena, which the shader takes
+    /// off `vertex_index` ([`Self::write_tpaint_first`]).
     fn tpaint_alloc(&mut self, gpu: &Gpu, cap: u32) -> u32 {
         if cap == 0 {
             return 0;
@@ -4609,7 +4612,8 @@ impl Raster {
         {
             return base;
         }
-        let base = self.tpaint_len;
+        // The word in front of the block, then the block.
+        let base = self.tpaint_len + 1;
         // The base rides `n0.w` as a plain f32 — exact only to 2^24. Refuse rather than
         // silently decode to a neighbouring block's colors (the vpaint rule, same reason).
         if base as u64 + cap as u64 > (1 << 24) {
@@ -4619,7 +4623,7 @@ impl Raster {
             );
             return 0;
         }
-        self.tpaint_len += cap;
+        self.tpaint_len += cap + 1;
 
         let needed = (self.tpaint_len as u64) * 4;
         if needed > self.tpaint_buf.size() {
@@ -4658,6 +4662,74 @@ impl Raster {
         b
     }
 
+    /// Write the word in front of colour block `tpaint_base`: the first vertex
+    /// of the slot's arena range (0 for a slot with buffers of its own), which
+    /// `vertex_index` counts from and the shader takes off it.
+    fn write_tpaint_first(gpu: &Gpu, tpaint: &wgpu::Buffer, tpaint_base: u32, arena: Option<&ArenaRange>) {
+        if tpaint_base == 0 {
+            return;
+        }
+        let first = arena.map_or(0, |r| r.v_off);
+        gpu.queue.write_buffer(tpaint, (tpaint_base as u64 - 1) * 4, bytemuck::bytes_of(&first));
+    }
+
+    /// Geometry for a dynamic slot of `cap_verts`/`cap_indices`: a range in
+    /// the shared arena when it is on, the slot has a colour block
+    /// (`tpaint_base`) and a page can hold it, else buffers of its own. When
+    /// a page had to grow, every slot on it takes up the page's new buffers
+    /// here.
+    ///
+    /// Only a slot with a colour block goes in: in the arena `vertex_index`
+    /// counts from the page, and the word in front of the colour block is
+    /// how the shader counts from the slot again. A slot without one (a
+    /// sprite, a tile map, a painted blockout's atlas) may be drawn with
+    /// vertex paint, read by `vertex_index` with nothing to correct it, so
+    /// it keeps buffers of its own. Terrain chunks and decals all have one.
+    fn place_dynamic(&mut self, gpu: &Gpu, cap_verts: u32, cap_indices: u32, tpaint_base: u32) -> (GpuMesh, Option<ArenaRange>) {
+        if self.empty_geom.is_none() {
+            let mesh = GpuMesh::with_capacity(gpu, 1, 1);
+            self.empty_geom = Some((mesh.vbuf, mesh.ibuf));
+        }
+        let (range, grown) =
+            if self.use_arena && tpaint_base != 0 { self.arena.alloc(gpu, cap_verts, cap_indices) } else { (None, None) };
+        if let Some(page) = grown {
+            let (vbuf, ibuf) = self.arena.buffers(page);
+            for m in &mut self.meshes {
+                if m.dynamic.as_ref().and_then(|d| d.arena).is_some_and(|r| r.page == page) {
+                    m.gpu_mesh.vbuf = vbuf.clone();
+                    m.gpu_mesh.ibuf = ibuf.clone();
+                }
+            }
+        }
+        let Some(range) = range else {
+            return (GpuMesh::with_capacity(gpu, cap_verts, cap_indices), None);
+        };
+        let (vbuf, ibuf) = self.arena.buffers(range.page);
+        (GpuMesh { vbuf: vbuf.clone(), ibuf: ibuf.clone(), index_count: 0, first_index: range.i_off }, Some(range))
+    }
+
+    /// What a dynamic slot draws with once its arena range is gone: nothing,
+    /// through buffers that hold no page alive.
+    fn empty_geometry(&self) -> GpuMesh {
+        let (vbuf, ibuf) = self.empty_geom.as_ref().expect("made with the first dynamic slot");
+        GpuMesh { vbuf: vbuf.clone(), ibuf: ibuf.clone(), index_count: 0, first_index: 0 }
+    }
+
+    /// Put new coloured dynamic slots (terrain chunks, decals) in the shared
+    /// geometry arena (on by default), or give each buffers of its own as
+    /// before. Slots made earlier keep what they have until they are resized.
+    /// A debug switch, for tests that compare the two.
+    pub fn set_geometry_arena(&mut self, on: bool) {
+        self.use_arena = on;
+    }
+
+    /// The shared geometry arena: pages in use, bytes they hold on the GPU,
+    /// and bytes written into them so far (slot writes and the copies a page
+    /// makes when it grows).
+    pub fn geometry_arena_stats(&self) -> (usize, u64, u64) {
+        (self.arena.pages(), self.arena.bytes(), self.arena.written)
+    }
+
     /// Create a dynamic mesh slot sized for `verts`/`indices` (with headroom) and, when
     /// `colored`, its paired terrain-color block. The slot draws nothing until
     /// [`replace_dynamic`](Self::replace_dynamic) fills it.
@@ -4672,8 +4744,8 @@ impl Raster {
         let cap_indices = slot_cap(indices);
         let tpaint_cap = if colored { cap_verts } else { 0 };
         let tpaint_base = self.tpaint_alloc(gpu, tpaint_cap);
-        let gpu_mesh = GpuMesh::with_capacity(gpu, cap_verts, cap_indices);
-        let slot = DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap };
+        let (gpu_mesh, arena) = self.place_dynamic(gpu, cap_verts, cap_indices, tpaint_base);
+        let slot = DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap, arena };
 
         // Every slot binds the same white picture the same way, so they all
         // share one bind: a run of chunks then binds it once, not per chunk.
@@ -4731,24 +4803,42 @@ impl Raster {
             // The color block is sized to the slot, so it regrows with it: hand the old
             // one back to the free-list (it is re-usable at its own capacity) and take a
             // new one. Skipping this is exactly the leak the separate store exists to stop.
-            let (old_base, old_cap, colored) =
-                (slot.tpaint_base, slot.tpaint_cap, slot.tpaint_base != 0);
+            let (old_base, old_cap, colored, old_arena) =
+                (slot.tpaint_base, slot.tpaint_cap, slot.tpaint_base != 0, slot.arena);
             if old_base != 0 {
                 self.tpaint_free.entry(old_cap).or_default().push(old_base);
             }
             let tpaint_cap = if colored { cap_verts } else { 0 };
             let tpaint_base = self.tpaint_alloc(gpu, tpaint_cap);
+            // Its old range goes back first, so the new one can take its place.
+            if let Some(r) = old_arena {
+                self.arena.free(r);
+            }
+            let (gpu_mesh, arena) = self.place_dynamic(gpu, cap_verts, cap_indices, tpaint_base);
             let m = &mut self.meshes[id.0 as usize];
-            m.gpu_mesh = GpuMesh::with_capacity(gpu, cap_verts, cap_indices);
-            m.dynamic = Some(DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap });
+            m.gpu_mesh = gpu_mesh;
+            m.dynamic = Some(DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap, arena });
         }
 
         let m = &mut self.meshes[id.0 as usize];
-        if !m.gpu_mesh.write(gpu, data) {
-            return false;
+        let arena = m.dynamic.as_ref().and_then(|d| d.arena);
+        match &arena {
+            // Only this slot's range is written: nothing else in the page moves.
+            Some(r) => {
+                if !self.arena.write(gpu, r, data) {
+                    return false;
+                }
+                m.gpu_mesh.index_count = data.indices.len() as u32;
+            }
+            None => {
+                if !m.gpu_mesh.write(gpu, data) {
+                    return false;
+                }
+            }
         }
         m.reach = mesh_reach(&data.vertices);
         let slot = m.dynamic.as_ref().expect("dynamic slot");
+        Self::write_tpaint_first(gpu, &self.tpaint_buf, slot.tpaint_base, arena.as_ref());
         if slot.tpaint_base != 0
             && let Some(colors) = data.colors.as_ref()
         {
@@ -4780,6 +4870,14 @@ impl Raster {
         if slot.tpaint_base != 0 {
             self.tpaint_free.entry(slot.tpaint_cap).or_default().push(slot.tpaint_base);
         }
+        if let Some(r) = slot.arena {
+            // Its range goes back, and it lets go of the page, so a page
+            // emptied by a planet unloading is freed.
+            self.arena.free(r);
+            let empty = self.empty_geometry();
+            self.meshes[id.0 as usize].gpu_mesh = empty;
+        }
+        let m = &mut self.meshes[id.0 as usize];
         m.gpu_mesh.index_count = 0; // stop drawing immediately, even before re-use
         if !self.dyn_free.contains(&id.0) {
             self.dyn_free.push(id.0);
@@ -4812,7 +4910,11 @@ impl Raster {
     /// capacity, which for a dynamic slot is more than it draws. 0 for a mesh
     /// that is not there.
     pub fn mesh_gpu_bytes(&self, id: MeshId) -> u64 {
-        self.meshes.get(id.0 as usize).map_or(0, |m| m.gpu_mesh.vbuf.size() + m.gpu_mesh.ibuf.size())
+        self.meshes.get(id.0 as usize).map_or(0, |m| match m.dynamic.as_ref().and_then(|d| d.arena) {
+            // Its share of the arena: the range it holds.
+            Some(r) => r.v_cap as u64 * std::mem::size_of::<Vertex>() as u64 + r.i_cap as u64 * 4,
+            None => m.gpu_mesh.vbuf.size() + m.gpu_mesh.ibuf.size(),
+        })
     }
 
     /// Bytes the terrain color store currently holds on the GPU (for budget probes).
@@ -5036,6 +5138,11 @@ impl Raster {
     /// `update_mesh_vertices` before the first draw (skinning does, every frame).
     pub fn clone_mesh(&mut self, gpu: &Gpu, src: MeshId) -> Option<MeshId> {
         let m = self.meshes.get(src.0 as usize)?;
+        // A slot in the shared arena has no buffer of its own to copy the
+        // size of; nothing clones one (skinned parts are upload-once meshes).
+        if m.dynamic.as_ref().is_some_and(|d| d.arena.is_some()) {
+            return None;
+        }
         let vbuf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mesh-verts-skin-variant"),
             size: m.gpu_mesh.vbuf.size(),
@@ -5047,6 +5154,7 @@ impl Raster {
                 vbuf,
                 ibuf: m.gpu_mesh.ibuf.clone(),
                 index_count: m.gpu_mesh.index_count,
+                first_index: m.gpu_mesh.first_index,
             },
             tex_bind: m.tex_bind.clone(),
             sampling: m.sampling,
@@ -5088,6 +5196,10 @@ impl Raster {
         let Some(m) = self.meshes.get(id.0 as usize) else {
             return Err("there is no such mesh".into());
         };
+        // A slot in the shared arena would be written over its page's start.
+        if m.dynamic.as_ref().is_some_and(|d| d.arena.is_some()) {
+            return Err("a terrain chunk slot is rewritten with replace_dynamic".into());
+        }
         let held = (m.gpu_mesh.vbuf.size() / std::mem::size_of::<Vertex>() as u64) as usize;
         if let Some(v) = vertices
             && v.len() != held
@@ -5148,7 +5260,8 @@ impl Raster {
     /// have the same length the mesh was registered with (the index buffer is unchanged);
     /// a mismatch or unknown id is ignored.
     pub fn update_mesh_vertices(&self, gpu: &Gpu, id: MeshId, verts: &[Vertex]) {
-        if let Some(m) = self.meshes.get(id.0 as usize) {
+        // A slot in the shared arena would be written over its page's start.
+        if let Some(m) = self.meshes.get(id.0 as usize).filter(|m| m.dynamic.as_ref().is_none_or(|d| d.arena.is_none())) {
             gpu.queue.write_buffer(&m.gpu_mesh.vbuf, 0, bytemuck::cast_slice(verts));
         }
     }
@@ -5157,6 +5270,8 @@ impl Raster {
         if count <= self.instance_cap {
             return;
         }
+        // A new buffer holds nothing: whatever plan was in the old one is gone.
+        self.instances_gen += 1;
         let cap = count.next_power_of_two();
         self.instance_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raster-instances"),
@@ -5194,10 +5309,9 @@ impl Raster {
         // reach for the entity's private baked buffer to manage it; here it is the
         // same skinned pipeline the character shades with.
         let skin_buckets = self.bucket_all_skins(skins, &mut raws);
-        self.ensure_instances(gpu, raws.len().max(1) as u32);
-        if !raws.is_empty() {
-            gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
-        }
+        self.ensure_instances(gpu, 1);
+        self.encode_frame.bucket_records += raws.len() as u32;
+        self.write_instances(gpu, &raws);
         self.note_bucket(bucket_t);
 
         let mut encoder = gpu
@@ -5281,6 +5395,25 @@ impl Raster {
         clear: Option<[f64; 4]>,
         field: Option<&wgpu::BindGroup>,
     ) {
+        let mut plan = self.plan_view(instances, flsl, skins);
+        self.draw_scene_planned(gpu, color, depth, globals, &mut plan, clear, field);
+    }
+
+    /// [`Self::draw_scene_with`] from a plan made by [`Self::plan_view`],
+    /// which the sun map and the prepass may already have drawn from: the
+    /// same buckets in the same order, with nothing sorted or uploaded again
+    /// while the plan is still in the instance buffer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_scene_planned(
+        &mut self,
+        gpu: &Gpu,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        globals: Globals,
+        plan: &mut ViewPlan,
+        clear: Option<[f64; 4]>,
+        field: Option<&wgpu::BindGroup>,
+    ) {
         let bucket_t = floptle_core::profile::Span::new();
         self.begin_pass(gpu, globals);
 
@@ -5301,93 +5434,32 @@ impl Raster {
             None => (wgpu::LoadOp::Load, wgpu::LoadOp::Load),
         };
 
-        // Bucket by (mesh, texture-override) — each unique combo is one draw with
-        // its own bound texture. A material texture (Some) re-textures the shape;
-        // None uses the mesh's own base-color texture. Opaque and transparent draws are
-        // bucketed separately (and packed contiguously into one instance buffer) so the
-        // transparent ones can render last, blended, in a second pass.
-        //
-        // Grouping must be hash-based O(N): thousands of terrain chunk meshes
-        // each carry a unique MeshId, and the old scan-per-key version went
-        // quadratic in them — tens of milliseconds of tuple comparisons per
-        // frame on a big planet (the 60→10 fps collapse on approach).
-        const OPAQUE_CUTOFF: f32 = 0.999;
-        let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
-        // Terrain's alpha lane is a dissolve threshold, not opacity:
-        // the fragment shader discards a matching fraction of
-        // a newly meshed chunk's pixels and what survives is fully opaque. So a
-        // fading chunk belongs in the OPAQUE pass — blending it instead would
-        // dim it toward the sky rather than reveal it, drop it out of the depth
-        // prepass, and make it order-dependent against the chunks behind it,
-        // which on a planet is every other chunk.
-        // Which surface-extras entries asked for SCREEN-DOOR transparency. A
-        // dithered surface belongs in the OPAQUE pass — that is the whole point
-        // of dithering instead of blending — so it must not be routed by its
-        // alpha like everything else. Snapshotted rather than read through
-        // `self` because the bucketing closures below borrow `raws` mutably.
-        let dithers: Vec<bool> = self
-            .mat_ext_cpu
-            .as_chunks::<EXT_LANES>().0
-            .iter()
-            .map(|c| (c[1][0] as u32) & (EXT_DITHER_ALPHA | EXT_DISSOLVE) != 0)
-            .collect();
-        // The pass comes from the material's blend mode; a solid material
-        // whose instance is faded (a node's Tint, a cross-fade) still blends,
-        // since that fade is the node's, not the material's.
-        let blends = self.ext_blends();
-        let is_opaque = |raw: &InstanceRaw| {
-            is_terrain(raw)
-                || dithers.get(ext_index_of(raw) as usize).copied().unwrap_or(false)
-                || (raw.color[3] >= OPAQUE_CUTOFF && !blends.get(ext_index_of(raw) as usize).copied().unwrap_or(false))
-        };
-        // Glass belongs to neither phase here. It is drawn by
-        // `draw_transmissive` once the scene behind it has been captured, and
-        // leaving it in this pass would both hide what it is supposed to refract
-        // and refract a picture taken before it existed.
-        let glassy = self.transmissive_extras();
-        let solid = |raw: &InstanceRaw| {
-            !glassy.get(ext_index_of(raw) as usize).copied().unwrap_or(false)
-        };
-        let bucketize =
-            |want_opaque: bool, raws: &mut Vec<InstanceRaw>| -> Vec<(usize, Option<u32>, u32, u32)> {
-                bucket_into(
-                    instances
-                        .iter()
-                        .filter(|(_, _, raw)| solid(raw) && is_opaque(raw) == want_opaque)
-                        .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), raw)),
-                    raws,
-                )
-                .into_iter()
-                .map(|((mesh_idx, tex_key), start, count)| (mesh_idx, tex_key, start, count))
-                .collect()
-            };
-        let opaque_buckets = bucketize(true, &mut raws);
-        let transparent_buckets = bucketize(false, &mut raws);
+        // The plan holds the buckets (`ViewPlan::build`): opaque and
+        // transparent apart, packed into one instance list, so the
+        // transparent ones render last, blended, in first-appearance order.
+        self.make_resident(gpu, plan, 0);
+        let raws = &plan.records;
+        let opaque_buckets = &plan.opaque;
+        let transparent_buckets = &plan.transparent;
+        let skin_opaque = &plan.skin_opaque;
+        let skin_blended = &plan.skin_blended;
         // Buckets bound to a texture-array set draw through the array build
         // (`array_passes`): opaque ones after the rest, blended ones in their
         // place in the back-to-front order.
         let arrays = self.pools.array_ids.clone();
         let in_array = |b: &(usize, Option<u32>, u32, u32)| b.1.is_some_and(|t| arrays.contains(&t));
-        let (array_opaque, opaque_buckets): (Vec<_>, Vec<_>) = opaque_buckets.into_iter().partition(in_array);
+        let (array_opaque, opaque_buckets): (Vec<_>, Vec<_>) = opaque_buckets.iter().copied().partition(in_array);
         let want_arrays = !array_opaque.is_empty() || transparent_buckets.iter().any(in_array);
 
         // flsl buckets: (mesh, texture, binding) — phase comes from the SHADER
         // (its blend declaration), not the instance alpha.
         // A shader that shows the scene behind it waits for that scene to be
-        // captured, when the host says it will be.
+        // captured, when the host says it will be. Leaving whole buckets out
+        // keeps the rest in the order they would have had alone.
         let deferred = self.scene_readers_deferred;
-        let here = |sh: &FlslShader| !(deferred && sh.reads_scene_color);
-        let flsl_opaque = self.bucket_flsl(flsl, skins, &mut raws, |sh| sh.opaque && here(sh));
-        let flsl_blended = self.bucket_flsl(flsl, skins, &mut raws, |sh| !sh.opaque && here(sh));
-        // Skinned draws split opaque/blended on the same rule and draw in the same
-        // two phases — a translucent character is still a translucent character.
-        let skin_opaque = self.bucket_skins(skins, &mut raws, is_opaque);
-        let skin_blended = self.bucket_skins(skins, &mut raws, |r| !is_opaque(r));
-
-        self.ensure_instances(gpu, raws.len() as u32);
-        if !raws.is_empty() {
-            gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
-        }
+        let here = |b: &&FlslBucket| !(deferred && plan.class.get(b.2 as usize).copied().flatten().is_some_and(|c| c.reads_scene));
+        let flsl_opaque: Vec<FlslBucket> = plan.flsl_opaque.iter().filter(here).copied().collect();
+        let flsl_blended: Vec<FlslBucket> = plan.flsl_blended.iter().filter(here).copied().collect();
         self.note_bucket(bucket_t);
 
         let mut encoder = gpu
@@ -5419,9 +5491,8 @@ impl Raster {
             b.group(&mut rp, 2, field.unwrap_or(&self.empty_field_bind));
             b.vertex(&mut rp, 1, &self.instance_buf);
             let array_passes = want_arrays.then(|| self.array_passes(gpu));
-            // The opaque buckets are exactly those the prepass drew
-            // (`upload_opaque_depth_draws` keeps the same instances by the
-            // same rule), so once it primed this depth they draw where it
+            // The opaque buckets are exactly those the prepass drew (the
+            // plan's depth lists start with them), so once it primed this depth they draw where it
             // stands and nowhere else, each visible pixel shaded once.
             //
             // A raymarch pass in between (this pass then loads the colour)
@@ -5452,7 +5523,7 @@ impl Raster {
             }
             if !skin_opaque.is_empty() {
                 b.pipeline(&mut rp, if equal { &self.skin_primed_pipeline } else { &self.skin_pipeline });
-                self.draw_buckets(&mut rp, &mut b, &skin_opaque);
+                self.draw_buckets(&mut rp, &mut b, skin_opaque);
             }
             if let Some(ap) = array_passes.filter(|_| !array_opaque.is_empty()) {
                 b.pipeline(&mut rp, if equal { &ap.primed } else { &ap.pipeline });
@@ -5464,7 +5535,7 @@ impl Raster {
             self.draw_flsl_buckets(&mut rp, &mut b, &flsl_opaque);
             if !transparent_buckets.is_empty() {
                 let mut bound: Option<bool> = None;
-                for t in &transparent_buckets {
+                for t in transparent_buckets {
                     let a = in_array(t);
                     if bound != Some(a) {
                         match (a, array_passes) {
@@ -5478,7 +5549,7 @@ impl Raster {
             }
             if !skin_blended.is_empty() {
                 b.pipeline(&mut rp, &self.skin_transparent_pipeline);
-                self.draw_buckets(&mut rp, &mut b, &skin_blended);
+                self.draw_buckets(&mut rp, &mut b, skin_blended);
             }
             self.draw_flsl_buckets(&mut rp, &mut b, &flsl_blended);
             counts = b.n;
@@ -5512,8 +5583,8 @@ impl Raster {
             return;
         }
         self.begin_pass(gpu, globals);
-        self.ensure_instances(gpu, raws.len() as u32);
-        gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
+        self.encode_frame.bucket_records += raws.len() as u32;
+        self.write_instances(gpu, &raws);
         self.note_bucket(bucket_t);
         let mut encoder = gpu
             .device
@@ -5605,8 +5676,8 @@ impl Raster {
         if buckets.is_empty() && skin_buckets.is_empty() {
             return;
         }
-        self.ensure_instances(gpu, raws.len() as u32);
-        gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
+        self.encode_frame.bucket_records += raws.len() as u32;
+        self.write_instances(gpu, &raws);
         self.note_bucket(bucket_t);
 
         let mut encoder = gpu
@@ -5924,110 +5995,67 @@ impl Raster {
         self.submit(gpu, encoder);
     }
 
-    /// Bucket and upload the draws a depth-only pass renders: opaque instances,
-    /// opaque-shader flsl draws and opaque skinned parts, never glass. Shared by
-    /// the depth prepass and the sun shadow map, so the two cannot disagree
-    /// about what is solid.
-    #[allow(clippy::type_complexity)]
-    fn upload_opaque_depth_draws(
-        &mut self,
-        gpu: &Gpu,
-        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
-        keep: &dyn Fn(&(MeshId, Option<TexId>, InstanceRaw)) -> bool,
-        flsl: &[FlslDraw],
-        skins: &[SkinDraw],
-    ) -> DepthBuckets {
-        let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
-        let buckets = self.bucket_opaque_depth_draws(instances, keep, flsl, skins, &mut raws);
-        self.write_instances(gpu, &raws);
-        buckets
+    /// What the passes need to know of each `.flsl` binding's shader, by
+    /// binding id (`None` for a binding whose shader is gone).
+    fn flsl_classes(&self) -> Vec<Option<FlslClass>> {
+        self.flsl_bindings
+            .iter()
+            .map(|b| {
+                self.flsl_shaders.get(b.shader.0 as usize).map(|sh| FlslClass {
+                    opaque: sh.opaque,
+                    displaced: sh.displaced_depth.is_some(),
+                    reads_scene: sh.reads_scene_color,
+                })
+            })
+            .collect()
     }
 
-    /// Put `raws` in the instance buffer, from its start.
+    /// Sort a view's draws into buckets once for the frame: the plan the
+    /// sun map ([`Self::sun_shadow_pass_planned`]), the depth prepass
+    /// ([`Self::depth_prepass_planned`]) and the colour pass
+    /// ([`Self::draw_scene_planned`]) all draw from, uploaded by the first
+    /// of them to run.
+    ///
+    /// Make it after every surface extra and `.flsl` binding the frame uses
+    /// has been pushed, and draw from it in the same frame: it holds what
+    /// they said when it was made.
+    pub fn plan_view(
+        &mut self,
+        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
+        flsl: &[FlslDraw],
+        skins: &[SkinDraw],
+    ) -> ViewPlan {
+        let t = floptle_core::profile::Span::new();
+        let plan = ViewPlan::build(instances, flsl, skins, ExtFlags::of(&self.mat_ext_cpu), &self.flsl_classes());
+        self.encode_frame.bucket_records += plan.len() as u32;
+        self.note_bucket(t);
+        plan
+    }
+
+    /// Put `plan` at the start of the instance buffer unless it is still
+    /// there, with room behind it for `behind` more records.
+    fn make_resident(&mut self, gpu: &Gpu, plan: &mut ViewPlan, behind: u32) {
+        self.ensure_instances(gpu, plan.len() as u32 + behind);
+        if plan.uploaded == self.instances_gen {
+            return;
+        }
+        if !plan.is_empty() {
+            gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&plan.records));
+            self.encode_frame.instance_bytes += std::mem::size_of_val(plan.records.as_slice()) as u64;
+        }
+        self.instances_gen += 1;
+        plan.uploaded = self.instances_gen;
+    }
+
+    /// Put `raws` in the instance buffer, from its start. Whatever plan was
+    /// there is not any more.
     fn write_instances(&mut self, gpu: &Gpu, raws: &[InstanceRaw]) {
         self.ensure_instances(gpu, raws.len() as u32);
         if !raws.is_empty() {
             gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(raws));
+            self.encode_frame.instance_bytes += std::mem::size_of_val(raws) as u64;
         }
-    }
-
-    /// [`Self::upload_opaque_depth_draws`]'s buckets, appending their
-    /// instance data to `raws` (whose starts they count from), so two lists
-    /// can share one upload.
-    fn bucket_opaque_depth_draws(
-        &self,
-        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
-        keep: &dyn Fn(&DepthDraw) -> bool,
-        flsl: &[FlslDraw],
-        skins: &[SkinDraw],
-        raws: &mut Vec<InstanceRaw>,
-    ) -> DepthBuckets {
-        // Opaque instances only, bucketed by (mesh, texture) exactly like
-        // `draw_scene` (the texture is bound for the per-texel alpha discard).
-        // Opaque-SHADER flsl draws join in — their phase comes from the shader,
-        // not the instance alpha. Hash-grouped O(N) — see `group_by_key`.
-        // A blended material never primes depth, whatever its opacity.
-        let blend_flags = self.ext_blends();
-        let blended = |raw: &InstanceRaw| blend_flags.get(ext_index_of(raw) as usize).copied().unwrap_or(false);
-        // A screen-door surface is drawn in the opaque pass whatever its
-        // opacity, so it primes depth and casts its shadow too: `fs_depth`
-        // cuts the same pixels the colour pass does for the camera, and none
-        // for the sun.
-        let dither_flags: Vec<bool> =
-            self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| (c[1][0] as u32) & (EXT_DITHER_ALPHA | EXT_DISSOLVE) != 0).collect();
-        let dithered = |raw: &InstanceRaw| dither_flags.get(ext_index_of(raw) as usize).copied().unwrap_or(false);
-        const OPAQUE_CUTOFF: f32 = 0.999;
-        // A shader that moves its vertices draws depth through its own
-        // pipelines (`displaced` below); the built-in ones would put it where
-        // it was.
-        let flsl_opaque = |bind: &FlslBindingId| {
-            self.flsl_bindings
-                .get(bind.0 as usize)
-                .and_then(|b| self.flsl_shaders.get(b.shader.0 as usize))
-                .is_some_and(|s| s.opaque && s.displaced_depth.is_none())
-        };
-        // Glass is absent from the prepass. It is drawn last, after
-        // the scene behind it has been captured — and if it primed depth here,
-        // the opaque fragments behind it would be killed by early-z, so the
-        // capture would hold a glass-shaped hole and the glass would refract it.
-        let glassy = self.transmissive_extras();
-        let solid = |raw: &InstanceRaw| {
-            !glassy.get(ext_index_of(raw) as usize).copied().unwrap_or(false)
-        };
-        let buckets: Vec<(usize, Option<u32>, u32, u32)> = bucket_into(
-            instances
-                .iter()
-                .filter(|d| {
-                    let raw = &d.2;
-                    keep(d)
-                        && solid(raw)
-                        && (is_terrain(raw) || dithered(raw) || (raw.color[3] >= OPAQUE_CUTOFF && !blended(raw)))
-                })
-                .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), raw))
-                .chain(
-                    flsl.iter()
-                        .filter(|(_, _, bind, _)| flsl_opaque(bind))
-                        .map(|(id, tex, _, raw)| ((id.0 as usize, tex.map(|t| t.0)), raw)),
-                ),
-            raws,
-        )
-        .into_iter()
-        .map(|((mesh_idx, tex_key), start, count)| (mesh_idx, tex_key, start, count))
-        .collect();
-        // Skinned parts prime depth from the same posed vertices the color pass
-        // shades — `vs_skin` is `@invariant` through the shared tail, so the two
-        // agree bit for bit. Priming from the bind pose instead would depth-reject
-        // the pose, and a character would vanish behind its own T-stance.
-        let skin_buckets = self.bucket_skins_where(skins, raws, |d| match &d.flsl {
-            None => {
-                is_terrain(&d.instance)
-                    || dithered(&d.instance)
-                    || (d.instance.color[3] >= OPAQUE_CUTOFF && !blended(&d.instance))
-            }
-            Some(bind) => flsl_opaque(bind),
-        });
-        let displaced = self.bucket_flsl(flsl, skins, raws, |sh| sh.opaque && sh.displaced_depth.is_some());
-        (buckets, skin_buckets, displaced)
+        self.instances_gen += 1;
     }
 
     /// Depth for the surfaces of shaders with `output offset`, where they
@@ -6057,20 +6085,18 @@ impl Raster {
     /// largest scale, grown by the most a material's sway can bend it in this
     /// frame's wind (`vs`'s `0.1·sway·h²·|wind|·1.25`, with the height at its
     /// most, the sphere's diameter).
-    fn sun_reach(&self, g: &Globals) -> impl Fn(&(MeshId, Option<TexId>, InstanceRaw)) -> bool + use<> {
+    fn sun_reach<'a>(&'a self, g: &Globals, ext: &'a ExtFlags) -> impl Fn(usize, &InstanceRaw) -> bool + 'a {
         let box_ = crate::cull::Frustum::from_view_proj(Mat4::from_cols_array_2d(&g.view_proj));
         let wind = glam::Vec3::new(g.time[1], g.time[2], g.time[3]).length();
-        let sway: Vec<f32> = self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| c[2][2].max(0.0)).collect();
-        let reach: Vec<f32> = self.meshes.iter().map(|m| m.reach).collect();
-        move |(id, _, raw): &(MeshId, Option<TexId>, InstanceRaw)| {
-            let Some(&mesh_reach) = reach.get(id.0 as usize) else { return true };
+        move |mesh: usize, raw: &InstanceRaw| {
+            let Some(mesh_reach) = self.meshes.get(mesh).map(|m| m.reach) else { return true };
             let model = Mat4::from_cols_array_2d(&raw.model);
             let scale = model.x_axis.truncate().length().max(model.y_axis.truncate().length()).max(model.z_axis.truncate().length());
             let r = mesh_reach * scale;
             if !r.is_finite() {
                 return true;
             }
-            let s = sway.get(ext_index_of(raw) as usize).copied().unwrap_or(0.0);
+            let s = ext.sway(raw);
             let bend = 0.125 * s * (2.0 * r) * (2.0 * r) * wind;
             box_.contains_sphere(model.w_axis.truncate(), r * 1.01 + bend + 0.05)
         }
@@ -6079,14 +6105,6 @@ impl Raster {
     /// Triangles mesh `id` draws (0 for an unknown or empty one).
     pub fn mesh_triangles(&self, id: MeshId) -> u32 {
         self.meshes.get(id.0 as usize).map_or(0, |m| m.gpu_mesh.index_count / 3)
-    }
-
-    /// Whether an instance casts a sun shadow at all: every one does but those whose
-    /// surface extras say not ([`shadowless_extras`](Self::shadowless_extras)).
-    fn casts(&self) -> impl Fn(&InstanceRaw) -> bool + use<> {
-        let quiet: Vec<bool> =
-            self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| (c[1][0] as u32) & EXT_NO_CAST != 0).collect();
-        move |raw: &InstanceRaw| !quiet.get(ext_index_of(raw) as usize).copied().unwrap_or(false)
     }
 
     /// The last sun shadow map's opaque instances: how many it drew, of how
@@ -6125,6 +6143,27 @@ impl Raster {
         if globals.sun_map[0] < 0.5 {
             return;
         }
+        let mut plan = self.plan_view(instances, flsl, skins);
+        self.sun_shadow_pass_planned(gpu, globals, &mut plan, &[]);
+    }
+
+    /// [`Self::sun_shadow_pass`] from a plan made by [`Self::plan_view`],
+    /// plus `extra` casters only the sun map draws (shadow casters the
+    /// camera does not see). Each cascade keeps the members of the plan's
+    /// opaque buckets its box can see, bucket by bucket, and only those go
+    /// up again, behind the plan; the shader and skinned surfaces draw from
+    /// the plan where they lie.
+    pub fn sun_shadow_pass_planned(
+        &mut self,
+        gpu: &Gpu,
+        globals: Globals,
+        plan: &mut ViewPlan,
+        extra: &[(MeshId, Option<TexId>, InstanceRaw)],
+    ) {
+        self.sun_near_casts = (0, 0);
+        if globals.sun_map[0] < 0.5 {
+            return;
+        }
         let bucket_t = floptle_core::profile::Span::new();
         let globals = self.sun_map_lanes_for_texture(globals);
         let size = self.sun_map_size;
@@ -6135,10 +6174,19 @@ impl Raster {
         far.sun_extra[1] = 1.0;
         self.begin_pass(gpu, far);
         let near = (globals.sun_near[0] > 0.5).then_some(Globals { view_proj: far.sun_near_vp, ..far });
-        let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
-        let (far_buckets, far_counts) = self.sun_cascade_buckets(&far, instances, flsl, skins, &mut raws);
-        let near_buckets = near.as_ref().map(|g| self.sun_cascade_buckets(g, instances, flsl, skins, &mut raws));
-        self.write_instances(gpu, &raws);
+        // The cascades' records go behind the plan in the instance buffer,
+        // which keeps the plan for the prepass and the colour pass.
+        let base = plan.len() as u32;
+        let mut region: Vec<InstanceRaw> = Vec::with_capacity(plan.len());
+        let (far_buckets, far_counts) = self.sun_cascade(&far, plan, extra, &mut region, base);
+        let near_buckets = near.as_ref().map(|g| self.sun_cascade(g, plan, extra, &mut region, base));
+        self.encode_frame.bucket_records += (extra.len() * (1 + near.is_some() as usize)) as u32;
+        self.make_resident(gpu, plan, region.len() as u32);
+        if !region.is_empty() {
+            let at = base as u64 * std::mem::size_of::<InstanceRaw>() as u64;
+            gpu.queue.write_buffer(&self.instance_buf, at, bytemuck::cast_slice(&region));
+            self.encode_frame.instance_bytes += std::mem::size_of_val(region.as_slice()) as u64;
+        }
         self.sun_map_casts = far_counts;
         if let Some(g) = &near {
             gpu.queue.write_buffer(&self.sun_near_globals_buf, 0, bytemuck::bytes_of(g));
@@ -6180,28 +6228,21 @@ impl Raster {
         }
     }
 
-    /// One cascade's opaque draws inside `g.view_proj`'s box, appended to
-    /// `raws`, and (drawn, given).
-    fn sun_cascade_buckets(
+    /// One cascade's depth draws inside `g.view_proj`'s box, the culled
+    /// records appended to `region` (which starts at `base` in the instance
+    /// buffer), and (drawn, given).
+    fn sun_cascade(
         &self,
         g: &Globals,
-        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
-        flsl: &[FlslDraw],
-        skins: &[SkinDraw],
-        raws: &mut Vec<InstanceRaw>,
+        plan: &ViewPlan,
+        extra: &[(MeshId, Option<TexId>, InstanceRaw)],
+        region: &mut Vec<InstanceRaw>,
+        base: u32,
     ) -> (DepthBuckets, (usize, usize)) {
-        // Filtered as the records are bucketed, not into copies of the list
-        // first: those were two copies of every instance in the frame.
-        let casts = self.casts();
-        let reach = self.sun_map_cull.then(|| self.sun_reach(g));
-        let cast = std::cell::Cell::new(0usize);
-        let keep = |d: &(MeshId, Option<TexId>, InstanceRaw)| {
-            let ok = casts(&d.2) && reach.as_ref().is_none_or(|r| r(d));
-            cast.set(cast.get() + ok as usize);
-            ok
-        };
-        let buckets = self.bucket_opaque_depth_draws(instances, &keep, flsl, skins, raws);
-        (buckets, (cast.get(), instances.len()))
+        let ext = &plan.ext;
+        let reach = self.sun_map_cull.then(|| self.sun_reach(g, ext));
+        let keep = |mesh: usize, raw: &InstanceRaw| ext.casts(raw) && reach.as_ref().is_none_or(|r| r(mesh, raw));
+        plan.cull_depth(&keep, extra, region, base)
     }
 
     /// Record one cascade of the sun map into the `size`-texel square that
@@ -6258,16 +6299,23 @@ impl Raster {
         skins: &[SkinDraw],
         main_depth: &wgpu::Texture,
     ) {
+        let mut plan = self.plan_view(instances, flsl, skins);
+        self.depth_prepass_planned(gpu, globals, &mut plan, main_depth);
+    }
+
+    /// [`Self::depth_prepass_with`] from a plan made by
+    /// [`Self::plan_view`]: its opaque draws, where they lie in the plan.
+    pub fn depth_prepass_planned(&mut self, gpu: &Gpu, globals: Globals, plan: &mut ViewPlan, main_depth: &wgpu::Texture) {
         let bucket_t = floptle_core::profile::Span::new();
         let size = main_depth.size();
         self.claim_prepass(gpu, size);
         self.begin_pass(gpu, globals);
-
-        let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, instances, &|_| true, flsl, skins);
+        self.make_resident(gpu, plan, 0);
+        let (buckets, skin_buckets, displaced) = &plan.depth;
         self.note_bucket(bucket_t);
         // Buckets bound to a texture-array set draw through the array build.
         let (array_buckets, buckets): (Vec<_>, Vec<_>) =
-            buckets.into_iter().partition(|b| b.1.is_some_and(|t| self.pools.array_ids.contains(&t)));
+            buckets.iter().copied().partition(|b| b.1.is_some_and(|t| self.pools.array_ids.contains(&t)));
         let slot = &self.prepass[self.prepass_active.expect("claim_prepass ran")];
         let (prepass_tex, prepass_view) = (&slot.tex, &slot.view);
 
@@ -6304,9 +6352,9 @@ impl Raster {
             }
             if !skin_buckets.is_empty() {
                 b.pipeline(&mut rp, &self.skin_prepass_pipeline);
-                self.draw_buckets(&mut rp, &mut b, &skin_buckets);
+                self.draw_buckets(&mut rp, &mut b, skin_buckets);
             }
-            self.draw_displaced_depth(&mut rp, &mut b, &displaced);
+            self.draw_displaced_depth(&mut rp, &mut b, displaced);
             counts = b.n;
         }
         // Prime the frame's depth buffer with the prepass result.
@@ -6431,8 +6479,8 @@ impl Raster {
         self.surface_targets_made += u64::from(made);
         self.surface_passes += 1;
         self.begin_pass(gpu, globals);
-        self.ensure_instances(gpu, raws.len() as u32);
-        gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
+        self.encode_frame.bucket_records += raws.len() as u32;
+        self.write_instances(gpu, &raws);
         let (array_buckets, buckets): (Vec<_>, Vec<_>) =
             buckets.into_iter().partition(|b| b.1.is_some_and(|t| self.pools.array_ids.contains(&t)));
         self.note_bucket(bucket_t);

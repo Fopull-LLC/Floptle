@@ -1498,12 +1498,15 @@ impl Editor {
             // The sun's shadow map first: the volumetric fog marched with the
             // prepass reads it for its shafts.
             headless_mark!("sun shadow map");
+            // The view's draws sorted into buckets once, for the sun map,
+            // the prepass and the colour pass to share.
+            let mut view_plan = raster.plan_view(&instances, &flsl_draws, &skin_draws);
             let sun_t = floptle_core::profile::Span::new();
-            let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
             if raster.set_sun_map_layout(gpu, light_node.shadow_map_size, globals.sun_near[0] > 0.5) {
                 raymarch.set_sun_map(gpu, Some(raster.sun_map_view()));
             }
-            raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
+            // The casters the camera culled join the sun map alone.
+            raster.sun_shadow_pass_planned(gpu, globals, &mut view_plan, &shadow_casters);
             let sun_ms = sun_t.ms();
             crate::shading::note_raster_counts(&mut self.script_host.profile().borrow_mut(), raster, &instances, &flsl_draws, &skin_draws);
             let mut prepass_ms = 0.0;
@@ -1520,10 +1523,7 @@ impl Editor {
                 let hist = history_bind.as_ref().map(|(v, s)| (v, s));
                 headless_mark!("depth prepass");
                 let prepass_t = floptle_core::profile::Span::new();
-                prepass_and_bind(
-                    gpu, raster, raymarch, globals, &instances, &flsl_draws, &skin_draws,
-                    dtex, hist, rm,
-                );
+                prepass_and_bind(gpu, raster, raymarch, globals, &mut view_plan, dtex, hist, rm);
                 prepass_ms = prepass_t.ms();
             } else {
                 // No prepass this view: unbind, or this render would march the
@@ -1555,9 +1555,8 @@ impl Editor {
             headless_mark!("opaque + lighting");
             raster.defer_scene_readers(glass);
             let opaque_t = floptle_core::profile::Span::new();
-            raster.draw_scene_with(
-                gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,
-                raster_clear, Some(raymarch.field_bind()),
+            raster.draw_scene_planned(
+                gpu, color, depth, globals, &mut view_plan, raster_clear, Some(raymarch.field_bind()),
             );
             let opaque_ms = opaque_t.ms();
             let mut glass_ms = 0.0;

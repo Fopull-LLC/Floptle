@@ -105,6 +105,9 @@ pub struct GpuMesh {
     pub(crate) vbuf: wgpu::Buffer,
     pub(crate) ibuf: wgpu::Buffer,
     pub(crate) index_count: u32,
+    /// Where its indices start in `ibuf`: 0 for buffers of its own, its
+    /// range's start for a slot in the raster's shared geometry arena.
+    pub(crate) first_index: u32,
 }
 
 impl GpuMesh {
@@ -139,7 +142,7 @@ impl GpuMesh {
         });
         gpu.queue.write_buffer(&ibuf, 0, bytemuck::cast_slice(&data.indices));
 
-        Self { vbuf, ibuf, index_count: data.indices.len() as u32 }
+        Self { vbuf, ibuf, index_count: data.indices.len() as u32, first_index: 0 }
     }
 
     /// Empty buffers sized for `cap_verts`/`cap_indices` — a mesh whose geometry is
@@ -160,7 +163,7 @@ impl GpuMesh {
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Self { vbuf, ibuf, index_count: 0 }
+        Self { vbuf, ibuf, index_count: 0, first_index: 0 }
     }
 
     /// Overwrite the geometry of a [`with_capacity`](Self::with_capacity) mesh.
