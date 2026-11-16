@@ -927,6 +927,14 @@ struct DynSlot {
     /// Its range in the shared geometry arena; `None` for a slot with
     /// buffers of its own (the arena off, or a mesh too big for a page).
     arena: Option<ArenaRange>,
+    /// For a slot in the arena: the vertices its mesh has, and its indices
+    /// counted from its own first vertex. What moving it to another page
+    /// takes ([`Raster::maintain_geometry`]): the vertices are copied on the
+    /// GPU, but the indices hold the range's first vertex, so they are
+    /// written again from here. 4 bytes an index on the CPU, against 32 a
+    /// vertex plus 4 an index on the GPU.
+    verts: u32,
+    indices: Vec<u32>,
 }
 
 /// What the raster passes put into their command encoders: draws, the state
@@ -1183,6 +1191,27 @@ const SLOT_SHRINK: u32 = 4;
 
 /// A dynamic slot's size while it holds nothing.
 const EMPTY_SLOT_CAP: u32 = 4;
+
+/// Bytes of slot geometry [`Raster::maintain_geometry`] moves in one call,
+/// at most (it finishes the slot it is on): a few milliseconds of copying
+/// spread over frames rather than a page's worth in one.
+const ARENA_MOVE_BUDGET: u64 = 4 << 20;
+
+/// What the shared geometry arena holds ([`Raster::geometry_arena_stats`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GeometryArenaStats {
+    /// Pages in use.
+    pub pages: usize,
+    /// Bytes the pages hold on the GPU.
+    pub bytes: u64,
+    /// Bytes the slots' ranges take up in them.
+    pub live: u64,
+    /// Bytes written into the pages so far: slot writes, the copies a page
+    /// makes when it grows, and slots moved in.
+    pub written: u64,
+    /// Bytes of slots moved out of emptying pages so far.
+    pub moved: u64,
+}
 
 fn slot_cap(n: u32) -> u32 {
     n.saturating_mul(3).div_ceil(2).max(1024).next_power_of_two()
@@ -4691,21 +4720,103 @@ impl Raster {
             self.empty_geom = Some((mesh.vbuf, mesh.ibuf));
         }
         let (range, grown) =
-            if self.use_arena && tpaint_base != 0 { self.arena.alloc(gpu, cap_verts, cap_indices) } else { (None, None) };
+            if self.use_arena && tpaint_base != 0 { self.arena.alloc(gpu, cap_verts, cap_indices, None) } else { (None, None) };
         if let Some(page) = grown {
-            let (vbuf, ibuf) = self.arena.buffers(page);
-            for m in &mut self.meshes {
-                if m.dynamic.as_ref().and_then(|d| d.arena).is_some_and(|r| r.page == page) {
-                    m.gpu_mesh.vbuf = vbuf.clone();
-                    m.gpu_mesh.ibuf = ibuf.clone();
-                }
-            }
+            self.refresh_page(page);
         }
         let Some(range) = range else {
             return (GpuMesh::with_capacity(gpu, cap_verts, cap_indices), None);
         };
         let (vbuf, ibuf) = self.arena.buffers(range.page);
         (GpuMesh { vbuf: vbuf.clone(), ibuf: ibuf.clone(), index_count: 0, first_index: range.i_off }, Some(range))
+    }
+
+    /// Every slot on arena page `page` takes up its buffers, made new when
+    /// it grew.
+    fn refresh_page(&mut self, page: u32) {
+        let (vbuf, ibuf) = self.arena.buffers(page);
+        for m in &mut self.meshes {
+            if m.dynamic.as_ref().and_then(|d| d.arena).is_some_and(|r| r.page == page) {
+                m.gpu_mesh.vbuf = vbuf.clone();
+                m.gpu_mesh.ibuf = ibuf.clone();
+            }
+        }
+    }
+
+    /// Give memory back from the geometry arena: when a page has emptied
+    /// to under a quarter ([`geom_arena::GeomArena::victim`]), move its
+    /// slots to other pages, up to [`ARENA_MOVE_BUDGET`] bytes a call, and
+    /// let the page go once the last one has left. Call it once a frame;
+    /// terrain streaming does. Returns the bytes moved.
+    ///
+    /// A move is a GPU copy of the slot's vertices into its new range, its
+    /// indices written again offset by the new first vertex, and the word
+    /// in front of its colour block set to that vertex. The ranges are all
+    /// taken before any copy is recorded, so a page that grows to take them
+    /// is copied before the slots' vertices land in it.
+    pub fn maintain_geometry(&mut self, gpu: &Gpu) -> u64 {
+        let Some(victim) = self.arena.victim() else { return 0 };
+        let vb = geom_arena::VERTEX_BYTES;
+        self.arena.make_room_for(gpu, victim);
+        // Largest first: power-of-two blocks taken largest first pack a page
+        // with no gaps.
+        let mut on_victim: Vec<(usize, u32)> = (0..self.meshes.len())
+            .filter_map(|i| {
+                let r = self.meshes[i].dynamic.as_ref()?.arena.filter(|r| r.page == victim)?;
+                Some((i, r.v_cap))
+            })
+            .collect();
+        on_victim.sort_by_key(|&(i, cap)| (std::cmp::Reverse(cap), i));
+        let mut moves: Vec<(usize, ArenaRange, ArenaRange)> = Vec::new();
+        let mut moved = 0u64;
+        for (i, _) in on_victim {
+            if moved >= ARENA_MOVE_BUDGET {
+                break;
+            }
+            let Some(d) = self.meshes[i].dynamic.as_ref() else { continue };
+            let Some(old) = d.arena.filter(|r| r.page == victim) else { continue };
+            let bytes = d.verts as u64 * vb + d.indices.len() as u64 * 4;
+            let (new, grown) = self.arena.alloc(gpu, old.v_cap, old.i_cap, Some(victim));
+            if let Some(page) = grown {
+                self.refresh_page(page);
+            }
+            let Some(new) = new else { break };
+            // Taken now, so the next alloc cannot hand it out again.
+            if let Some(d) = self.meshes[i].dynamic.as_mut() {
+                d.arena = Some(new);
+            }
+            moves.push((i, old, new));
+            moved += bytes;
+        }
+        let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("arena-compact") });
+        for &(i, old, new) in &moves {
+            let d = self.meshes[i].dynamic.as_ref().expect("a dynamic slot");
+            let (verts, tpaint_base) = (d.verts, d.tpaint_base);
+            let indices = std::mem::take(&mut self.meshes[i].dynamic.as_mut().expect("a dynamic slot").indices);
+            if verts > 0 {
+                let (src, _) = self.arena.buffers(old.page);
+                let (dst, _) = self.arena.buffers(new.page);
+                enc.copy_buffer_to_buffer(src, old.v_off as u64 * vb, dst, new.v_off as u64 * vb, verts as u64 * vb);
+            }
+            self.arena.write_indices(gpu, &new, &indices);
+            Self::write_tpaint_first(gpu, &self.tpaint_buf, tpaint_base, Some(&new));
+            let (vbuf, ibuf) = self.arena.buffers(new.page);
+            let (vbuf, ibuf) = (vbuf.clone(), ibuf.clone());
+            let m = &mut self.meshes[i];
+            m.gpu_mesh.vbuf = vbuf;
+            m.gpu_mesh.ibuf = ibuf;
+            m.gpu_mesh.first_index = new.i_off;
+            if let Some(d) = m.dynamic.as_mut() {
+                d.indices = indices;
+            }
+        }
+        gpu.queue.submit([enc.finish()]);
+        // The old ranges go back last: the copies above read them.
+        for &(_, old, _) in &moves {
+            self.arena.free(old);
+        }
+        self.arena.moved += moved;
+        moved
     }
 
     /// What a dynamic slot draws with once its arena range is gone: nothing,
@@ -4723,11 +4834,45 @@ impl Raster {
         self.use_arena = on;
     }
 
-    /// The shared geometry arena: pages in use, bytes they hold on the GPU,
-    /// and bytes written into them so far (slot writes and the copies a page
-    /// makes when it grows).
-    pub fn geometry_arena_stats(&self) -> (usize, u64, u64) {
-        (self.arena.pages(), self.arena.bytes(), self.arena.written)
+    /// Hold an arena page to at most `verts` vertices and `indices` indices
+    /// (rounded up to a power of two, at least a first page's size, at most
+    /// the device's). For tests that want several pages without filling a
+    /// page of the usual size; pages made earlier keep their size.
+    pub fn set_geometry_page_limit(&mut self, verts: u32, indices: u32) {
+        self.arena.limit_pages(verts, indices);
+    }
+
+    /// The shared geometry arena: what it holds and what has moved through it.
+    pub fn geometry_arena_stats(&self) -> GeometryArenaStats {
+        GeometryArenaStats {
+            pages: self.arena.pages(),
+            bytes: self.arena.bytes(),
+            live: self.arena.live_bytes(),
+            written: self.arena.written,
+            moved: self.arena.moved,
+        }
+    }
+
+    /// The GPU memory meshes `ids` really hold, for a memory budget: the
+    /// buffers of the ones that own theirs, and for the ones in the shared
+    /// arena their share of the pages, slack and fragmentation included
+    /// (their ranges' share of the arena's live bytes, times what the pages
+    /// hold). Counted for every mesh in the arena, the shares add up to the
+    /// pages. [`Self::mesh_gpu_bytes`] is one mesh's own capacity instead.
+    pub fn mesh_gpu_held(&self, ids: impl IntoIterator<Item = MeshId>) -> u64 {
+        let (mut own, mut ranges) = (0u64, 0u64);
+        for id in ids {
+            let Some(m) = self.meshes.get(id.0 as usize) else { continue };
+            match m.dynamic.as_ref().and_then(|d| d.arena) {
+                Some(r) => ranges += r.v_cap as u64 * geom_arena::VERTEX_BYTES + r.i_cap as u64 * 4,
+                None => own += m.gpu_mesh.vbuf.size() + m.gpu_mesh.ibuf.size(),
+            }
+        }
+        let live = self.arena.live_bytes();
+        if live == 0 {
+            return own;
+        }
+        own + (ranges as u128 * self.arena.bytes() as u128 / live as u128) as u64
     }
 
     /// Create a dynamic mesh slot sized for `verts`/`indices` (with headroom) and, when
@@ -4745,7 +4890,7 @@ impl Raster {
         let tpaint_cap = if colored { cap_verts } else { 0 };
         let tpaint_base = self.tpaint_alloc(gpu, tpaint_cap);
         let (gpu_mesh, arena) = self.place_dynamic(gpu, cap_verts, cap_indices, tpaint_base);
-        let slot = DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap, arena };
+        let slot = DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap, arena, verts: 0, indices: Vec::new() };
 
         // Every slot binds the same white picture the same way, so they all
         // share one bind: a run of chunks then binds it once, not per chunk.
@@ -4817,7 +4962,7 @@ impl Raster {
             let (gpu_mesh, arena) = self.place_dynamic(gpu, cap_verts, cap_indices, tpaint_base);
             let m = &mut self.meshes[id.0 as usize];
             m.gpu_mesh = gpu_mesh;
-            m.dynamic = Some(DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap, arena });
+            m.dynamic = Some(DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap, arena, verts: 0, indices: Vec::new() });
         }
 
         let m = &mut self.meshes[id.0 as usize];
@@ -4829,6 +4974,11 @@ impl Raster {
                     return false;
                 }
                 m.gpu_mesh.index_count = data.indices.len() as u32;
+                if let Some(d) = m.dynamic.as_mut() {
+                    d.verts = data.vertices.len() as u32;
+                    d.indices.clear();
+                    d.indices.extend_from_slice(&data.indices);
+                }
             }
             None => {
                 if !m.gpu_mesh.write(gpu, data) {
@@ -4908,7 +5058,11 @@ impl Raster {
 
     /// Bytes mesh `id`'s vertex and index buffers hold on the GPU: their
     /// capacity, which for a dynamic slot is more than it draws. 0 for a mesh
-    /// that is not there.
+    /// that is not there. For a slot in the shared arena, the range it holds
+    /// there: one chunk's own capacity, which is what a chunk shrinking
+    /// gives back to the arena, not what the pages hold (they keep their
+    /// slack and fragmentation). A memory budget reads
+    /// [`Self::mesh_gpu_held`].
     pub fn mesh_gpu_bytes(&self, id: MeshId) -> u64 {
         self.meshes.get(id.0 as usize).map_or(0, |m| match m.dynamic.as_ref().and_then(|d| d.arena) {
             // Its share of the arena: the range it holds.
