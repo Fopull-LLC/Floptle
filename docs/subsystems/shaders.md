@@ -392,7 +392,9 @@ engine's own lighting it is missing, in the same units as `skyRadiance` and
   dark. Where anything is within reach it is four shadow rays a pixel; where
   nothing is (open water over a deep bed, open ground), one sweep of the
   field's pieces and one read of the field at the point settle it and
-  nothing is marched.
+  nothing is marched. Shallow water whose bed is a few units down, with the
+  sky clear above, is settled by two more reads above the point, which the
+  bed below is outside of.
 - `localLight(worldPos, n)` is the placed lights alone (point, spot and area
   lamps, with their shadows and the same ambient occlusion the lit path puts
   on them) on a matte surface: no sun, no sky. `albedo * localLight(worldPos,
@@ -449,6 +451,19 @@ proxies the scene has, since every pixel still checks each one's bound
 once: with all 32 of each in use it is still 0.7 to 1 ms, about a fifth
 of what it was.
 At a reach that gets to the bed the rays march, as under cover.
+
+Shallow water by a shore is the harder case: the bed is within reach, and
+collider proxies stand around. `sky_occlusion_by_a_beach.rs` draws a
+generated beach with thirty proxies from eye level and from 18 units up, and
+holds `skyOcclusion(worldPos, up, 24)` to within nine times the cost of six
+`fieldDistance` reads on the same frame (it measures 4 to 7 times on an RTX
+4060, where it was 17 to 23). Three quarters to nine tenths of that sea is
+settled by the two reads above the point; what is left marches, mostly
+water within reach of the land, the overhang and the proxies. The same file
+checks the answers against the four rays marched with no early outs at all:
+within 0.1 everywhere, and within 0.02 on all but a few pixels in a million,
+where a march started past a stretch already proved clear samples its
+penumbra at other places.
 
 ### 4.5 Moving the surface: `output offset`
 

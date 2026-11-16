@@ -1863,7 +1863,7 @@ fn vol_lift_voxel(i: u32, p: vec3<f32>) -> f32 {
 
 // A shadow ray's base lift off `p`, from the voxel sizes of the volumes
 // around it (`vol_lift_voxel`). Every field shadow ray starts from this:
-// `light_vis`, `point_field_vis`, and `sky_occlusion` by way of `field_near`.
+// `light_vis`, `point_field_vis`, and `sky_occlusion`.
 fn shadow_lift_base(p: vec3<f32>) -> f32 {
     var h = 0.012;
     let vols = min(u32(G.params.w), 32u);
@@ -2036,69 +2036,121 @@ fn field_sweep(ro: vec3<f32>, l: vec3<f32>, max_d: f32, k: f32, within: FieldSet
     return FieldSet(vmask, pmask, blobs, shapes, t_end);
 }
 
-// The pieces whose bounds come within `r` of `p`, penumbra reach included:
-// one sweep standing in for several rays that all start near `p` and stay
-// within `r` of it. It keeps every piece any of those rays' own sweeps
-// (`field_sweep`) could keep — the penumbra pad is measured the same way, to
-// the piece's centre, from a start at most `lift` off `p` — so narrowing a
-// ray's sweep to this set changes nothing it finds. Everything it leaves out
-// is at least `r` from `p`.
+// `sky_occlusion`'s four rays' relevance sweeps (`field_sweep`), all in one
+// pass over the field's pieces: for each ray, the same pieces and the same
+// end its own sweep over everything finds.
 //
-// It also gives `shadow_lift_base(p)`, from the same pass over the volumes.
-struct FieldNear {
-    pieces: FieldSet,
-    base: f32,
+// One pass rather than four because of how a GPU reads the pieces' bounds.
+// Four sweeps each walking the set a first pass had kept read a different
+// piece on each pixel of a group, one after another; this pass reads piece
+// `i` on every pixel at once, and tests it against all four rays. On a
+// beach with thirty collider proxies the four sweeps had cost three times
+// what six field reads do. Before the rays it checks a sphere round `p`
+// that holds them all, penumbra reach included (radius `r`, starts at most
+// `lift` off `p`): a piece outside it can be in no ray's sweep, so its
+// four ray tests are skipped.
+//
+// The volumes get only that check here (`vnear`); their ray tests wait
+// for `sky_sweep_vols`, after the point read, which settles open water over
+// a deep bed without them.
+struct SkySweep {
+    vnear: u32,
+    vmask: vec4<u32>,
+    pmask: vec4<u32>,
+    blobs: vec4<bool>,
+    shapes: vec4<bool>,
+    t_end: vec4<f32>,
 };
 
-fn field_near(p: vec3<f32>, r: f32, lift: f32, k: f32) -> FieldNear {
+fn sky_sweep(ro: array<vec3<f32>, 4>, l: array<vec3<f32>, 4>, p: vec3<f32>, r: f32, lift: f32, max_d: f32, k: f32) -> SkySweep {
     let pen_k = max(k, 1.0);
-    var vmask = 0u;
-    var pmask = 0u;
-    var blobs = false;
-    var h = 0.012;
+    var out = SkySweep(0u, vec4<u32>(0u), vec4<u32>(0u), vec4<bool>(false), vec4<bool>(false), vec4<f32>(0.0));
     let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (vol_absent(i)) { continue; }
-        h = max(h, vol_lift_voxel(i, p));
         let c = G.vol_tight_c[i].xyz;
         let pen = (length(c - p) + lift) / pen_k;
         let q = max(abs(p - c) - G.vol_tight_h[i].xyz - vec3<f32>(vol_pad(i) + pen), vec3<f32>(0.0));
         if (dot(q, q) < r * r) {
-            vmask = vmask | (1u << i);
+            out.vnear = out.vnear | (1u << i);
         }
     }
-    // A sphere of radius `s` is kept when its centre is closer than
+    // A sphere of radius `s` is near when its centre is closer than
     // s + (d + lift)/k + r, its pad growing with its own distance d: that is
     // d < (s + lift/k + r) / (1 - 1/k), compared squared.
     let grow = 1.0 / (1.0 - 1.0 / pen_k);
     let reach = (lift / pen_k + r) * grow;
     let bc = min(u32(G.params.y), 16u);
     for (var i = 0u; i < bc; i = i + 1u) {
-        let c = G.blobs[i].xyz - p;
+        let c = G.blobs[i].xyz;
         let keep = blob_bound(i) * grow + reach;
-        if (dot(c, c) < keep * keep) {
-            blobs = true;
+        if (dot(c - p, c - p) >= keep * keep) { continue; }
+        for (var j = 0u; j < 4u; j = j + 1u) {
+            let pj = max(dot(c - ro[j], l[j]), 0.0) / pen_k;
+            let s = sphere_span(ro[j], l[j], c, blob_bound(i) + pj);
+            if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
+                out.blobs[j] = true;
+                out.t_end[j] = max(out.t_end[j], min(s.y, max_d));
+            }
         }
     }
     let pc = min(u32(G.prox_count.x), 32u);
     for (var i = 0u; i < pc; i = i + 1u) {
         let bnd = prox_bound(i);
-        let c = bnd.xyz - p;
         let keep = bnd.w * grow + reach;
-        if (dot(c, c) < keep * keep) {
-            pmask = pmask | (1u << i);
+        if (dot(bnd.xyz - p, bnd.xyz - p) >= keep * keep) { continue; }
+        for (var j = 0u; j < 4u; j = j + 1u) {
+            let pj = max(dot(bnd.xyz - ro[j], l[j]), 0.0) / pen_k;
+            let s = sphere_span(ro[j], l[j], bnd.xyz, bnd.w + pj);
+            if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
+                out.pmask[j] = out.pmask[j] | (1u << i);
+                out.t_end[j] = max(out.t_end[j], min(s.y, max_d));
+            }
         }
     }
-    var shapes = false;
     let sc = min(u32(G.shape_meta.x), 4u);
     for (var i = 0u; i < sc; i = i + 1u) {
-        let c = G.shape_pos[i].xyz - p;
+        let c = G.shape_pos[i].xyz;
         let keep = G.shape_aux[i].x * grow + reach;
-        if (dot(c, c) < keep * keep) {
-            shapes = true;
+        if (dot(c - p, c - p) >= keep * keep) { continue; }
+        for (var j = 0u; j < 4u; j = j + 1u) {
+            let pj = max(dot(c - ro[j], l[j]), 0.0) / pen_k;
+            let s = sphere_span(ro[j], l[j], c, G.shape_aux[i].x + pj);
+            if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
+                out.shapes[j] = true;
+                out.t_end[j] = max(out.t_end[j], min(s.y, max_d));
+            }
         }
     }
-    return FieldNear(FieldSet(vmask, pmask, blobs, shapes, 0.0), max(0.03, h * 1.6));
+    return out;
+}
+
+// The rays' own tests of the volumes `sky_sweep` found near (`vnear`),
+// added to `w`: left until the point read has had its say, since open
+// water far over its bed needs none of them.
+fn sky_sweep_vols(w: SkySweep, ro: array<vec3<f32>, 4>, l: array<vec3<f32>, 4>, max_d: f32, k: f32) -> SkySweep {
+    let pen_k = max(k, 1.0);
+    var out = w;
+    var m = w.vnear;
+    while (m != 0u) {
+        let i = firstTrailingBit(m);
+        m = m & (m - 1u);
+        let c = G.vol_tight_c[i].xyz;
+        for (var j = 0u; j < 4u; j = j + 1u) {
+            let pj = max(dot(c - ro[j], l[j]), 0.0) / pen_k;
+            let s = slab_span(ro[j], safe_inv(l[j]), c, G.vol_tight_h[i].xyz + vec3<f32>(vol_pad(i) + pj));
+            if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
+                out.vmask[j] = out.vmask[j] | (1u << i);
+                out.t_end[j] = max(out.t_end[j], min(s.y, max_d));
+            }
+        }
+    }
+    return out;
+}
+
+// Ray `j`'s set from a `SkySweep`.
+fn sky_sweep_set(w: SkySweep, j: u32) -> FieldSet {
+    return FieldSet(w.vmask[j], w.pmask[j], w.blobs[j], w.shapes[j], w.t_end[j]);
 }
 
 // The shadow march's own field at `p` over `pieces`: the fused
@@ -2462,9 +2514,10 @@ fn sky_ray_lift(i: u32, base: f32) -> f32 {
 // screen-space AO and no probe volume still shadows its caves from the sun,
 // and this asks the same question of the sky. Where something is within
 // reach it is four shadow rays, several times a sun shadow; where nothing is
-// (open water, open ground) it settles that with one sweep and one field
-// read and marches nothing. `sky_visibility` only reaches for it where the
-// engine has no occlusion of its own to give.
+// (open water, open ground, shallow water whose bed is below the rays) it
+// settles that with one sweep and one to three field reads and marches
+// nothing. `sky_visibility` only reaches for it where the engine has no
+// occlusion of its own to give.
 //
 // The directions are fixed, not jittered: a pool reads the same every frame
 // and no temporal filter is needed. The penumbra estimator is kept hard
@@ -2479,15 +2532,28 @@ fn sky_occlusion(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
     // for what passes within t/K of it at range t. So matter further than
     // lift + max(lift, far)·(1 + 1/K) from `p` cannot darken it.
     //
-    // One sweep for the four rays, at the largest lift there can be (the
-    // lifts come from the same pass): only the pieces whose bounds come that
-    // close. Nothing does (open ground far from every piece): open.
-    let near = field_near(p, SKY_LIFT_CAP + max(SKY_LIFT_CAP, far) * (1.0 + 1.0 / K), SKY_LIFT_CAP, K);
-    let pieces = near.pieces;
-    if (pieces.vmask == 0u && pieces.pmask == 0u && !pieces.blobs && !pieces.shapes) {
+    // One sweep for the four rays (`sky_sweep`): only the pieces whose
+    // bounds come that close, and of those, the collider proxies, blobs and
+    // Field Shapes each ray passes near. Nothing near (open ground far from
+    // every piece): open.
+    let base = shadow_lift_base(p);
+    let side = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(n.x) > 0.9);
+    let t = normalize(cross(side, n));
+    let b = cross(n, t);
+    var ro: array<vec3<f32>, 4>;
+    var dir: array<vec3<f32>, 4>;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        ro[i] = p + n * sky_ray_lift(i, base);
+        dir[i] = sky_ray_dir(i, t, b, n);
+    }
+    var w = sky_sweep(ro, dir, p, SKY_LIFT_CAP + max(SKY_LIFT_CAP, far) * (1.0 + 1.0 / K), SKY_LIFT_CAP, far, K);
+    var near = FieldSet(w.vnear, 0u, false, false, 0.0);
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        near = field_set_union(near, sky_sweep_set(w, i));
+    }
+    if (field_set_empty(near)) {
         return 1.0;
     }
-    let base = near.base;
     let lift_max = sky_ray_lift(3u, base);
     let r = lift_max + max(lift_max, far) * (1.0 + 1.0 / K);
     // One read of the same field at `p` itself. Down to its cell size the
@@ -2500,26 +2566,53 @@ fn sky_occlusion(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
     // disagrees with them. Inside solid d0 is negative and never exits here.
     // This is the common case for a short reach, and it costs one sample
     // instead of four marches.
-    let d0 = field_set_d(p, pieces, 0u);
+    let d0 = field_set_d(p, near, 0u);
     if (d0 > r) {
         return 1.0;
     }
-    let side = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(n.x) > 0.9);
-    let t = normalize(cross(side, n));
-    let b = cross(n, t);
+    // Each ray's own sweep of the volumes too. With the rest, these are the
+    // pieces near enough each ray's path to hit or dim it: unlike the
+    // sphere, they know the rays go up, so a boat beside the point or a rock
+    // below it is in no ray's path. Together they are everything any ray
+    // can feel; if that is nothing, the point is open.
+    w = sky_sweep_vols(w, ro, dir, far, K);
+    var felt = FieldSet(0u, 0u, false, false, 0.0);
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        felt = field_set_union(felt, sky_sweep_set(w, i));
+    }
+    if (field_set_empty(felt)) {
+        return 1.0;
+    }
+    // Open water by a beach: the bed is a few units down and the sky is
+    // clear. Two reads above the point settle it (`sky_open_above`), one
+    // for the near half of every ray and one for the far half. They read
+    // the volumes, blobs and Field Shapes only: a ray with no collider proxy
+    // in its sweep is then open if both halves are, and needs marching only
+    // over a half that is not. A ray that passes near a proxy is marched
+    // whole, as before.
+    var ground = felt;
+    ground.pmask = 0u;
+    let halves = sky_open_above(p, n, base, far, ground);
+    let open = halves.x && halves.y;
+    if (open && felt.pmask == 0u) {
+        return 1.0;
+    }
     var vis = 0.0;
     for (var i = 0u; i < 4u; i = i + 1u) {
-        let dir = sky_ray_dir(i, t, b, n);
         let lift = sky_ray_lift(i, base);
-        let ro = p + n * lift;
-        // Each ray's own sweep, over the shared set only: the same pieces and
-        // the same end it would have found over everything.
-        let mine = field_sweep(ro, dir, far, K, pieces);
         // The same read says how far along this ray is certainly clear: a
         // sample at range t is at most lift + t from `p`, so while
         // d0 - lift - t stays over t/K it can neither hit nor dim. The march
-        // starts there, and a ray clear past its end needs no march at all.
-        let clear = max(lift, (d0 - lift) / (1.0 + 1.0 / K));
+        // starts there (or past the near half, if that read open), ends at
+        // the far half if that read open, and a ray clear past its end needs
+        // no march at all.
+        var clear = max(lift, (d0 - lift) / (1.0 + 1.0 / K));
+        var mine = sky_sweep_set(w, i);
+        if (mine.pmask == 0u) {
+            let half = 0.5 * max(lift, far);
+            if (halves.x) { clear = max(clear, half); }
+            if (halves.y) { mine.t_end = min(mine.t_end, half); }
+        }
         if (clear > max(lift, mine.t_end)) {
             vis = vis + 1.0;
             continue;
@@ -2527,9 +2620,96 @@ fn sky_occlusion(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
         // Twenty-four steps: the widest ray over flat open ground grows its
         // step by about a third each time and needs about twenty to leave a
         // 32-unit reach, and a ray that runs out of steps counts as blocked.
-        vis = vis + field_march(ro, dir, K, base * 3.0, lift, clear, 24, mine);
+        vis = vis + field_march(ro[i], dir[i], K, base * 3.0, lift, clear, 24, mine);
     }
     return vis / 4.0;
+}
+
+fn field_set_empty(s: FieldSet) -> bool {
+    return s.vmask == 0u && s.pmask == 0u && !s.blobs && !s.shapes;
+}
+
+fn field_set_union(a: FieldSet, b: FieldSet) -> FieldSet {
+    return FieldSet(a.vmask | b.vmask, a.pmask | b.pmask, a.blobs || b.blobs, a.shapes || b.shapes, max(a.t_end, b.t_end));
+}
+
+// The cosine with `n` of `sky_occlusion`'s ray `i` (`sky_ray_dir`).
+fn sky_ray_cos(i: u32) -> f32 {
+    return sqrt(1.0 - (f32(i) + 0.5) / 4.0);
+}
+
+// How far, in cells of the coarsest volume read, a read across a sphere may
+// run ahead of the field it stands for (`sky_slice_open`). A terrain's
+// stand-in is a grid of distances spread out from the surface by a chamfer
+// pass, read with trilinear filtering: over a generated beach with 2.2-unit
+// cells it read up to 1.1 units further, across 5 to 60 units, than one unit
+// per unit moved would allow. Half a cell covers that.
+const SKY_ABOVE_CELLS: f32 = 0.5;
+
+// How far up from `p` toward the rays' lowest sample each sphere's bottom
+// stays (`sky_slice_open`).
+const SKY_ABOVE_FLOAT: f32 = 0.5;
+
+// Is everything `sky_occlusion`'s four rays could feel from `p` empty, by
+// two reads of `pieces` above it? Every ray is cut in two halves, and each
+// half of all four is held in one sphere centred on the line up from `p`
+// (`sky_slice_open`). The spheres sit above the point, where the rays go,
+// so the bed under shallow water is outside them however near it is.
+fn sky_open_above(p: vec3<f32>, n: vec3<f32>, base: f32, far: f32, pieces: FieldSet) -> vec2<bool> {
+    var cell = 0.0;
+    let vols = min(u32(G.params.w), 32u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if ((pieces.vmask & (1u << i)) == 0u) { continue; }
+        let v = 2.0 * G.vol_half[i].xyz / max(G.vol_dims[i].xyz, vec3<f32>(1.0));
+        cell = max(cell, max(v.x, max(v.y, v.z)));
+    }
+    let margin = SKY_ABOVE_CELLS * cell + 0.002;
+    return vec2<bool>(sky_slice_open(p, n, base, far, 0.0, 0.5, pieces, margin), sky_slice_open(p, n, base, far, 0.5, 1.0, pieces, margin));
+}
+
+// One read at a point `h` up the normal from `p`, for the stretch of every
+// ray from `fa` to `fb` of its length. The sphere there holds every sample
+// such a stretch takes and its penumbra reach (t/K at range t), so if the
+// field there reads further than the sphere's radius, no sample in the
+// stretch can be hit or dimmed: the field changes by no more than the
+// distance moved, to within `margin`. Every sample point lies on one of
+// four straight stretches and the reach grows with t along it, so the
+// furthest any sample's reach gets from the centre is at a stretch's end:
+// eight distances, worked out exactly from the rays' angles and lifts.
+// Where the centre sits only decides how often this says yes, never
+// whether a yes is right.
+fn sky_slice_open(p: vec3<f32>, n: vec3<f32>, base: f32, far: f32, fa: f32, fb: f32, pieces: FieldSet, margin: f32) -> bool {
+    const K: f32 = 8.0;
+    // The centre: as low as it can be with the sphere's bottom still
+    // SKY_ABOVE_FLOAT of the way up to where the grazing ray starts the
+    // stretch (near enough the stretch's lowest sample). For a stretch end at height y and sideways x
+    // with reach e, the sphere holds it once sqrt((y - h)^2 + x^2) + e is
+    // at most h - q, with q that float plus e: h >= (y^2 + x^2 - q^2) / (2(y - q)).
+    let low = sky_ray_lift(3u, base) + max(sky_ray_lift(3u, base), far) * fa * sky_ray_cos(3u);
+    var h = 0.0;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let l = sky_ray_lift(i, base);
+        let c = sky_ray_cos(i);
+        let s = sqrt(1.0 - c * c);
+        for (var j = 0u; j < 2u; j = j + 1u) {
+            let tt = max(l, far) * select(fa, fb, j == 1u);
+            let y = l + tt * c;
+            let x = tt * s;
+            let q = SKY_ABOVE_FLOAT * low + tt / K;
+            h = max(h, (y * y + x * x - q * q) / (2.0 * max(y - q, 1e-4)));
+        }
+    }
+    var r = 0.0;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let l = sky_ray_lift(i, base);
+        let c = sky_ray_cos(i);
+        let s = sqrt(1.0 - c * c);
+        let ta = max(l, far) * fa;
+        let tb = max(l, far) * fb;
+        r = max(r, length(vec2<f32>(l + ta * c - h, ta * s)) + ta / K);
+        r = max(r, length(vec2<f32>(l + tb * c - h, tb * s)) + tb / K);
+    }
+    return field_set_d(p + n * h, pieces, 0u) > r + margin;
 }
 
 // How far `sky_visibility` looks for cover when it falls back to
