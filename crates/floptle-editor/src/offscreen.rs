@@ -1273,7 +1273,7 @@ impl Editor {
         let history_bind =
             history.map(|h| (h.view().clone(), h.sampler().clone()));
         let _ = ssr_rebuilt;
-        let rm = {
+        let (rm, volumes_dropped) = {
             let mut arr = [[0.0f32; 4]; 16];
             let n = blobs.len().min(16);
             if show_blobs {
@@ -1375,14 +1375,20 @@ impl Editor {
                 g.sky_uniforms = sky_uniform_vals;
             }
             crate::shading::stamp_air_style(&mut g, &light_node, &self.world, cam.world_position);
-            Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_regions, self.project.shadow_volumes, &self.world, &mut g, cam.world_position);
+            let volumes_dropped = Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_regions, self.project.shadow_volumes, &self.world, &mut g, cam.world_position);
             crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, None);
             if let Some(rmarch) = self.raymarch.as_ref() {
                 rmarch.gi().apply(&mut g, cam.world_position.into());
             }
-            g
+            (g, volumes_dropped)
         };
         crate::shading::note_shadow_casters(&mut self.script_host.profile().borrow_mut(), prox_count, &rm);
+        let asked = crate::shading::FieldAsked {
+            volumes_dropped,
+            blobs: if show_blobs { blobs.len() } else { 0 },
+            shapes_dropped: self.field_shapes_dropped,
+        };
+        crate::shading::note_field_slots(&mut self.script_host.profile().borrow_mut(), &rm, asked);
 
         // Live particles render in offscreen views too (the split Game viewport
         // must show what the game shows).

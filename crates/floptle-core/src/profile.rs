@@ -402,6 +402,16 @@ pub struct Cost {
     pub worst_ms: f32,
 }
 
+/// Baked volumes the SDF field folds together in one pass: terrains and mesh
+/// occluder bakes. The renderer's `MAX_VOLUMES` is this number; it lives here
+/// so `perf.counts()` can report the ceiling beside what used it.
+pub const FIELD_VOLUME_SLOTS: usize = 32;
+/// Blobs the field folds together in one pass (the renderer's `MAX_BLOBS`).
+pub const FIELD_BLOB_SLOTS: usize = 16;
+/// Field Shapes (authored SDF shaders) the field holds per scene (the
+/// renderer's `MAX_FIELD_SHAPES`).
+pub const FIELD_SHAPE_SLOTS: usize = 4;
+
 /// The counts a frame produced.
 ///
 /// Separate from the times because three of the four misdiagnosed tickets were
@@ -476,6 +486,23 @@ pub struct Counts {
     pub shadow_proxies_dropped: usize,
     /// Baked volumes the shadow march reads: terrain and mesh occluder bakes.
     pub shadow_volumes: usize,
+    /// The field's volume slots ([`FIELD_VOLUME_SLOTS`]) holding matter: terrains
+    /// (and any volume the raymarch draws) — what `fieldDistance`, the contact
+    /// shadow-AO and the sun shadows all read.
+    pub field_volumes_terrain: usize,
+    /// …those holding a mesh occluder bake, which only casts sun shadows.
+    pub field_volumes_shadow_only: usize,
+    /// …and the volumes left out: terrains past the slots, and occluder bakes
+    /// past the slots or the project's `shadow_volumes` budget (the nearest win).
+    pub field_volumes_dropped: usize,
+    /// Blobs the field was given, of [`FIELD_BLOB_SLOTS`]…
+    pub blobs: usize,
+    /// …and those left out because more were in the scene.
+    pub blobs_dropped: usize,
+    /// Field Shapes in the field, of [`FIELD_SHAPE_SLOTS`]…
+    pub field_shapes: usize,
+    /// …and those left out because more were in the scene.
+    pub field_shapes_dropped: usize,
     /// Opaque instances the sun's shadow map drew last frame…
     pub sun_map_draws: usize,
     /// …and those it was given but left out: lying outside the sun's box

@@ -10638,6 +10638,32 @@ mod host_tests {
         assert!(ms >= 0.0 && ms.is_finite(), "sweepMs reads {ms}");
     }
 
+    /// The SDF field's slots read as one table each: what holds a slot, the
+    /// ceiling, and what the ceiling left out.
+    #[test]
+    fn field_slot_counts_read_as_tables_with_their_ceilings() {
+        let host = ScriptHost::new();
+        host.profile().borrow_mut().enable(true);
+        let mut c = host.profile().borrow().counts();
+        c.field_volumes_terrain = 1;
+        c.field_volumes_shadow_only = 3;
+        c.field_volumes_dropped = 2;
+        c.blobs = 16;
+        c.blobs_dropped = 1;
+        c.field_shapes = 1;
+        host.profile().borrow_mut().set_counts(c);
+        let read: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) = host
+            .lua
+            .load(
+                "local c = perf.counts()
+                 local v, b, s = c.fieldVolumes, c.blobs, c.fieldShapes
+                 return v.terrain, v.shadowOnly, v.max, v.dropped, b.used, b.max, b.dropped, s.used, s.max, s.dropped",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(read, (1, 3, 32, 2, 16, 16, 1, 1, 4, 0));
+    }
+
     #[test]
     fn resolve_script_path_supports_nested_script_folders() {
         let dir = std::env::temp_dir().join(format!("floptle-host-test-{}", std::process::id()));

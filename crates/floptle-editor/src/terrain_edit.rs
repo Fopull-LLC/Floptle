@@ -5836,6 +5836,10 @@ impl Editor {
     /// with the same smin the old CPU combine used (k = 0.6).
     /// (Associated fn taking explicit fields — callers sit inside the render section
     /// where `self.gpu`/`self.egui` are mutably borrowed, so `&self` is unavailable.)
+    ///
+    /// Returns how many volumes were left out for want of a slot: terrains past
+    /// [`floptle_render::MAX_VOLUMES`], and occluder bakes past the slots or
+    /// `budget` (`perf.counts().fieldVolumes.dropped`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn fill_terrain_volumes(
         terrains: &HashMap<Entity, EditorTerrain>,
@@ -5846,8 +5850,9 @@ impl Editor {
         world: &floptle_core::World,
         g: &mut RaymarchGlobals,
         cam_world: DVec3,
-    ) {
+    ) -> usize {
         g.params[2] = 0.1; // blob↔terrain blend k (the old single-field look)
+        let mut dropped = slots.len().saturating_sub(floptle_render::MAX_VOLUMES);
         for (i, slot) in slots.iter().take(floptle_render::MAX_VOLUMES).enumerate() {
             let e = slot.e;
             // A just-deleted terrain leaves a stale slot until the atlas is
@@ -5929,6 +5934,7 @@ impl Editor {
                 })
             })
             .collect();
+        dropped += cands.len().saturating_sub(room);
         if cands.len() > room {
             cands.sort_by(|a, b| a.gap.total_cmp(&b.gap).then(a.id.cmp(&b.id)));
         } else {
@@ -5941,6 +5947,7 @@ impl Editor {
             g.vol_half[i] = [c.half[0], c.half[1], c.half[2], 0.0];
             g.vol_atlas[i][3] = (c.region + 1) as f32;
         }
+        dropped
     }
 
     /// The surface [`Material`] a terrain with none of its own shades with.
@@ -6026,7 +6033,8 @@ mod occluder_tests {
         near.sort_by(|a, b| a.0.total_cmp(&b.0));
         let regions = HashMap::from([(key.clone(), 3usize)]);
         let mut g = floptle_render::RaymarchGlobals::default();
-        crate::Editor::fill_terrain_volumes(&HashMap::new(), &[], &occluders, &regions, 32, &world, &mut g, DVec3::ZERO);
+        let dropped = crate::Editor::fill_terrain_volumes(&HashMap::new(), &[], &occluders, &regions, 32, &world, &mut g, DVec3::ZERO);
+        assert_eq!(dropped, 8, "forty casters for 32 instances leave eight out (perf.counts().fieldVolumes.dropped)");
         let placed: Vec<usize> = (0..floptle_render::MAX_VOLUMES).filter(|&i| g.vol_center[i][3] >= 0.5).collect();
         assert_eq!(placed.len(), 32, "the budget was not filled, or overfilled");
         assert!(placed.iter().all(|&i| g.vol_atlas[i][3] == 4.0), "an instance did not draw from the shared bake");
@@ -6038,9 +6046,10 @@ mod occluder_tests {
 
         // Everyone fits: no choice to make, all 40 casters placed.
         let mut g = floptle_render::RaymarchGlobals::default();
-        crate::Editor::fill_terrain_volumes(&HashMap::new(), &[], &occluders, &regions, 64, &world, &mut g, DVec3::ZERO);
+        let dropped = crate::Editor::fill_terrain_volumes(&HashMap::new(), &[], &occluders, &regions, 64, &world, &mut g, DVec3::ZERO);
         let n = (0..floptle_render::MAX_VOLUMES).filter(|&i| g.vol_center[i][3] >= 0.5).count();
         assert_eq!(n, floptle_render::MAX_VOLUMES, "a budget past the shader's capacity must stop at it");
+        assert_eq!(dropped, 40 - floptle_render::MAX_VOLUMES, "the shader's slots, not the budget, left these out");
     }
 
     /// **A prop a script resizes every frame is baked once, not every frame.**

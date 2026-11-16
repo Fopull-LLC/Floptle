@@ -582,6 +582,23 @@ fn counts_table(lua: &Lua, c: &Counts) -> mlua::Result<Table> {
     out.set("shadowProxies", c.shadow_proxies)?;
     out.set("shadowProxiesDropped", c.shadow_proxies_dropped)?;
     out.set("shadowVolumes", c.shadow_volumes)?;
+    // The SDF field's fixed slots: what each holds, its ceiling, and what
+    // the ceiling left out. A seventeenth blob or a fifth Field Shape
+    // otherwise just isn't there, with nothing to say why.
+    let slots = |used: &[(&str, usize)], max: usize, dropped: usize| -> mlua::Result<Table> {
+        let t = lua.create_table()?;
+        for &(k, n) in used {
+            t.set(k, n)?;
+        }
+        t.set("max", max)?;
+        t.set("dropped", dropped)?;
+        Ok(t)
+    };
+    use floptle_core::profile::{FIELD_BLOB_SLOTS, FIELD_SHAPE_SLOTS, FIELD_VOLUME_SLOTS};
+    let vols = [("terrain", c.field_volumes_terrain), ("shadowOnly", c.field_volumes_shadow_only)];
+    out.set("fieldVolumes", slots(&vols, FIELD_VOLUME_SLOTS, c.field_volumes_dropped)?)?;
+    out.set("blobs", slots(&[("used", c.blobs)], FIELD_BLOB_SLOTS, c.blobs_dropped)?)?;
+    out.set("fieldShapes", slots(&[("used", c.field_shapes)], FIELD_SHAPE_SLOTS, c.field_shapes_dropped)?)?;
     // What the sun's shadow map drew of what it was given; the rest lay
     // outside its box. And the triangles the colour pass was handed.
     out.set("sunMapDraws", c.sun_map_draws)?;
