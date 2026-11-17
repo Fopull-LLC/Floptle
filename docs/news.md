@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.119.0 — "Open Water"**. Seas with swells that float boats on the
+**v0.119.1 — "Open Water"**. Seas with swells that float boats on the
 waves you see, lakes that fill, spill and settle, rivers laid down as a line
 of points, and splashes scripts can hear. Spring bones swing hair, cables
 and tails. Models with many pictures draw as one, and busy scenes cost far
