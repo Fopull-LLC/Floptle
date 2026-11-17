@@ -472,7 +472,7 @@ cone's answer in a grid round the camera (`crates/floptle-render/src/sky_cache.r
 four nested cubes of 48 cells, 1 to 8 units across, each cell holding the
 cone along the six axis directions, refilled on the GPU only where
 something changed (a scroll, an edit, a volume or blob that moved, a proxy
-that came to rest or started moving), never more than a budget of 4096
+that came to rest or started moving), never more than a budget of 2048
 cells a frame, so even starting again costs no frame more than any other.
 One view keeps a cache (the first to ask for it); any other camera's
 passes march, as without it. A pixel then reads the eight cells round it. It answers one reach (calls at any

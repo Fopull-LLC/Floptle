@@ -959,7 +959,10 @@ fn fog_to_pixel(px: vec2<u32>, pdims: vec2<u32>) -> vec4<u32> {
 const SKYC_ATLAS_W: u32 = 1536u;
 
 // A cell's place in the dither, from its place in storage (which stays the
-// same while the cell stands for the same place).
+// same while the cell stands for the same place). Taken a tile of 8 by 4
+// texels at a time, about what one GPU wave shades: a dither cell by cell
+// left each wave with one or two cells to fill and the rest idle, so a
+// frame's few thousand cells cost what tens of thousands would.
 fn skyc_hash(i: u32) -> u32 {
     var x = i * 747796405u + 2891336453u;
     x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
@@ -981,7 +984,7 @@ fn fs_sky_fill(in: VOut) -> @location(0) vec4<u32> {
     let off = (s + vec3<u32>(SKYC_DIMS) - skyc_mod(l)) % vec3<u32>(SKYC_DIMS);
     let cell = skyc_f(o + 3u);
     let c = skyc_corner(l) + (vec3<f32>(off) + vec3<f32>(0.5)) * cell;
-    let h = skyc_hash(i);
+    let h = skyc_hash((px.y / 4u) * (SKYC_ATLAS_W / 8u) + px.x / 8u);
     var due = false;
     let nb = min(skyc_word(SKYC_BOXES), 16u);
     for (var k = 0u; k < nb; k = k + 1u) {

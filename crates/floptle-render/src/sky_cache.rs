@@ -65,7 +65,7 @@ pub const SKY_DIMS: u32 = 48;
 /// The finest level's cell size, in world units; each level doubles it.
 pub const SKY_CELL0: f32 = 1.0;
 /// Cells refilled per frame, at most.
-pub const SKY_BUDGET: u32 = 4096;
+pub const SKY_BUDGET: u32 = 2048;
 /// Frames a proxy must hold still before the cache takes it in.
 pub const SKY_SETTLE_FRAMES: u32 = 30;
 /// Boxes refilling at once (the header's room for them).
@@ -88,8 +88,10 @@ const FOLLOW_TOLERANCE: f64 = 1.0;
 const CONE_K: f32 = 8.0;
 const CONE_LIFT_CAP: f32 = 3.0;
 /// Longest dither, frames, by priority: wrong cover showing (an edit, a
-/// bake-out) is put right within a second; anything else within ten.
-const CAP_URGENT: u32 = 60;
+/// bake-out) is put right within two seconds (a box round a change reaches
+/// as far as a cone can feel it, most of the two finest levels, about 150
+/// thousand cells: 70-odd frames at the budget); anything else within ten.
+const CAP_URGENT: u32 = 120;
 const CAP_CALM: u32 = 600;
 
 /// Texels across the cache's atlas (rows of it are what the buffer holds).
@@ -869,8 +871,9 @@ mod tests {
         let d2 = SKY_DIMS * SKY_DIMS;
         assert_eq!(c.stats().scrolled, [d2, 0, 0, 0]);
         assert!(!c.stats().reset.iter().any(|r| *r));
-        // Only that slab refills, and only the finest level is visited.
-        assert_eq!(f.cells, d2);
+        // Only that slab refills, within the budget, and only the finest
+        // level is visited.
+        assert_eq!(f.cells, d2 / d2.div_ceil(SKY_BUDGET));
         assert_eq!(f.due, [true, false, false, false]);
         let cam3 = cam2 + DVec3::X;
         c.plan(&view(cam3), &globals(cam3), &[], &[]);
@@ -917,7 +920,7 @@ mod tests {
         }
         assert_eq!(f.header[H_BOX + 3] >> 24, 0xF, "on every level");
         let period = f.header[H_BOX + 3] & 0xFF_FFFF;
-        assert!(period <= CAP_URGENT, "an edit is put right within a second: {period} frames");
+        assert!(period <= CAP_URGENT, "an edit is put right within two seconds: {period} frames");
         // The box is camera-relative: the camera moving moves it the other way.
         let cam2 = cam + DVec3::new(0.0, 0.0, 0.25);
         let f = c.plan(&view(cam2), &globals(cam2), &[], &[]);
@@ -1066,7 +1069,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bake_out_is_put_right_within_a_second() {
+    fn a_bake_out_is_put_right_within_two_seconds() {
         let mut c = SkyCache::new(24.0);
         let cam = DVec3::new(0.0, 2.0, 0.0);
         let mut g = globals(cam);

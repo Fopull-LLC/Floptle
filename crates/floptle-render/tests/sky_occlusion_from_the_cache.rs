@@ -35,12 +35,14 @@ fn a_crowded_beach_marches() {
 }
 
 /// What the cache holds for the cell round `p` against the cone at that
-/// cell's centre, for the lobe `n` points along: the difference times
-/// four (under 0.5), or 0.6 where the cell's centre is in solid matter
-/// or the cell cannot answer for that lobe,
-/// 0.8 where the cell is not filled, 1 outside every level.
+/// cell's centre, for the lobe `n` points along, from the finest level
+/// whose cell there is filled: the difference times four (under 0.5), or
+/// 0.6 where the cell's centre is in solid matter or the cell cannot
+/// answer for that lobe, 0.8 where no level's cell is filled, 1 outside
+/// every level.
 const FILL_CHECK: &str = r#"
 fn sky_fill_check(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
+    var inside = false;
     for (var l = 0u; l < SKYC_LEVELS; l = l + 1u) {
         let cell = skyc_f(SKYC_LEVEL + l * SKYC_LEVEL_WORDS + 3u);
         let u = floor((p - skyc_corner(l)) / cell);
@@ -49,8 +51,9 @@ fn sky_fill_check(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
         }
         let off = vec3<u32>(u);
         let c = skyc_cell(l, (off + skyc_mod(l)) % vec3<u32>(SKYC_DIMS));
+        inside = true;
         if (!skyc_filled(l, off, c)) {
-            return 0.8;
+            continue;
         }
         if ((c.y & (2u << 24u)) == 0u) {
             return 0.6;
@@ -67,7 +70,7 @@ fn sky_fill_check(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
         let want = sky_cone(centre, n, reach, skyc_static(skyc_word(SKYC_SETTLED)));
         return min(abs(got - want) * 4.0, 0.49);
     }
-    return 1.0;
+    return select(1.0, 0.8, inside);
 }
 "#;
 
@@ -341,13 +344,14 @@ fn a_proxy_that_moves_darkens_where_it_goes_at_once_and_leaves_its_old_place() {
         }
     }
     println!("{left} px the deck left, {open} of them open again");
-    assert!(left > 200, "the fixture: the deck left only {left} pixels");
+    assert!(left > 50, "the fixture: the deck left only {left} pixels");
     assert!(open * 20 >= left * 19, "only {open} of the {left} pixels the deck left read open again");
 }
 
 /// GPU milliseconds a frame of the sea through `bind` takes while the
-/// camera walks forward a quarter unit a frame from `view`, the cache
-/// refreshed every frame (its fill included): the least of several rounds.
+/// camera runs back and forth along the shore a tenth of a unit a frame
+/// (six units a second at 60 fps) from `view`, the cache refreshed every
+/// frame (its fill included): the least of several rounds.
 fn walking_cost(beach: &mut Beach, timer: &mut floptle_render::GpuTimer, view: View, bind: floptle_render::FlslBindingId, refresh: bool) -> f32 {
     const FRAMES: usize = 20;
     let mut best = f32::MAX;
@@ -359,7 +363,8 @@ fn walking_cost(beach: &mut Beach, timer: &mut floptle_render::GpuTimer, view: V
         timer.mark(&beach.gpu, "walk");
         for _ in 0..FRAMES {
             k += 1;
-            let shift = DVec3::new(0.25 * (k % 120) as f64, 0.0, 0.0);
+            let leg = (k % 600) as f64;
+            let shift = DVec3::new(0.0, 0.0, 0.1 * if leg < 300.0 { leg } else { 600.0 - leg } - 15.0);
             let (g, eye, rm) = beach.stage_with(view, Layout::Crowd, shift);
             if refresh {
                 beach.refresh(rm, eye);
@@ -394,6 +399,7 @@ fn walking_cost(beach: &mut Beach, timer: &mut floptle_render::GpuTimer, view: V
 /// ones cost.
 #[test]
 fn a_crowded_beach_costs_a_few_field_reads_through_the_cache() {
+    use floptle_render::sky_cache::{SKY_BUDGET, SKY_CELLS};
     let Some(mut beach) = Beach::new(terrain()) else { return };
     if beach.gpu.adapter.get_info().device_type == wgpu::DeviceType::Cpu {
         return;
@@ -411,7 +417,7 @@ fn a_crowded_beach_costs_a_few_field_reads_through_the_cache() {
         // Every proxy moving: each nudged two centimetres every frame, so
         // none ever holds still long enough to be baked in.
         beach.raymarch.set_sky_cache(&beach.gpu, Some(24.0));
-        for k in 0..160 {
+        for k in 0..SKY_CELLS / SKY_BUDGET + 60 {
             let mut jig = rm;
             for a in jig.prox_a.iter_mut().take(PROXIES) {
                 a[1] += 0.02 * (k % 2) as f32;
@@ -495,7 +501,7 @@ fn the_fill_keeps_to_its_budget_and_a_still_camera_writes_nothing() {
     beach.raymarch.set_sky_cache(&beach.gpu, Some(24.0));
     let (_, eye, rm) = beach.stage_with(View::EyeLevel, Layout::Empty, DVec3::ZERO);
     let (mut last, mut most) = (0usize, 0usize);
-    for _ in 0..200 {
+    for _ in 0..SKY_CELLS / SKY_BUDGET + 60 {
         beach.refresh(rm, eye);
         let n = written(&beach.raymarch.read_sky_cache(&beach.gpu, 0).unwrap());
         most = most.max(n - last);

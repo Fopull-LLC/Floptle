@@ -384,10 +384,15 @@ impl Beach {
     }
 
     /// Refresh the sky cache until a camera standing still at `eye` has
-    /// filled every level.
+    /// filled every level: nothing refilling or waiting (or a thousand
+    /// frames pass).
     pub fn settle(&mut self, rm: RaymarchGlobals, eye: DVec3) {
-        for _ in 0..200 {
+        for k in 0..1000 {
             self.refresh(rm, eye);
+            let st = self.raymarch.sky_cache_stats(0).unwrap_or_default();
+            if k > 2 && st.boxes == 0 && st.waiting == 0 {
+                break;
+            }
         }
         self.gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
     }
