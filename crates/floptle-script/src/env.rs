@@ -359,10 +359,10 @@ thread_local! {
 #[inline(always)]
 fn armed_tier_on() -> bool {
     #[cfg(test)]
-    if CHUNK_ONLY.with(|c| c.get()) {
-        return false;
-    }
-    true
+    let on = !CHUNK_ONLY.with(|c| c.get());
+    #[cfg(not(test))]
+    let on = true;
+    on
 }
 
 /// The stamp [`stamp_node_table`] leaves for `tr` and `body`, worked out
