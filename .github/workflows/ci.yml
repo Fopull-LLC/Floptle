@@ -73,7 +73,13 @@ jobs:
       - name: clippy (zero warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Two tests at a time. On this runner every GPU test gets llvmpipe,
+      # whose video memory is ordinary RAM: four of the editor's terrain tests
+      # at once took its library binary to 15.3 GB of the runner's 16, and
+      # three runs lost the runner outright partway through.
       - name: test
+        env:
+          RUST_TEST_THREADS: 2
         run: cargo test --workspace --all-targets
 
       # The configuration an exported game ships: the engine without `editor-ui`.
