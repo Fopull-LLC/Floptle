@@ -1,5 +1,11 @@
 ## Just shipped
 
+**v0.119.0 — "Open Water"**. Seas with swells that float boats on the
+waves you see, lakes that fill, spill and settle, rivers laid down as a line
+of points, and splashes scripts can hear. Spring bones swing hair, cables
+and tails. Models with many pictures draw as one, and busy scenes cost far
+less CPU a frame.
+
 **v0.118.2 — "Full Speed"**. Forests, fog, shadows and upscaling cost a
 fraction of what they did: cut-out leaves are shaded once per pixel, fog can
 be built in a grid, and FSR 1 brings a lower render scale back up sharp.
