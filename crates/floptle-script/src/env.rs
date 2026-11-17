@@ -154,6 +154,43 @@ pub(crate) fn params_table(
     Ok(t)
 }
 
+// Armed tables, from the vendored Luau (`third_party/luau0-src`, see
+// FLOPTLE-PATCHES.md). An armed table is an ordinary table to every script;
+// the first write of any kind to it (a field, `rawset`, `setmetatable`,
+// `table.*`, a raw set from the engine) quietly disarms it. So "still armed"
+// means "nothing has written to it since it was armed", read with no Lua call.
+unsafe extern "C" {
+    fn lua_floptle_arm(p: *const std::ffi::c_void);
+    fn lua_floptle_armed(p: *const std::ffi::c_void) -> std::ffi::c_int;
+}
+
+/// Arm `t`, so [`armed_at`] answers true until something writes to it. A
+/// frozen table stays frozen.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn arm(t: &Table) {
+    // SAFETY: `t` is a live table, and its address is what the patch reads.
+    unsafe { lua_floptle_arm(t.to_pointer()) }
+}
+
+/// Whether the table at `p` (from [`Table::to_pointer`]) is still armed.
+///
+/// # Safety
+/// `p` must be the address of a table that is still alive: one the caller
+/// holds a reference or registry key to. Luau's collector never moves an
+/// object, so the address stays good for as long as the table lives.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) unsafe fn armed_at(p: *const std::ffi::c_void) -> bool {
+    // SAFETY: the caller's promise.
+    unsafe { lua_floptle_armed(p) != 0 }
+}
+
+/// [`armed_at`] for a table in hand.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn is_armed(t: &Table) -> bool {
+    // SAFETY: `t` keeps the table alive for the call.
+    unsafe { armed_at(t.to_pointer()) }
+}
+
 /// Create the script's own-node table: `{__id}` under the node metatable, with the
 /// transform stamped into it as direct fields.
 ///
