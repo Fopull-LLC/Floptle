@@ -265,6 +265,10 @@ thread_local! {
     /// them (`env::stamp_unchanged`) — the guard that the check is reached.
     /// Test-only.
     pub(crate) static STAMPS_SKIPPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The share of `STAMPS_SKIPPED` answered by `hookless_here`, before
+    /// any refresh began — the guard that the early answer is reached.
+    /// Test-only.
+    pub(crate) static STAMPS_SKIPPED_EARLY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Nanoseconds spent inside the at-rest check's Lua call, while
     /// `STAMP_CHECK_TIMED` is set — the bench's split between the call and
     /// the rest of the hookless road. Test-only.
@@ -7607,7 +7611,7 @@ impl ScriptHost {
                 // road below, a `String` key and a node stamp each, three
                 // passes a frame and every tick, in no hook's figure.
                 if inst.enabled {
-                    match self.hookless_here(e.index(), &inst.kind, pass) {
+                    match self.hookless_here(e.index(), &inst.kind, pass, &tr) {
                         Hookless::No => {}
                         Hookless::Nothing => {
                             ran = true;
@@ -9573,9 +9577,17 @@ impl ScriptHost {
     /// so a hookless library script, or a `fixedUpdate`-only one on the frame
     /// pass before its first tick, costs two hash lookups a pass.
     ///
+    /// A kept table at rest is answered here too, before any of the work a
+    /// refresh starts with (a profile span, the memory owner, the budget
+    /// clock, the registry fetch): still armed since a clean stamp from this
+    /// same transform, on a node that still has no body, means nothing wrote
+    /// to it and a stamp would change nothing (`KeptNode::at_rest`). That is
+    /// most kept tables on most passes, and it costs one body lookup and one
+    /// byte read over the two lookups above.
+    ///
     /// Not for a first frame pass (`start` and the first-pass warnings belong
     /// to `tick_instance`), nor a missing instance or kind (nothing to skip).
-    fn hookless_here(&self, eid: u32, name: &str, pass: Pass) -> Hookless {
+    fn hookless_here(&self, eid: u32, name: &str, pass: Pass, tr: &Transform) -> Hookless {
         let Some(kid) = self.kind_id(name) else { return Hookless::No };
         let Some(inst) = self.instances.get(&(eid, kid)) else { return Hookless::No };
         if !inst.started {
@@ -9590,6 +9602,24 @@ impl ScriptHost {
         if wants {
             Hookless::No
         } else if inst.node.is_none() || (!self.stopped.is_empty() && self.stopped.contains(name)) {
+            Hookless::Nothing
+        } else if let Some(kept) = inst.node.as_ref()
+            && kept.at_rest(tr, self.bodies.borrow().contains_key(&eid))
+        {
+            #[cfg(test)]
+            {
+                STAMPS_SKIPPED.with(|c| c.set(c.get() + 1));
+                STAMPS_SKIPPED_EARLY.with(|c| c.set(c.get() + 1));
+                // Not even fetched for the timing guards, which time this
+                // answer as a game build makes it.
+                if !crate::env::NO_CROSS_CHECK.with(|c| c.get())
+                    && let Ok(t) = self.lua.registry_value::<Table>(&kept.key)
+                {
+                    // Engine work, not a script line, as on the refresh road.
+                    self.budget.restart();
+                    crate::env::cross_check(&self.stamp_unchanged, &t, eid, &kept.stamp);
+                }
+            }
             Hookless::Nothing
         } else {
             Hookless::Refresh((eid, kid))

@@ -1787,8 +1787,14 @@ const AT_REST_WRITES: &[(&str, &str)] = &[
 /// One run of an at-rest case, as a line per pass: every node's transform
 /// to the bit, the queued body changes, the keeper's table as it holds it,
 /// the errors so far and how many stamps were skipped. `chunk_only` reads
-/// every kept table field by field, as before tables were armed.
-fn at_rest_trace(dir: &Path, keeper: &str, chunk_only: bool) -> Vec<String> {
+/// every kept table field by field, as before tables were armed. Also how
+/// many of the skips the run loop answered early, before any refresh began
+/// (`hookless_here`), which only the armed side can do.
+///
+/// Mid-run, the keeper's node gains a body for two frames and loses it,
+/// then something else moves it and later turns it: each makes a table
+/// still armed from an earlier stamp one a stamp would now change.
+fn at_rest_trace(dir: &Path, keeper: &str, chunk_only: bool) -> (Vec<String>, u64) {
     write_script(dir, "keeper", &format!("function start(node)\n  me = node\n  {keeper}\nend\n"));
     write_script(
         dir,
@@ -1815,11 +1821,23 @@ fn at_rest_trace(dir: &Path, keeper: &str, chunk_only: bool) -> Vec<String> {
     crate::env::CHUNK_ONLY.with(|c| c.set(chunk_only));
     let mut host = ScriptHost::new();
     let mut out = Vec::new();
-    for f in 0..12 {
+    crate::host::STAMPS_SKIPPED_EARLY.with(|c| c.set(0));
+    for f in 0..14 {
         let t = f as f32 / 60.0;
-        // Something else moves the keeper's node, once, mid-run.
+        // The physics side gives the keeper's node a body, then takes it.
+        if f == 4 {
+            host.set_bodies(HashMap::from([(keeper.index(), BodyState { pos: [0.0, 1.0, 0.0], ..Default::default() })]));
+        }
+        if f == 6 {
+            host.set_bodies(HashMap::new());
+        }
+        // Something else moves the keeper's node, once, mid-run, and later
+        // turns it without moving it.
         if f == 8 {
             world.get_mut::<Transform>(keeper).unwrap().translation.y = 7.0;
+        }
+        if f == 11 {
+            world.get_mut::<Transform>(keeper).unwrap().rotation = floptle_core::math::Quat::from_rotation_y(0.5);
         }
         for pass in 0..3 {
             crate::host::STAMPS_SKIPPED.with(|c| c.set(0));
@@ -1870,7 +1888,7 @@ fn at_rest_trace(dir: &Path, keeper: &str, chunk_only: bool) -> Vec<String> {
         }
     }
     crate::env::CHUNK_ONLY.with(|c| c.set(false));
-    out
+    (out, crate::host::STAMPS_SKIPPED_EARLY.with(|c| c.get()))
 }
 
 /// **An armed table says "unchanged" exactly where reading it field by
@@ -1881,14 +1899,24 @@ fn at_rest_trace(dir: &Path, keeper: &str, chunk_only: bool) -> Vec<String> {
 /// skip the same stamps, pass for pass. And in test builds every armed
 /// "unchanged" is also re-read field by field (`env::cross_check`), so a
 /// write that reached a table without disarming it fails here too.
+///
+/// Most armed "unchanged" answers come from the run loop before any refresh
+/// begins (`hookless_here`), so the same comparison holds that early answer
+/// to the old decision, and each case must have reached it.
 #[test]
 fn an_armed_node_table_decides_every_at_rest_case_as_reading_it_does() {
     let dir = std::env::temp_dir().join(format!("floptle_armed_diff_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let mut wrong = Vec::new();
     for (what, keeper) in AT_REST_WRITES {
-        let armed = at_rest_trace(&dir, keeper, false);
-        let read = at_rest_trace(&dir, keeper, true);
+        let (armed, early) = at_rest_trace(&dir, keeper, false);
+        let (read, read_early) = at_rest_trace(&dir, keeper, true);
+        if early == 0 {
+            wrong.push(format!("{what}: the run loop never answered a table at rest early"));
+        }
+        if read_early != 0 {
+            wrong.push(format!("{what}: reading field by field answered {read_early} early, from the armed flag"));
+        }
         let freeze = what.contains("freeze");
         if !freeze && let Some(l) = armed.iter().find(|l| !l.contains("errors []")) {
             wrong.push(format!("{what}: an error: {l}"));
