@@ -316,6 +316,20 @@ impl Compound {
     }
 
     /// The assembly origin (the pose callers authored shapes around), sim frame.
+    /// The held force and torque it fell asleep under, while it sleeps
+    /// (`None` awake). It stays asleep while what is held on it stays within
+    /// [`Self::rest_give`] of this: a script's push that is dropped, or
+    /// re-laid from readings that drift past that, wakes it with `force`.
+    pub fn rest_push(&self) -> Option<(Vec3, Vec3)> {
+        self.asleep.then_some(self.rest_push)
+    }
+
+    /// How far the held force and torque may move from [`Self::rest_push`]
+    /// before the sleeper wakes, besides 1% of the rest push itself.
+    pub fn rest_give(&self) -> (f32, f32) {
+        self.rest_give
+    }
+
     pub fn origin(&self) -> Vec3 {
         self.pos + self.orient * self.local_origin
     }

@@ -61,6 +61,12 @@ pub struct AssemblyInfo {
     /// sleep, kept while it counts, or `settling` while it counts after
     /// stopping on its own (`WakeReason::name`).
     pub wake: &'static str,
+    /// While asleep, the held force and torque it fell asleep under
+    /// (`restPush`, `restTorque`): a push that moves further than a fifth of
+    /// its weight (that at its reach for the torque) plus 1% of this from it
+    /// wakes it. `None` awake.
+    pub rest_push: Option<[f32; 3]>,
+    pub rest_torque: Option<[f32; 3]>,
     /// The warp rails carry it this tick: its position and velocity come from
     /// a conic, and forces held on it do nothing, torque included.
     pub coasting: bool,
@@ -461,6 +467,14 @@ pub(crate) fn install_assembly_api(
             out.set("carry", vec3_table(lua, i.carry)?)?;
             out.set("asleep", i.asleep)?;
             out.set("wake", i.wake)?;
+            // Asleep, the push it rests under; nil awake.
+            let f3 = |v: [f32; 3]| [v[0] as f64, v[1] as f64, v[2] as f64];
+            if let Some(p) = i.rest_push {
+                out.set("restPush", vec3_table(lua, f3(p))?)?;
+            }
+            if let Some(t) = i.rest_torque {
+                out.set("restTorque", vec3_table(lua, f3(t))?)?;
+            }
             let parts = lua.create_table()?;
             for (k, p) in i.parts.iter().enumerate() {
                 parts.set(k + 1, *p)?;

@@ -633,6 +633,8 @@ impl Editor {
                     carry: self.tick_carry.get(&eid).copied().unwrap_or([0.0; 3]),
                     asleep: c.asleep,
                     wake: c.wake.name(),
+                    rest_push: c.rest_push().map(|(f, _)| f.to_array()),
+                    rest_torque: c.rest_push().map(|(_, t)| t.to_array()),
                     coasting: self.compound_coast.contains_key(&eid)
                         || matches!(self.compound_lod.get(&eid), Some(crate::space::CompoundLod::Coast { .. })),
                 },
