@@ -5188,6 +5188,28 @@ impl EditorTabViewer<'_> {
                     l.refraction_layers = layers as u32;
                     cmd.inspector_changed = true;
                 }
+                // The sky cache, with the other scene-wide costs: it trades
+                // a grid's upkeep for the `skyOcclusion` march.
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("sky cache reach");
+                    cmd.inspector_changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut l.sky_cache_reach)
+                                .speed(0.5)
+                                .range(0.0..=floptle_core::Light::MAX_SKY_CACHE_REACH)
+                                .suffix("m"),
+                        )
+                        .on_hover_text(
+                            "keep skyOcclusion's answer in a grid round the camera instead of \
+                             marching four rays from every pixel. Worth it where a scene is \
+                             crowded with colliders (a beach full of crew, crates and boats). \
+                             It answers ONE reach: set it to the reach your shaders pass, and \
+                             a call at any other reach marches as before. One view keeps it, \
+                             and a scene with Field Shapes is not cached. 0 is off",
+                        )
+                        .changed();
+                });
             });
             // Fog — distance haze (depth ramp) or real marched media (volumetric).
             ui.separator();

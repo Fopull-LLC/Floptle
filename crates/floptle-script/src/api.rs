@@ -954,6 +954,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("fogShaftsMap".to_string(), f64::from(l.fog_shafts_map)),
                 ("fogSky".to_string(), l.fog_sky as f64),
                 ("fogFollowsBody".to_string(), f64::from(l.fog_follows_body)),
+                ("skyCacheReach".to_string(), l.sky_cache_reach as f64),
             ]),
         );
     }
@@ -2292,6 +2293,10 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "fogShaftsMap" => l.fog_shafts_map = val != 0.0,
                     "fogSky" => l.fog_sky = v.clamp(0.0, 1.0),
                     "fogFollowsBody" => l.fog_follows_body = val != 0.0,
+                    // 0 (or anything not above it) turns the cache off.
+                    "skyCacheReach" => {
+                        l.sky_cache_reach = floptle_core::Light { sky_cache_reach: v, ..Default::default() }.sky_cache().unwrap_or(0.0)
+                    }
                     _ => {}
                 }
             }

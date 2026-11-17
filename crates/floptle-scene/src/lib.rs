@@ -3059,6 +3059,10 @@ pub struct LightDoc {
     /// `Light::fog_follows_body`. Off for every scene saved before it existed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fog_follows_body: bool,
+    /// `Light::sky_cache_reach`: the reach `skyOcclusion` is cached at. 0 (off)
+    /// for every scene saved before it existed, and not written while off.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub sky_cache_reach: f32,
 }
 
 fn default_shadow_softness() -> f32 {
@@ -3238,6 +3242,7 @@ impl From<&Light> for LightDoc {
             fog_shafts_map: l.fog_shafts_map,
             fog_sky: l.fog_sky,
             fog_follows_body: l.fog_follows_body,
+            sky_cache_reach: l.sky_cache_reach,
         }
     }
 }
@@ -3308,6 +3313,8 @@ impl LightDoc {
             fog_shafts_map: self.fog_shafts_map,
             fog_sky: self.fog_sky.clamp(0.0, 1.0),
             fog_follows_body: self.fog_follows_body,
+            // Off for anything not above 0 (a NaN included), and fenced.
+            sky_cache_reach: Light { sky_cache_reach: self.sky_cache_reach, ..Light::default() }.sky_cache().unwrap_or(0.0),
         }
     }
 }
@@ -7178,6 +7185,34 @@ mod tests {
         for f in ["fog_sun", "fog_lamps", "fog_ambient", "fog_clamp", "fog_normalize"] {
             assert!(!plain.contains(f), "{f} is written at its default: {plain}");
         }
+    }
+
+    #[test]
+    fn sky_cache_reach_round_trips_and_an_old_scene_leaves_it_off() {
+        let authored = Light { sky_cache_reach: 24.0, ..Light::default() };
+        let ron = ron::ser::to_string(&LightDoc::from(&authored)).expect("serializes");
+        let back: LightDoc = ron::from_str(&ron).expect("parses");
+        assert_eq!(back.to_light(), authored, "the reach round trips");
+
+        // A Lighting block written before the cache was a setting leaves it off.
+        let old: LightDoc = ron::from_str(
+            "(direction: (0.4, 0.9, 0.45), color: (1, 1, 1), ambient: (0.1, 0.1, 0.1), intensity: 1)",
+        )
+        .expect("an old Lighting block still loads");
+        assert_eq!(old.to_light().sky_cache_reach, 0.0);
+        assert_eq!(old.to_light().sky_cache(), None);
+        // …and off, it is not written, so scenes do not all grow a line.
+        let plain = ron::ser::to_string(&LightDoc::from(&Light::default())).expect("serializes");
+        assert!(!plain.contains("sky_cache_reach"), "written while off: {plain}");
+
+        // Hand-typed nonsense is fenced: below 0 is off, past the ceiling is held there.
+        let reach = |r: f32| {
+            let doc = LightDoc { sky_cache_reach: r, ..LightDoc::from(&Light::default()) };
+            doc.to_light().sky_cache_reach
+        };
+        assert_eq!(reach(-3.0), 0.0);
+        assert_eq!(reach(f32::NAN), 0.0);
+        assert_eq!(reach(1.0e6), Light::MAX_SKY_CACHE_REACH);
     }
 
     #[test]

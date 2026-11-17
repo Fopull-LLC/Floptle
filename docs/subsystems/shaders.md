@@ -485,8 +485,11 @@ matter for its own rays (just under a plank, inside rock) it is not read,
 and where too few of the eight can answer the op marches, so cover does not
 leak. Cover's edges come out softer than four hard rays: on the beach the
 mean difference from the march is under 0.01 and 95% of the sea is within
-0.03. It is off by default, so a project looks exactly as it did; it is
-not yet a project setting. `sky_occlusion_from_the_cache.rs` holds its
+0.03. It is off by default, so a project looks exactly as it did; a
+scene turns it on with the Lighting node's **sky cache reach** (the
+reach its shaders pass, 0 = off), and a script with `skyCacheReach` on
+the Lighting node's `Light` component (`env.skyCacheReach` in the API
+reference). `sky_occlusion_from_the_cache.rs` holds its
 answers against the march (still terrain, a thin plank, the crowded beach,
 a deck pushed along) and its cost against six field reads: no more than
 two and a half times with the camera still, where the march on the crowded

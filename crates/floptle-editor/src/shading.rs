@@ -1474,6 +1474,48 @@ pub(crate) fn skybox_uniforms(
 /// (bloom / vignette / SSAO) plus the raymarch SDF-ao params `[on, strength,
 /// radius, _]`. A disabled chain — or a node deleted mid-session — turns
 /// everything off (it self-heals back on the next scene load).
+/// The sky cache's view on the window path: the Scene view, or a game's
+/// own window.
+pub(crate) const SKY_VIEW_WINDOW: u64 = 0;
+/// …on the offscreen path, the game's own view (a docked Game panel, a
+/// build's frame, `floptle shot`).
+pub(crate) const SKY_VIEW_GAME: u64 = 1;
+/// …and every other view (a render target, a reflection probe, a stacked
+/// layer), which share one name: one view keeps the cache, so these march
+/// while the game's view is drawing.
+pub(crate) const SKY_VIEW_SIDE: u64 = 2;
+
+/// The scene's sky cache, brought up to date for one view before its passes
+/// shade: turned on, off or to a new reach when the Lighting node's
+/// `sky_cache_reach` changed (only then, as it allocates), then refreshed
+/// for this view, which binds the view's cache or, for a view that keeps
+/// none, unbinds the last one so its `skyOcclusion` calls march. Call it
+/// after the frame's globals are uploaded. The lattice is anchored to the
+/// world the camera stands on ([`camera_frame`]), so a world moving along
+/// its orbit carries its cells with it.
+pub(crate) fn sync_sky_cache(
+    gpu: &floptle_render::Gpu,
+    raymarch: &mut floptle_render::Raymarch,
+    light: &Light,
+    rm: floptle_render::RaymarchGlobals,
+    cam_world: DVec3,
+    frame: Option<floptle_render::FramePose>,
+    view: u64,
+) {
+    let want = light.sky_cache();
+    if raymarch.sky_cache() != want {
+        raymarch.set_sky_cache(gpu, want);
+    }
+    if want.is_none() {
+        return;
+    }
+    // No world to stand on: the lattice holds still at the origin, under an
+    // id no entity's can be.
+    let (anchor, anchor_id) = frame.map_or((DVec3::ZERO, u64::MAX), |f| (f.pos, f.id));
+    let at = floptle_render::sky_cache::SkyView { cam: cam_world, anchor, anchor_id };
+    raymarch.refresh_sky_cache(gpu, rm, at, view);
+}
+
 /// The camera history motion blur reprojects against: the previous frame's
 /// view-projection, where the camera was when it was taken, and the frame it
 /// rode ([`camera_frame`]).

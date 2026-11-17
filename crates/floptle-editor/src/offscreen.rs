@@ -1496,6 +1496,10 @@ impl Editor {
             // metal model looked like a hole in the picture.
             raymarch.upload_globals(gpu, rm);
             raymarch.set_fog_grid(self.project.fog_method_resolved() == floptle_scene::FogMethodDoc::Grid);
+            // The sky cache, for the passes below that call `skyOcclusion`:
+            // kept for the game's own view, and every other view marches.
+            let sky_view = if opts.scatter_main && !opts.overlay { crate::shading::SKY_VIEW_GAME } else { crate::shading::SKY_VIEW_SIDE };
+            crate::shading::sync_sky_cache(gpu, raymarch, &light_node, rm, cam.world_position, cam_frame, sky_view);
             // A camera with no sky reflects the one the frame's other views
             // captured: the map is shared, and the sky is the same sky.
             if opts.draws.sky {
@@ -1927,6 +1931,84 @@ mod tests {
         });
         let said: Vec<&str> = ed.console.entries.iter().map(|e| e.msg.as_str()).collect();
         assert!(reported, "the build's frame never put the GPU's error in its console: {said:?}");
+    }
+
+    /// **A scene's sky cache reach reaches the renderer**, on the frame a
+    /// build (and `floptle run`, and the docked Game panel) draws: the
+    /// Lighting node's `sky_cache_reach` turns the cache on at that reach,
+    /// 0 turns it off again, and so does a script writing
+    /// `skyCacheReach = 0`. A default Lighting node leaves it off, so every
+    /// scene saved before the setting renders as it did.
+    #[test]
+    fn a_scenes_sky_cache_reach_turns_the_cache_on_and_off() {
+        use floptle_core::{Light, ScriptInst, Scripts, Transform};
+        let Some(mut ed) = super::test_editor_with_gpu() else { return };
+        let scene = |reach: f32| {
+            let lighting = floptle_scene::LightDoc::from(&Light { sky_cache_reach: reach, ..Light::default() });
+            let doc = floptle_scene::SceneDoc { name: "sky".into(), lighting, nodes: vec![] };
+            let mut world = floptle_core::World::default();
+            floptle_scene::spawn_into(&doc, &mut world);
+            world
+        };
+        let cached = |ed: &crate::Editor| ed.raymarch.as_ref().unwrap().sky_cache();
+        // A build's frame, with its draw into an offscreen target: a headless
+        // device has no swapchain, so `player_frame` steps the game and this
+        // draws it the way it does (`render_game_into`).
+        let (color, depth) = crate::viewports::offscreen_textures(ed.gpu.as_ref().unwrap(), 64, 64, "sky-cache", wgpu::TextureUsages::COPY_SRC);
+        let frame = |ed: &mut crate::Editor| {
+            let _ = ed.player_frame(false);
+            let (cv, dv) = (color.create_view(&Default::default()), depth.create_view(&Default::default()));
+            ed.render_game_into(cv, dv, Some(depth.clone()), [0.0, 0.0], [64.0, 64.0], 0.0, true, false);
+        };
+        let set_reach = |ed: &mut crate::Editor, reach: f32| {
+            let e = ed.world.query::<Light>().next().map(|(e, _)| e).expect("the scene has its Lighting node");
+            ed.world.get_mut::<Light>(e).unwrap().sky_cache_reach = reach;
+        };
+
+        // A default Lighting node: off.
+        ed.world = scene(0.0);
+        frame(&mut ed);
+        assert_eq!(cached(&ed), None, "a scene that never set it turned the cache on");
+
+        // On, at the scene's reach.
+        ed.world = scene(24.0);
+        frame(&mut ed);
+        assert_eq!(cached(&ed), Some(24.0), "the scene's reach never reached the renderer");
+
+        // Off again through the component.
+        set_reach(&mut ed, 0.0);
+        frame(&mut ed);
+        assert_eq!(cached(&ed), None, "a reach of 0 left the cache on");
+
+        // A new reach through the component.
+        set_reach(&mut ed, 8.0);
+        frame(&mut ed);
+        assert_eq!(cached(&ed), Some(8.0), "a changed reach was not applied");
+
+        // Off through a script, while playing.
+        let dir = std::env::temp_dir().join(format!("floptle-sky-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("scripts/sky_off.lua"),
+            "function update(node, dt)\n  find(\"Lighting\"):getcomponent(\"Light\").skyCacheReach = 0\nend\n",
+        )
+        .unwrap();
+        ed.project_root = dir.clone();
+        let probe = ed.world.spawn();
+        ed.world.insert(probe, Transform::IDENTITY);
+        ed.world.insert(probe, Scripts(vec![ScriptInst::new("sky_off")]));
+        ed.toggle_play();
+        assert!(ed.playing, "did not enter play");
+        let mut on = Vec::new();
+        for _ in 0..4 {
+            frame(&mut ed);
+            on.push(cached(&ed));
+        }
+        let errors = ed.script_host.errors().to_vec();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(on.last().copied().flatten(), None, "the script's skyCacheReach = 0 left the cache on: {on:?}");
     }
 }
 

@@ -1487,9 +1487,31 @@ pub struct Light {
     /// surface, the volumetric layer is a shell around it, and the sky blend
     /// leans on that body's horizon wherever you stand on it.
     pub fog_follows_body: bool,
+    /// Keep the answer to `skyOcclusion` in a grid round the camera, for calls
+    /// at this reach (world units), instead of marching four rays from every
+    /// pixel. Worth it where a scene is crowded with collider proxies (a beach
+    /// full of crew, crates, a dock and boats), where the march is dearest.
+    /// It answers one reach; a call at any other reach marches as before.
+    /// One view keeps it and any other camera (a render target, a reflection
+    /// probe) marches; a scene with Field Shapes is not cached. Cover comes
+    /// out a little softer than the march. 0 is off, the default, and every
+    /// call marches as before.
+    pub sky_cache_reach: f32,
 }
 
 impl Light {
+    /// The ceiling on [`sky_cache_reach`](Self::sky_cache_reach): half the
+    /// cache's outermost cube, which is 384 units across. A fence against a
+    /// mistyped number rather than a tuned limit.
+    pub const MAX_SKY_CACHE_REACH: f32 = 192.0;
+
+    /// The reach the sky cache answers, `None` while it is off: the authored
+    /// [`sky_cache_reach`](Self::sky_cache_reach), with anything not above 0
+    /// (or not a number) off and anything past the ceiling held at it.
+    pub fn sky_cache(&self) -> Option<f32> {
+        (self.sky_cache_reach > 0.0).then(|| self.sky_cache_reach.min(Self::MAX_SKY_CACHE_REACH))
+    }
+
     /// The ceiling on [`refraction_layers`](Self::refraction_layers).
     ///
     /// Lives here rather than in the renderer because the scene format clamps
@@ -1575,6 +1597,7 @@ impl Default for Light {
             fog_shafts_map: false,
             fog_sky: 1.0,
             fog_follows_body: false,
+            sky_cache_reach: 0.0,
         }
     }
 }

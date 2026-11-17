@@ -230,6 +230,7 @@
 ---@field fogShaftsMap boolean Shafts from the sun shadow map instead of a march per step: many times cheaper.
 ---@field fogSky number How much of the fog the sky takes at the horizon, 0..1. Fade it to fade the sky's fog: the sky is infinitely far away, so a thinner fog alone never makes it fainter.
 ---@field fogFollowsBody number Fog on a round world (1/0): heights become altitudes over the nearest celestial body, the volumetric layer a shell around it, and the sky blend follows its horizon.
+---@field skyCacheReach number Keep skyOcclusion's answer at this reach (world units) in a grid round the camera instead of marching every pixel: cheaper where a scene is crowded with collider proxies. Calls at any other reach march; one view keeps it; Field Shapes scenes are not cached. 0 = off (default).
 
 ---A Camera's live properties (`node:getcomponent("Camera")`).
 ---@class CameraHandle
