@@ -465,11 +465,25 @@ fn kept_node_tables_at_rest_cost() {
     }
     assert!(host.errors().is_empty(), "{:?}", host.errors());
     let n = 600;
-    let mut hookless = 0.0f32;
+    let (mut hookless, mut between) = (0.0f32, 0.0f32);
+    crate::host::STAMP_CHECK_NS.with(|c| c.set(0));
+    crate::host::STAMP_CHECK_TIMED.with(|c| c.set(true));
     for f in 10..10 + n {
-        hookless += profiled_frame(&mut host, &mut world, &dir, f).part("scriptsHookless");
+        let r = profiled_frame(&mut host, &mut world, &dir, f);
+        hookless += r.part("scriptsHookless");
+        between += r.part("scriptsBetweenHooks");
     }
-    floptle_say::say_err!("scriptsHookless, 230 kept tables at rest beside 50 busy: {:.4} ms a frame", hookless / n as f32);
+    crate::host::STAMP_CHECK_TIMED.with(|c| c.set(false));
+    let check = crate::host::STAMP_CHECK_NS.with(|c| c.get()) as f32 / 1e6;
+    let f = n as f32;
+    floptle_say::say_err!(
+        "230 kept tables at rest beside 50 busy, a frame: scriptsHookless {:.4} ms (the check's Lua call {:.4}, the rest {:.4}), \
+         scriptsBetweenHooks {:.4} ms",
+        hookless / f,
+        check / f,
+        (hookless - check) / f,
+        between / f,
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

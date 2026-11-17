@@ -361,9 +361,15 @@ pub(crate) fn stamp_unchanged(
     if mt.is_some() {
         t.set_metatable(None);
     }
+    #[cfg(test)]
+    let t0 = crate::host::STAMP_CHECK_TIMED.with(|c| c.get()).then(std::time::Instant::now);
     let same = same
         .call::<bool>((t, eid, p.x, p.y, p.z, p.sx, p.sy, p.sz, p.scale, p.yaw, p.pitch, p.roll))
         .unwrap_or(false);
+    #[cfg(test)]
+    if let Some(t0) = t0 {
+        crate::host::STAMP_CHECK_NS.with(|c| c.set(c.get() + t0.elapsed().as_nanos() as u64));
+    }
     if mt.is_some() {
         t.set_metatable(mt);
     }

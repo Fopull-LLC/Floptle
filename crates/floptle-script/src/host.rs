@@ -265,6 +265,11 @@ thread_local! {
     /// them (`env::stamp_unchanged`) — the guard that the check is reached.
     /// Test-only.
     pub(crate) static STAMPS_SKIPPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Nanoseconds spent inside the at-rest check's Lua call, while
+    /// `STAMP_CHECK_TIMED` is set — the bench's split between the call and
+    /// the rest of the hookless road. Test-only.
+    pub(crate) static STAMP_CHECK_NS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static STAMP_CHECK_TIMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A screen shader's name as a script writes it: the file name without its
