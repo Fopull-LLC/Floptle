@@ -421,7 +421,7 @@ fn seed_step_cost_over_an_idle_crowd() {
         for f in 10..10 + n {
             seed += profiled_frame(&mut host, &mut world, &dir, f).part("scriptsSeed");
         }
-        eprintln!(
+        floptle_say::say_err!(
             "scriptsSeed over 230 idle instances, {kinds} kinds{}: {:.4} ms a frame",
             if extra.is_empty() { "" } else { ", beside a getfenv" },
             seed / n as f32
