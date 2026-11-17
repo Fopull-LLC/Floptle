@@ -43,6 +43,11 @@ pub struct TerrainStats {
     /// Chunks at full detail, and chunks that are stand-ins.
     pub data_chunks: u64,
     pub stand_in_chunks: u64,
+    /// Chunk meshes a worker is making for it now, and chunks waiting for
+    /// a worker: `perf.counts().meshesInFlight` and `meshesPending`, for
+    /// this terrain alone.
+    pub meshes_in_flight: u64,
+    pub meshes_waiting: u64,
 }
 
 impl TerrainStats {
@@ -63,6 +68,8 @@ impl TerrainStats {
         self.fine_paint += o.fine_paint;
         self.data_chunks += o.data_chunks;
         self.stand_in_chunks += o.stand_in_chunks;
+        self.meshes_in_flight += o.meshes_in_flight;
+        self.meshes_waiting += o.meshes_waiting;
     }
 }
 
@@ -186,6 +193,9 @@ pub(crate) fn install(lua: &Lua, state: Rc<RefCell<Counted>>) -> mlua::Result<()
             out.set("finePaint", sum.fine_paint)?;
             out.set("dataChunks", sum.data_chunks)?;
             out.set("standInChunks", sum.stand_in_chunks)?;
+            out.set("meshesInFlight", sum.meshes_in_flight)?;
+            out.set("meshesWaiting", sum.meshes_waiting)?;
+            out.set("meshesPending", sum.meshes_in_flight + sum.meshes_waiting)?;
             out.set("terrains", if id.is_some() { 1 } else { s.terrains.len() })?;
             out.set("age", s.at.map_or(-1.0, |at| at.elapsed().as_secs_f64()))?;
             out.set("budget", s.budget)?;
@@ -194,4 +204,31 @@ pub(crate) fn install(lua: &Lua, state: Rc<RefCell<Counted>>) -> mlua::Result<()
         })?,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A game can tell which terrain the ground still to come is on.**
+    /// `perf.counts().meshesPending` sums every terrain; with several
+    /// loaded, a count that never drains could be on any of them. Each
+    /// terrain's count reads in `terrain.stats(id)`, and the sum in
+    /// `terrain.stats()`.
+    #[test]
+    fn each_terrain_counts_its_ground_still_to_come() {
+        let lua = Lua::new();
+        lua.globals().set("terrain", lua.create_table().unwrap()).unwrap();
+        let state: Rc<RefCell<Counted>> = Rc::default();
+        install(&lua, state.clone()).unwrap();
+        state.borrow_mut().terrains = vec![
+            TerrainStats { id: 1, meshes_in_flight: 16, meshes_waiting: 541, ..Default::default() },
+            TerrainStats { id: 2, meshes_in_flight: 3, ..Default::default() },
+        ];
+        let read = |code: &str| lua.load(code).eval::<i64>().unwrap();
+        assert_eq!(read("return terrain.stats(1).meshesWaiting"), 541);
+        assert_eq!(read("return terrain.stats(1).meshesPending"), 557);
+        assert_eq!(read("return terrain.stats(2).meshesInFlight"), 3);
+        assert_eq!(read("return terrain.stats().meshesPending"), 560);
+    }
 }

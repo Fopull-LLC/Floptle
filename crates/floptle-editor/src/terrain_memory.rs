@@ -50,6 +50,8 @@ impl crate::Editor {
                     s.meshes_gpu += raster.mesh_gpu_held(r.slots.values().map(|(mid, _)| *mid).chain(r.groups.values().copied()));
                 }
                 s.meshes_cpu += r.far.values().map(mesh_bytes).sum::<u64>();
+                s.meshes_in_flight = r.pending.len() as u64;
+                s.meshes_waiting = r.waiting as u64;
             }
             s.meshes_cpu += t.premeshed.values().map(mesh_bytes).sum::<u64>();
             s.collision += t.collision.iter().map(|(_, c)| c.heap_bytes() as u64).sum::<u64>();

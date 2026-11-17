@@ -359,6 +359,11 @@ pub(crate) struct TerrainRender {
     /// again at the level it is drawn at, nearest first, and draws its old
     /// mesh until the new one lands.
     pub stale: std::collections::HashSet<[i32; 3]>,
+    /// Chunks whose coarse mesh was on its way when the water it is kept
+    /// under changed, with the last job epoch sent before the change: the
+    /// mesh still lands and is drawn, and the chunk is meshed again under
+    /// the new water.
+    pub rewater: HashMap<[i32; 3], u64>,
     /// Chunks that wanted a mesh at this terrain's last scan and were left
     /// for a later frame because the workers were full: with [`Self::pending`],
     /// what `perf.counts().meshesPending` reports.
@@ -1877,6 +1882,9 @@ impl Editor {
                     continue; // superseded while in flight
                 }
                 render.pending.remove(&done.coord);
+                // Made under water that has changed since: drawn now, and
+                // asked for again.
+                let rewater = render.rewater.remove(&done.coord).is_some_and(|at| done.epoch <= at);
                 if done.mesh.is_empty() {
                     if let Some((mid, _)) = render.slots.remove(&done.coord) {
                         raster.free_dynamic(mid);
@@ -1887,6 +1895,9 @@ impl Editor {
                 } else {
                     render.empty.remove(&done.coord);
                     upload_chunk(gpu, raster, render, done.coord, &done.mesh, done.lod, now);
+                    if rewater {
+                        render.stale.insert(done.coord);
+                    }
                 }
             }
         }
