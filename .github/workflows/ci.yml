@@ -74,7 +74,21 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: test
-        run: cargo test --workspace --all-targets
+        run: |
+          # Diagnostic: the runner has been lost ~58 min into this step. Log
+          # memory, cap the step well inside that, and keep what it printed.
+          (while true; do date +%T; free -m | sed -n 2p; ps -eo rss,etime,args --sort=-rss | head -4; sleep 30; done) > mem.log 2>&1 &
+          set -o pipefail
+          timeout --signal=KILL 40m cargo test --workspace --all-targets --no-fail-fast 2>&1 | while IFS= read -r l; do echo "$(date +%T) $l"; done | tee test.log
+
+      - name: diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag
+          path: |
+            test.log
+            mem.log
 
       # The configuration an exported game ships: the engine without `editor-ui`.
       # The workspace build always has the feature on, so this is the only
