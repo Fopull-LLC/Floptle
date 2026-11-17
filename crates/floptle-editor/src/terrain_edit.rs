@@ -1145,6 +1145,14 @@ const WORKER_IN_FLIGHT_CAP: usize = 16;
 /// the player is worse than a deep queue.
 const DIRTY_PRIORITY_BOOST: i32 = 1_000_000;
 
+/// Added to the queue priority of a drawn chunk asked for again only because
+/// its mesh is out of date (`TerrainRender::stale`), at the level it already
+/// has: it draws its old mesh meanwhile, so ground with no mesh at all, or at
+/// the wrong level, is built first. Water that changed every frame marked
+/// the same drawn chunks stale every frame, their re-meshes filled the
+/// workers, and the ground never yet drawn waited behind them for good.
+const REFRESH_PRIORITY_PENALTY: i32 = 500_000;
+
 /// How close to a body's centre, in body radii, counts as being on it.
 ///
 /// Generous — an aircraft at altitude, or a ship on approach, is still landing
@@ -2216,7 +2224,8 @@ impl Editor {
                             continue;
                         }
                         if (want != cur || render.stale.contains(&coord)) && !render.pending.contains_key(&coord) {
-                            queue.push((prio_of(coord), e, coord, want));
+                            let refresh = if want == cur { REFRESH_PRIORITY_PENALTY } else { 0 };
+                            queue.push((prio_of(coord) + refresh, e, coord, want));
                         }
                     }
                 }
