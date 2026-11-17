@@ -9806,9 +9806,9 @@ impl ScriptHost {
         eid: u32,
         tr: &mut Transform,
         mut body: Option<BodyState>,
-        slot: &mut Option<(RegistryKey, crate::env::NodeStamp)>,
+        slot: &mut Option<crate::env::KeptNode>,
     ) -> mlua::Result<Table> {
-        let fetched = slot.as_ref().and_then(|(k, _)| self.lua.registry_value::<Table>(k).ok());
+        let fetched = slot.as_ref().and_then(|k| self.lua.registry_value::<Table>(&k.key).ok());
         // Stamped last from this same transform, and untouched since: there
         // is no write to drain and nothing a stamp would change, so the table
         // is handed back as it is. A node at rest whose script has no hook
@@ -9817,8 +9817,8 @@ impl ScriptHost {
         if let Some(t) = fetched
             .as_ref()
             .zip(slot.as_ref())
-            .filter(|(t, (_, stamp))| {
-                crate::env::stamp_unchanged(&self.stamp_unchanged, t, eid, stamp, tr, body)
+            .filter(|(t, kept)| {
+                crate::env::stamp_unchanged(&self.stamp_unchanged, t, eid, kept, tr, body)
             })
             .map(|(t, _)| t.clone())
         {
@@ -9835,12 +9835,11 @@ impl ScriptHost {
             Some(t) => t,
             None => {
                 let t = node_table(&self.lua, eid, tr, body)?;
-                *slot =
-                    Some((self.lua.create_registry_value(&t)?, crate::env::node_stamp(&t, tr)));
+                *slot = Some(crate::env::KeptNode::new(&self.lua, &t, crate::env::node_stamp(&t, tr))?);
                 t
             }
         };
-        if let Some((_, stamp)) = slot.as_ref() {
+        if let Some(crate::env::KeptNode { stamp, .. }) = slot.as_ref() {
             // Writes made through a stashed handle from outside this script's hooks (a
             // cross-script `other:knockBack()`, a timer callback) land after the last
             // read-back has drained. Apply them now, before the re-stamp overwrites them.
@@ -9876,8 +9875,15 @@ impl ScriptHost {
             }
         }
         crate::env::stamp_node_table(&node, tr, body)?;
-        if let Some((_, stamp)) = slot.as_mut() {
-            *stamp = crate::env::stamp_of(tr, body);
+        if let Some(kept) = slot.as_mut() {
+            kept.stamp = crate::env::stamp_of(tr, body);
+        }
+        // Armed last, after every write the stamp made: from here until
+        // something writes to the table, `KeptNode::armed` says so without
+        // reading it. Only when the stamp is clean, the one case the at-rest
+        // check can use.
+        if body.is_none() {
+            crate::env::arm(&node);
         }
         Ok(node)
     }
@@ -10013,7 +10019,7 @@ impl ScriptHost {
         eid: u32,
         body: Option<BodyState>,
         pass: Pass,
-        slot: &mut Option<(RegistryKey, crate::env::NodeStamp)>,
+        slot: &mut Option<crate::env::KeptNode>,
         // **Set to true only if a hook was actually called.**
         //
         // Separate from the `ran` flag below, which gates the node read-back and
@@ -10087,9 +10093,9 @@ impl ScriptHost {
         // Record what the table holds now, whatever happened — an errored hook's partial
         // writes are discarded (the read-back below is skipped), so they must not read as
         // pending writes on the next hook either.
-        let finish = |slot: &mut Option<(RegistryKey, crate::env::NodeStamp)>, tr: &Transform| {
-            if let Some((_, stamp)) = slot.as_mut() {
-                *stamp = crate::env::node_stamp(&node, tr);
+        let finish = |slot: &mut Option<crate::env::KeptNode>, tr: &Transform| {
+            if let Some(kept) = slot.as_mut() {
+                kept.stamp = crate::env::node_stamp(&node, tr);
             }
         };
         match ran {

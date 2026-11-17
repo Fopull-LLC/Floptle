@@ -166,7 +166,6 @@ unsafe extern "C" {
 
 /// Arm `t`, so [`armed_at`] answers true until something writes to it. A
 /// frozen table stays frozen.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn arm(t: &Table) {
     // SAFETY: `t` is a live table, and its address is what the patch reads.
     unsafe { lua_floptle_arm(t.to_pointer()) }
@@ -178,14 +177,13 @@ pub(crate) fn arm(t: &Table) {
 /// `p` must be the address of a table that is still alive: one the caller
 /// holds a reference or registry key to. Luau's collector never moves an
 /// object, so the address stays good for as long as the table lives.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) unsafe fn armed_at(p: *const std::ffi::c_void) -> bool {
     // SAFETY: the caller's promise.
     unsafe { lua_floptle_armed(p) != 0 }
 }
 
 /// [`armed_at`] for a table in hand.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn is_armed(t: &Table) -> bool {
     // SAFETY: `t` keeps the table alive for the call.
     unsafe { armed_at(t.to_pointer()) }
@@ -315,6 +313,58 @@ pub(crate) struct NodeStamp {
     clean: Option<Transform>,
 }
 
+/// An instance's kept `node` table: the registry key that keeps it alive,
+/// what the engine last stamped into it, and its address, for asking the VM
+/// whether anything has written to it since (see [`arm`]). The address is
+/// only ever read while `key` is held, which is what makes reading it sound:
+/// the registry keeps the table alive, and Luau never moves it.
+pub(crate) struct KeptNode {
+    pub(crate) key: mlua::RegistryKey,
+    pub(crate) stamp: NodeStamp,
+    ptr: usize,
+}
+
+impl KeptNode {
+    pub(crate) fn new(lua: &Lua, t: &Table, stamp: NodeStamp) -> mlua::Result<Self> {
+        Ok(Self { key: lua.create_registry_value(t)?, stamp, ptr: t.to_pointer() as usize })
+    }
+
+    /// Nothing has written to the table since the engine last armed it.
+    pub(crate) fn armed(&self) -> bool {
+        // SAFETY: `self.key` keeps the table at `ptr` alive.
+        unsafe { armed_at(self.ptr as *const std::ffi::c_void) }
+    }
+
+    /// The table is exactly what the last stamp left for `tr`, known without
+    /// reading it: the stamp was clean (see [`NodeStamp::clean`]) and from
+    /// this same transform, the node still has no body, and nothing has
+    /// written to the table since. The first tier of [`stamp_unchanged`],
+    /// which the run loop also asks before anything else.
+    pub(crate) fn at_rest(&self, tr: &Transform, has_body: bool) -> bool {
+        !has_body && self.stamp.clean.is_some_and(|c| same_transform(&c, tr)) && armed_tier_on() && self.armed()
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: answer "unchanged" from the table's own fields alone, as
+    /// before tables were armed — the differential tests' and the ratio
+    /// guard's other side.
+    pub(crate) static CHUNK_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only: skip re-reading the table on every armed "unchanged"
+    /// (see [`cross_check`]). Only the timing guards turn it off.
+    pub(crate) static NO_CROSS_CHECK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[inline(always)]
+fn armed_tier_on() -> bool {
+    #[cfg(test)]
+    if CHUNK_ONLY.with(|c| c.get()) {
+        return false;
+    }
+    true
+}
+
 /// The stamp [`stamp_node_table`] leaves for `tr` and `body`, worked out
 /// rather than read back: right after a stamp the table holds exactly the
 /// values written from these, so reading seventeen of them back told the
@@ -375,20 +425,47 @@ pub(crate) fn stamp_unchanged_lua() -> String {
 /// change nothing at all? True when the last stamp was the last thing to
 /// touch the table, from this same transform, and every field it wrote (and
 /// every body field it cleared) still reads as it left it — so there is no
-/// write to drain and nothing a stamp would change. `same` is
-/// [`stamp_unchanged_lua`]'s function. Any doubt answers false, and the caller drains
-/// and stamps as it always did.
+/// write to drain and nothing a stamp would change. Any doubt answers false,
+/// and the caller drains and stamps as it always did.
+///
+/// Two tiers. First the table's armed flag ([`KeptNode::at_rest`]): still
+/// armed, nothing has written to it since the stamp, which answers without
+/// reading it. Disarmed, something wrote — perhaps the same value, or a key
+/// of its own — so the table is read field by field, by `same`
+/// ([`stamp_unchanged_lua`]'s function), exactly as before tables were armed;
+/// if that finds it unchanged it is armed again. Either way the answer is the
+/// one the field-by-field read gives, which in tests is checked on every
+/// armed answer.
 pub(crate) fn stamp_unchanged(
     same: &Function,
     t: &Table,
     eid: u32,
-    stamp: &NodeStamp,
+    kept: &KeptNode,
     tr: &Transform,
     body: Option<BodyState>,
 ) -> bool {
+    let stamp = &kept.stamp;
+    if kept.at_rest(tr, body.is_some()) {
+        #[cfg(test)]
+        cross_check(same, t, eid, stamp);
+        return true;
+    }
+    if body.is_some() || !stamp.clean.is_some_and(|c| same_transform(&c, tr)) {
+        return false;
+    }
+    let same = fields_unchanged(same, t, eid, stamp);
+    if same {
+        arm(t);
+    }
+    same
+}
+
+/// The field-by-field tier of [`stamp_unchanged`]. Leaves the table disarmed:
+/// setting its metatable aside is a write.
+fn fields_unchanged(same: &Function, t: &Table, eid: u32, stamp: &NodeStamp) -> bool {
     // A frozen table cannot have its metatable set aside, and the full road
     // reports the frozen table exactly as it always did.
-    if body.is_some() || !stamp.clean.is_some_and(|c| same_transform(&c, tr)) || t.is_readonly() {
+    if t.is_readonly() {
         return false;
     }
     let p = &stamp.pre;
@@ -411,6 +488,21 @@ pub(crate) fn stamp_unchanged(
         t.set_metatable(mt);
     }
     same
+}
+
+/// Test builds only: an armed table answered "unchanged", so the
+/// field-by-field read must agree. A write that reached the table without
+/// disarming it fails here, in every test that touches a kept table.
+#[cfg(test)]
+pub(crate) fn cross_check(same: &Function, t: &Table, eid: u32, stamp: &NodeStamp) {
+    if NO_CROSS_CHECK.with(|c| c.get()) {
+        return;
+    }
+    assert!(
+        fields_unchanged(same, t, eid, stamp),
+        "node {eid}'s table was still armed but no longer what the last stamp left: a write reached it without disarming it"
+    );
+    arm(t);
 }
 
 /// Snapshot the table's current values, to compare the next hook against.

@@ -1766,3 +1766,141 @@ fn a_sleep_with_a_number_is_said_in_the_console_even_inside_a_pcall() {
     assert!(host.sleepers.borrow().is_asleep(s.index(), "sleeper"), "the options form no longer sleeps");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The at-rest write cases for the differential test below: a `keeper`
+/// script that keeps its `node` table from `start` and writes it from
+/// outside its hooks, each a different way.
+const AT_REST_WRITES: &[(&str, &str)] = &[
+    ("a field from a timer", "after(0.02, function() me.x = 5 end)"),
+    ("a body field set raw on a node with no body", "after(0.02, function() rawset(me, 'vx', 3) end)"),
+    ("-0 written over 0", "after(0.02, function() me.z = -me.z end)"),
+    ("node.pos", "after(0.02, function() me.pos = vec3(1, 2, 3) end)"),
+    ("a key of the script's own", "after(0.02, function() me.myFlag = true end) after(0.07, function() me.myFlag = nil end)"),
+    ("the same value, again and again", "for i = 1, 6 do after(0.02 * i, function() me.x = me.x end) end"),
+    ("setmetatable", "after(0.02, function() setmetatable(me, {}) end)"),
+    ("table.freeze", "after(0.02, function() table.freeze(me) end)"),
+    ("a method another script calls", "function push() me.x = me.x + 1 end"),
+    ("a tween", "tween(0.08, function(a) me.x = 10 * a end, 'linear')"),
+    ("a write before a collection", "after(0.02, function() me.y = 4 end) after(0.05, function() me.y = 2 end)"),
+];
+
+/// One run of an at-rest case, as a line per pass: every node's transform
+/// to the bit, the queued body changes, the keeper's table as it holds it,
+/// the errors so far and how many stamps were skipped. `chunk_only` reads
+/// every kept table field by field, as before tables were armed.
+fn at_rest_trace(dir: &Path, keeper: &str, chunk_only: bool) -> Vec<String> {
+    write_script(dir, "keeper", &format!("function start(node)\n  me = node\n  {keeper}\nend\n"));
+    write_script(
+        dir,
+        "pusher",
+        "local n = 0\nfunction update(node, dt)\n  n = n + 1\n  local k = find('Keeper'):getscript('keeper')\n  if (n == 3 or n == 6) and k.push then k.push() end\nend\n",
+    );
+    write_script(dir, "collector", "function fixedUpdate(node, dt) collectgarbage('collect') end\n");
+    let mut world = World::default();
+    let mut spawn = |kind: &str, name: &str| {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, floptle_core::Name(name.into()));
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: kind.into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
+        );
+        e
+    };
+    // The collector first, so its collection falls between the scheduler's
+    // callbacks and the keeper's drain; the pusher last, so its call lands
+    // after the keeper's pass and is drained on the next.
+    let all = [spawn("collector", "Collector"), spawn("keeper", "Keeper"), spawn("pusher", "Pusher")];
+    let keeper = all[1];
+    crate::env::CHUNK_ONLY.with(|c| c.set(chunk_only));
+    let mut host = ScriptHost::new();
+    let mut out = Vec::new();
+    for f in 0..12 {
+        let t = f as f32 / 60.0;
+        // Something else moves the keeper's node, once, mid-run.
+        if f == 8 {
+            world.get_mut::<Transform>(keeper).unwrap().translation.y = 7.0;
+        }
+        for pass in 0..3 {
+            crate::host::STAMPS_SKIPPED.with(|c| c.set(0));
+            match pass {
+                0 => host.run(&mut world, dir, 1.0 / 60.0, t),
+                1 => host.run_fixed(&mut world, 1.0 / 60.0, t),
+                _ => host.run_late(&mut world, 1.0 / 60.0, t),
+            }
+            let mut line = format!("frame {f} pass {pass}:");
+            for e in all {
+                let tr = world.get::<Transform>(e).unwrap();
+                line += &format!(
+                    " {:?}/{:?}/{:?}",
+                    tr.translation.to_array().map(f64::to_bits),
+                    tr.rotation.to_array().map(f32::to_bits),
+                    tr.scale.to_array().map(f32::to_bits)
+                );
+            }
+            let mut v: Vec<_> = host.take_body_changes().into_iter().map(|(e, v)| format!("{e}:{v:?}")).collect();
+            v.extend(host.take_body_height_changes().into_iter().map(|(e, h)| format!("{e}:h{h:?}")));
+            v.extend(host.take_body_pos_changes().into_iter().map(|(e, p)| format!("{e}:p{p:?}")));
+            v.sort();
+            line += &format!(" bodies {v:?}");
+            if let Some(me) = host.instance_env(keeper.index(), "keeper").and_then(|env| env.get::<mlua::Table>("me").ok()) {
+                let mut fields: Vec<String> = me
+                    .pairs::<mlua::Value, mlua::Value>()
+                    .flatten()
+                    .map(|(k, v)| {
+                        let v = match v {
+                            // Read again as a float: mlua hands back a whole
+                            // number as an integer, which would drop the sign
+                            // of a -0.
+                            mlua::Value::Number(_) | mlua::Value::Integer(_) => {
+                                let n = me.raw_get::<f64>(k.clone()).unwrap_or(f64::NAN);
+                                format!("{n:?}/{:x}", n.to_bits())
+                            }
+                            mlua::Value::Boolean(b) => format!("{b}"),
+                            other => other.type_name().to_string(),
+                        };
+                        format!("{}={v}", k.to_string().unwrap_or_default())
+                    })
+                    .collect();
+                fields.sort();
+                line += &format!(" me {{{}}} mt {}", fields.join(" "), me.metatable().is_some());
+            }
+            line += &format!(" errors {:?} skipped {}", host.errors(), crate::host::STAMPS_SKIPPED.with(|c| c.get()));
+            out.push(line);
+        }
+    }
+    crate::env::CHUNK_ONLY.with(|c| c.set(false));
+    out
+}
+
+/// **An armed table says "unchanged" exactly where reading it field by
+/// field does.** Each at-rest write case, run once with the at-rest check
+/// asking the table's armed flag first and once reading every field as it
+/// did before, must leave every node where the other left it, queue the
+/// same body changes, leave the keeper's table holding the same values and
+/// skip the same stamps, pass for pass. And in test builds every armed
+/// "unchanged" is also re-read field by field (`env::cross_check`), so a
+/// write that reached a table without disarming it fails here too.
+#[test]
+fn an_armed_node_table_decides_every_at_rest_case_as_reading_it_does() {
+    let dir = std::env::temp_dir().join(format!("floptle_armed_diff_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let mut wrong = Vec::new();
+    for (what, keeper) in AT_REST_WRITES {
+        let armed = at_rest_trace(&dir, keeper, false);
+        let read = at_rest_trace(&dir, keeper, true);
+        let freeze = what.contains("freeze");
+        if !freeze && let Some(l) = armed.iter().find(|l| !l.contains("errors []")) {
+            wrong.push(format!("{what}: an error: {l}"));
+        }
+        if let Some(i) = (0..armed.len()).find(|&i| armed[i] != read[i]) {
+            wrong.push(format!("{what}, first difference:\n  armed: {}\n  read:  {}", armed[i], read[i]));
+        }
+        // The case has to have exercised the armed path at all.
+        if !armed.iter().any(|l| !l.ends_with("skipped 0")) {
+            wrong.push(format!("{what}: no stamp was ever skipped, so nothing was compared"));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}

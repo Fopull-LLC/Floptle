@@ -550,7 +550,7 @@ struct Instance {
     /// Table held from Rust costs a slot on mlua's bounded auxiliary ref stack,
     /// and one per instance put a hard ceiling of a few thousand scripted nodes
     /// on a scene — reached as a panic.
-    node: Option<(RegistryKey, crate::env::NodeStamp)>,
+    node: Option<crate::env::KeptNode>,
     /// Which lifecycle hooks this script's environment defines, read once when
     /// the chunk is built (and again on hot reload — a rebuild is a new
     /// `Instance`). A pass the script has no hook for skips everything but the
