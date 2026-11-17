@@ -128,9 +128,12 @@ jobs:
           # An export for this platform copies this binary out of the bundle.
           cp "target/${{ matrix.rust }}/release/floptle-player" "$B/floptle-player"
           # The Steam player and Valve's runtime library, which it loads from
-          # beside itself. steamworks-sys leaves the library in its build output.
+          # beside itself. steamworks-sys leaves the library in its build output:
+          # build/steamworks-sys-<hash>/out before Rust 1.100, and
+          # build/steamworks-sys/<hash>/out since. Found by name in either.
           cp "target/${{ matrix.rust }}/release/floptle-player-steam" "$B/floptle-player-steam"
-          LIB=$(ls target/${{ matrix.rust }}/release/build/steamworks-sys-*/out/libsteam_api.* | head -1)
+          LIB=$(find "target/${{ matrix.rust }}/release/build" -path '*steamworks-sys*/out/libsteam_api.*' | head -1)
+          [ -n "$LIB" ] || { echo "::error::steamworks-sys left no libsteam_api in its build output"; exit 1; }
           cp "$LIB" "$B/"
           printf '{ "version": "%s", "target": "%s", "commit": "%s" }\n' "$VER" "$T" "${GITHUB_SHA:0:7}" > "$B/version.json"
           tar -C "$B" -czf "$B.tar.gz" .
@@ -159,7 +162,8 @@ jobs:
           Copy-Item "target/${{ matrix.rust }}/release/floptle-player.exe" "$b/floptle-player.exe"
           # See the unix step: the Steam player and the library it loads.
           Copy-Item "target/${{ matrix.rust }}/release/floptle-player-steam.exe" "$b/floptle-player-steam.exe"
-          $dll = Get-ChildItem "target/${{ matrix.rust }}/release/build/steamworks-sys-*/out/steam_api64.dll" | Select-Object -First 1
+          # Either build-output layout (see the unix step).
+          $dll = Get-ChildItem -Recurse -File -Path "target/${{ matrix.rust }}/release/build" -Filter "steam_api64.dll" | Where-Object { $_.FullName -match 'steamworks-sys' -and $_.Directory.Name -eq 'out' } | Select-Object -First 1
           if (-not $dll) { throw "steamworks-sys left no steam_api64.dll in its build output" }
           Copy-Item $dll.FullName "$b/steam_api64.dll"
           $commit = $env:GITHUB_SHA.Substring(0,7)
