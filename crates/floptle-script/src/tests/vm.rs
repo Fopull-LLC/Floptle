@@ -86,3 +86,172 @@ fn a_node_script_sees_values_evaluated_before_assignment() {
     assert_eq!(x, 13.0, "the third value read the local after it was assigned");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Every way a script or the engine can write a table, each of which must
+/// quietly disarm an armed table rather than raise — see the third patch in
+/// FLOPTLE-PATCHES.md. `t` is the armed table, `{a = 1, 10, 20, 30}`; each
+/// case runs inside a loop so native code generation, when it is built,
+/// compiles it rather than leaving it to the interpreter.
+const ARMED_WRITES: &[(&str, &str)] = &[
+    ("an existing field", "t.a = 2"),
+    ("an existing field, same value", "t.a = 1"),
+    ("a new field", "t.fresh = true"),
+    ("a computed key", "local k = 'a' .. '' t[k] = 3"),
+    ("an existing array slot", "t[2] = 5"),
+    ("a new array slot", "t[4] = 40"),
+    ("a slot by a constant index", "t[1] = 0"),
+    ("a compound assignment", "t.a += 1"),
+    ("clearing a field", "t.a = nil"),
+    ("rawset", "rawset(t, 'a', 9)"),
+    ("rawset of a new key", "rawset(t, 'other', 9)"),
+    ("table.insert at the end", "table.insert(t, 99)"),
+    ("table.insert at a position", "table.insert(t, 1, 99)"),
+    ("table.remove", "table.remove(t)"),
+    ("table.remove at a position", "table.remove(t, 1)"),
+    ("table.sort", "table.sort(t, function(a, b) return a > b end)"),
+    ("table.clear", "table.clear(t)"),
+    ("table.move into it", "table.move({7, 8}, 1, 2, 1, t)"),
+    ("table.move within it", "table.move(t, 1, 2, 2)"),
+    ("setmetatable", "setmetatable(t, {})"),
+    ("setmetatable to nil", "setmetatable(t, nil)"),
+    ("a write from a coroutine", "coroutine.wrap(function() t.a = 4 end)()"),
+    ("a write from a yielded coroutine", "local co = coroutine.create(function() coroutine.yield() t.a = 4 end) coroutine.resume(co) coroutine.resume(co)"),
+    ("a write under pcall", "pcall(function() t.a = 5 end)"),
+    ("a write in a closure", "local function f(x) x.a = 6 end f(t)"),
+];
+
+/// Reads, each of which must leave the table armed.
+const ARMED_READS: &[(&str, &str)] = &[
+    ("a field read", "local _ = t.a"),
+    ("an absent field read", "local _ = t.nothing"),
+    ("an array read", "local _ = t[1]"),
+    ("rawget", "local _ = rawget(t, 'a')"),
+    ("pairs", "for _ in pairs(t) do end"),
+    ("ipairs", "for _ in ipairs(t) do end"),
+    ("generalised iteration", "for _ in t do end"),
+    ("next", "local _ = next(t)"),
+    ("the length", "local _ = #t"),
+    ("table.clone", "local c = table.clone(t) c.a = 7"),
+    ("table.concat", "local _ = table.concat(t, ',')"),
+    ("table.find", "local _ = table.find(t, 20)"),
+    ("table.unpack", "local _ = table.unpack(t)"),
+    ("getmetatable", "local _ = getmetatable(t)"),
+    ("tostring", "local _ = tostring(t)"),
+    ("type", "local _ = type(t)"),
+    ("table.isfrozen", "assert(table.isfrozen(t) == false, 'an armed table read as frozen')"),
+    ("a write to another table", "local u = {} u.a = 1 rawset(u, 'b', 2) setmetatable(u, {})"),
+];
+
+fn armed_table(lua: &mlua::Lua) -> mlua::Table {
+    let t: mlua::Table = lua.load("return {a = 1, 10, 20, 30}").eval().unwrap();
+    crate::env::arm(&t);
+    assert!(crate::env::is_armed(&t), "a fresh table did not arm");
+    lua.globals().raw_set("t", &t).unwrap();
+    t
+}
+
+/// **A write of any kind disarms an armed table, and no read does.** The
+/// engine arms each kept `node` table after it stamps it, and takes "still
+/// armed" to mean nothing has written to it since, so it can hand the table
+/// back without reading it. A write that slipped past the patch would be a
+/// write the engine never drains; one that raised would break a script that
+/// works today. Every case at every optimisation level, since fast calls and
+/// inline caches each take their own path to a table write.
+#[test]
+fn every_write_disarms_an_armed_table_and_no_read_does() {
+    let mut wrong = Vec::new();
+    for level in 0..=2 {
+        for (what, src) in ARMED_WRITES {
+            let lua = mlua::Lua::new();
+            lua.set_compiler(mlua::Compiler::new().set_optimization_level(level));
+            let t = armed_table(&lua);
+            match lua.load(format!("for _ = 1, 1 do {src} end")).exec() {
+                Err(e) => wrong.push(format!("{what} at level {level} raised: {e}")),
+                Ok(()) if crate::env::is_armed(&t) => wrong.push(format!("{what} at level {level} left the table armed")),
+                Ok(()) => {}
+            }
+        }
+        for (what, src) in ARMED_READS {
+            let lua = mlua::Lua::new();
+            lua.set_compiler(mlua::Compiler::new().set_optimization_level(level));
+            let t = armed_table(&lua);
+            match lua.load(format!("for _ = 1, 1 do {src} end")).exec() {
+                Err(e) => wrong.push(format!("{what} at level {level} raised: {e}")),
+                Ok(()) if !crate::env::is_armed(&t) => wrong.push(format!("{what} at level {level} disarmed the table")),
+                Ok(()) => {}
+            }
+        }
+    }
+    // The engine's own writes, from Rust.
+    type HostWrite = fn(&mlua::Lua, &mlua::Table) -> mlua::Result<()>;
+    let host: &[(&str, HostWrite)] = &[
+        ("Table::raw_set", |_, t| t.raw_set("a", 2)),
+        ("Table::set", |_, t| t.set("a", 2)),
+        ("Table::raw_insert", |_, t| t.raw_insert(1, 5)),
+        ("Table::raw_remove", |_, t| t.raw_remove(1)),
+        ("Table::clear", |_, t| t.clear()),
+        ("Table::set_metatable", |lua, t| {
+            t.set_metatable(Some(lua.create_table()?));
+            Ok(())
+        }),
+    ];
+    for (what, write) in host {
+        let lua = mlua::Lua::new();
+        let t = armed_table(&lua);
+        assert!(!t.is_readonly(), "an armed table read as readonly to the host");
+        match write(&lua, &t) {
+            Err(e) => wrong.push(format!("{what} raised: {e}")),
+            Ok(()) if crate::env::is_armed(&t) => wrong.push(format!("{what} left the table armed")),
+            Ok(()) => {}
+        }
+    }
+    // A write through a Rust `__newindex` that sets the key raw — the node
+    // metatable's road for `node.pos = v`. The metatable is set before the
+    // table is armed, as the engine's is.
+    {
+        let lua = mlua::Lua::new();
+        let t: mlua::Table = lua.load("return {}").eval().unwrap();
+        let mt = lua.create_table().unwrap();
+        mt.raw_set(
+            "__newindex",
+            lua.create_function(|_, (t, _k, v): (mlua::Table, String, f64)| t.raw_set("x", v)).unwrap(),
+        )
+        .unwrap();
+        t.set_metatable(Some(mt));
+        crate::env::arm(&t);
+        lua.globals().raw_set("t", &t).unwrap();
+        match lua.load("for _ = 1, 1 do t.pos = 3 end").exec() {
+            Err(e) => wrong.push(format!("a Rust __newindex that sets raw raised: {e}")),
+            Ok(()) if crate::env::is_armed(&t) => wrong.push("a Rust __newindex that sets raw left the table armed".into()),
+            Ok(()) => {}
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// **Freezing and arming keep their meanings apart.** `table.freeze` on an
+/// armed table freezes it (and a write then raises, as on any frozen table);
+/// arming a frozen table leaves it frozen; and an armed table reads as not
+/// frozen to `table.isfrozen` and to the host.
+#[test]
+fn freezing_and_arming_a_table_keep_their_meanings() {
+    let lua = mlua::Lua::new();
+    let t = armed_table(&lua);
+    let (before, after): (bool, bool) =
+        lua.load("local b = table.isfrozen(t) table.freeze(t) return b, table.isfrozen(t)").eval().unwrap();
+    assert!(!before && after, "table.freeze on an armed table: frozen before {before}, after {after}");
+    assert!(!crate::env::is_armed(&t), "a frozen table still reads as armed");
+    assert!(t.is_readonly(), "a frozen table does not read as readonly to the host");
+    assert!(lua.load("t.a = 2").exec().is_err(), "a write to a table frozen while armed went through");
+    crate::env::arm(&t);
+    assert!(!crate::env::is_armed(&t) && t.is_readonly(), "arming a frozen table unfroze it");
+    assert!(lua.load("t.a = 2").exec().is_err(), "a write to a frozen table went through after arming it");
+    // Armed again after a write disarmed it, it works the same way again.
+    let u = armed_table(&lua);
+    lua.load("t.a = 2").exec().unwrap();
+    assert!(!crate::env::is_armed(&u));
+    crate::env::arm(&u);
+    assert!(crate::env::is_armed(&u), "a table did not arm a second time");
+    lua.load("t.b = 3").exec().unwrap();
+    assert!(!crate::env::is_armed(&u), "a table armed a second time missed a write");
+}

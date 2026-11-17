@@ -91,7 +91,7 @@ static void moveelements(lua_State* L, int srct, int dstt, int f, int e, int t)
     LuaTable* dst = hvalue(L->base + (dstt - 1));
 
     if (dst->readonly)
-        luaG_readonlyerror(L);
+        luaG_readonlywrite(L, dst); // FLOPTLE PATCH: an armed table is disarmed, not an error
 
     int n = e - f + 1; // number of elements to move
 
@@ -216,7 +216,7 @@ static int tmove(lua_State* L)
         LuaTable* dst = hvalue(L->base + (tt - 1));
 
         if (dst->readonly) // also checked in moveelements, but this blocks resizes of r/o tables
-            luaG_readonlyerror(L);
+            luaG_readonlywrite(L, dst); // FLOPTLE PATCH: an armed table is disarmed, not an error
 
         if (t > 0 && (t - 1) <= dst->sizearray && (t - 1 + n) > dst->sizearray)
         { // grow the destination table array
@@ -480,7 +480,7 @@ static int tsort(lua_State* L)
     LuaTable* t = hvalue(L->base);
     int n = luaH_getn(t);
     if (t->readonly)
-        luaG_readonlyerror(L);
+        luaG_readonlywrite(L, t); // FLOPTLE PATCH: an armed table is disarmed, not an error
 
     SortPredicate pred = luaV_lessthan;
     if (!lua_isnoneornil(L, 2)) // is there a 2nd argument?
@@ -556,7 +556,7 @@ static int tclear(lua_State* L)
 
     LuaTable* tt = hvalue(L->base);
     if (tt->readonly)
-        luaG_readonlyerror(L);
+        luaG_readonlywrite(L, tt); // FLOPTLE PATCH: an armed table is disarmed, not an error
 
     luaH_clear(tt);
     return 0;

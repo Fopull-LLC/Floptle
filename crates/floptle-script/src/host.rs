@@ -265,6 +265,15 @@ thread_local! {
     /// them (`env::stamp_unchanged`) — the guard that the check is reached.
     /// Test-only.
     pub(crate) static STAMPS_SKIPPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The share of `STAMPS_SKIPPED` answered by `hookless_here`, before
+    /// any refresh began — the guard that the early answer is reached.
+    /// Test-only.
+    pub(crate) static STAMPS_SKIPPED_EARLY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Nanoseconds spent inside the at-rest check's Lua call, while
+    /// `STAMP_CHECK_TIMED` is set — the bench's split between the call and
+    /// the rest of the hookless road. Test-only.
+    pub(crate) static STAMP_CHECK_NS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static STAMP_CHECK_TIMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A screen shader's name as a script writes it: the file name without its
@@ -7602,7 +7611,7 @@ impl ScriptHost {
                 // road below, a `String` key and a node stamp each, three
                 // passes a frame and every tick, in no hook's figure.
                 if inst.enabled {
-                    match self.hookless_here(e.index(), &inst.kind, pass) {
+                    match self.hookless_here(e.index(), &inst.kind, pass, &tr) {
                         Hookless::No => {}
                         Hookless::Nothing => {
                             ran = true;
@@ -9568,9 +9577,17 @@ impl ScriptHost {
     /// so a hookless library script, or a `fixedUpdate`-only one on the frame
     /// pass before its first tick, costs two hash lookups a pass.
     ///
+    /// A kept table at rest is answered here too, before any of the work a
+    /// refresh starts with (a profile span, the memory owner, the budget
+    /// clock, the registry fetch): still armed since a clean stamp from this
+    /// same transform, on a node that still has no body, means nothing wrote
+    /// to it and a stamp would change nothing (`KeptNode::at_rest`). That is
+    /// most kept tables on most passes, and it costs one body lookup and one
+    /// byte read over the two lookups above.
+    ///
     /// Not for a first frame pass (`start` and the first-pass warnings belong
     /// to `tick_instance`), nor a missing instance or kind (nothing to skip).
-    fn hookless_here(&self, eid: u32, name: &str, pass: Pass) -> Hookless {
+    fn hookless_here(&self, eid: u32, name: &str, pass: Pass, tr: &Transform) -> Hookless {
         let Some(kid) = self.kind_id(name) else { return Hookless::No };
         let Some(inst) = self.instances.get(&(eid, kid)) else { return Hookless::No };
         if !inst.started {
@@ -9585,6 +9602,24 @@ impl ScriptHost {
         if wants {
             Hookless::No
         } else if inst.node.is_none() || (!self.stopped.is_empty() && self.stopped.contains(name)) {
+            Hookless::Nothing
+        } else if let Some(kept) = inst.node.as_ref()
+            && kept.at_rest(tr, self.bodies.borrow().contains_key(&eid))
+        {
+            #[cfg(test)]
+            {
+                STAMPS_SKIPPED.with(|c| c.set(c.get() + 1));
+                STAMPS_SKIPPED_EARLY.with(|c| c.set(c.get() + 1));
+                // Not even fetched for the timing guards, which time this
+                // answer as a game build makes it.
+                if !crate::env::NO_CROSS_CHECK.with(|c| c.get())
+                    && let Ok(t) = self.lua.registry_value::<Table>(&kept.key)
+                {
+                    // Engine work, not a script line, as on the refresh road.
+                    self.budget.restart();
+                    crate::env::cross_check(&self.stamp_unchanged, &t, eid, &kept.stamp);
+                }
+            }
             Hookless::Nothing
         } else {
             Hookless::Refresh((eid, kid))
@@ -9801,9 +9836,9 @@ impl ScriptHost {
         eid: u32,
         tr: &mut Transform,
         mut body: Option<BodyState>,
-        slot: &mut Option<(RegistryKey, crate::env::NodeStamp)>,
+        slot: &mut Option<crate::env::KeptNode>,
     ) -> mlua::Result<Table> {
-        let fetched = slot.as_ref().and_then(|(k, _)| self.lua.registry_value::<Table>(k).ok());
+        let fetched = slot.as_ref().and_then(|k| self.lua.registry_value::<Table>(&k.key).ok());
         // Stamped last from this same transform, and untouched since: there
         // is no write to drain and nothing a stamp would change, so the table
         // is handed back as it is. A node at rest whose script has no hook
@@ -9812,8 +9847,8 @@ impl ScriptHost {
         if let Some(t) = fetched
             .as_ref()
             .zip(slot.as_ref())
-            .filter(|(t, (_, stamp))| {
-                crate::env::stamp_unchanged(&self.stamp_unchanged, t, eid, stamp, tr, body)
+            .filter(|(t, kept)| {
+                crate::env::stamp_unchanged(&self.stamp_unchanged, t, eid, kept, tr, body)
             })
             .map(|(t, _)| t.clone())
         {
@@ -9830,12 +9865,11 @@ impl ScriptHost {
             Some(t) => t,
             None => {
                 let t = node_table(&self.lua, eid, tr, body)?;
-                *slot =
-                    Some((self.lua.create_registry_value(&t)?, crate::env::node_stamp(&t, tr)));
+                *slot = Some(crate::env::KeptNode::new(&self.lua, &t, crate::env::node_stamp(&t, tr))?);
                 t
             }
         };
-        if let Some((_, stamp)) = slot.as_ref() {
+        if let Some(crate::env::KeptNode { stamp, .. }) = slot.as_ref() {
             // Writes made through a stashed handle from outside this script's hooks (a
             // cross-script `other:knockBack()`, a timer callback) land after the last
             // read-back has drained. Apply them now, before the re-stamp overwrites them.
@@ -9871,8 +9905,15 @@ impl ScriptHost {
             }
         }
         crate::env::stamp_node_table(&node, tr, body)?;
-        if let Some((_, stamp)) = slot.as_mut() {
-            *stamp = crate::env::stamp_of(tr, body);
+        if let Some(kept) = slot.as_mut() {
+            kept.stamp = crate::env::stamp_of(tr, body);
+        }
+        // Armed last, after every write the stamp made: from here until
+        // something writes to the table, `KeptNode::armed` says so without
+        // reading it. Only when the stamp is clean, the one case the at-rest
+        // check can use.
+        if body.is_none() {
+            crate::env::arm(&node);
         }
         Ok(node)
     }
@@ -10008,7 +10049,7 @@ impl ScriptHost {
         eid: u32,
         body: Option<BodyState>,
         pass: Pass,
-        slot: &mut Option<(RegistryKey, crate::env::NodeStamp)>,
+        slot: &mut Option<crate::env::KeptNode>,
         // **Set to true only if a hook was actually called.**
         //
         // Separate from the `ran` flag below, which gates the node read-back and
@@ -10082,9 +10123,9 @@ impl ScriptHost {
         // Record what the table holds now, whatever happened — an errored hook's partial
         // writes are discarded (the read-back below is skipped), so they must not read as
         // pending writes on the next hook either.
-        let finish = |slot: &mut Option<(RegistryKey, crate::env::NodeStamp)>, tr: &Transform| {
-            if let Some((_, stamp)) = slot.as_mut() {
-                *stamp = crate::env::node_stamp(&node, tr);
+        let finish = |slot: &mut Option<crate::env::KeptNode>, tr: &Transform| {
+            if let Some(kept) = slot.as_mut() {
+                kept.stamp = crate::env::node_stamp(&node, tr);
             }
         };
         match ran {
