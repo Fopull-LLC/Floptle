@@ -795,8 +795,33 @@ int lua_getreadonly(lua_State* L, int objindex)
     const TValue* o = index2addr(L, objindex);
     api_check(L, ttistable(o));
     LuaTable* t = hvalue(o);
-    int res = t->readonly;
+    // FLOPTLE PATCH: only a frozen table reads as readonly. An armed one
+    // (readonly == 2) is an ordinary writable table to everything outside
+    // lua_floptle_armed: table.isfrozen, table.freeze and the host all see it
+    // as not frozen.
+    int res = t->readonly == 1;
     return res;
+}
+
+// FLOPTLE PATCH: arm a table, so the host can later ask whether anything has
+// written to it since, without a Lua call. Armed reuses the readonly byte
+// (value 2): every path that writes a table already tests that byte, and on an
+// armed table the first write clears it and goes on (luaG_readonlywrite)
+// instead of raising. A frozen table is left frozen. `p` is the table's
+// address, as lua_topointer gives it; Luau's collector never moves objects,
+// so it stays valid for as long as the caller keeps the table alive.
+void lua_floptle_arm(const void* p)
+{
+    LuaTable* t = (LuaTable*)p;
+    if (t->readonly == 0)
+        t->readonly = 2;
+}
+
+// FLOPTLE PATCH: whether the table is still armed: nothing has written to it,
+// set its metatable, cleared or frozen it since lua_floptle_arm.
+int lua_floptle_armed(const void* p)
+{
+    return ((const LuaTable*)p)->readonly == 2;
 }
 
 void lua_setsafeenv(lua_State* L, int objindex, int enabled)
@@ -882,7 +907,7 @@ void lua_rawsetfield(lua_State* L, int idx, const char* k)
     StkId t = index2addr(L, idx);
     api_check(L, ttistable(t));
     if (hvalue(t)->readonly)
-        luaG_readonlyerror(L);
+        luaG_readonlywrite(L, hvalue(t)); // FLOPTLE PATCH: an armed table is disarmed, not an error
     setobj2t(L, luaH_setstr(L, hvalue(t), luaS_new(L, k)), L->top - 1);
     luaC_barriert(L, hvalue(t), L->top - 1);
     L->top--;
@@ -894,7 +919,7 @@ void lua_rawset(lua_State* L, int idx)
     StkId t = index2addr(L, idx);
     api_check(L, ttistable(t));
     if (hvalue(t)->readonly)
-        luaG_readonlyerror(L);
+        luaG_readonlywrite(L, hvalue(t)); // FLOPTLE PATCH: an armed table is disarmed, not an error
     setobj2t(L, luaH_set(L, hvalue(t), L->top - 2), L->top - 1);
     luaC_barriert(L, hvalue(t), L->top - 1);
     L->top -= 2;
@@ -906,7 +931,7 @@ void lua_rawseti(lua_State* L, int idx, int n)
     StkId o = index2addr(L, idx);
     api_check(L, ttistable(o));
     if (hvalue(o)->readonly)
-        luaG_readonlyerror(L);
+        luaG_readonlywrite(L, hvalue(o)); // FLOPTLE PATCH: an armed table is disarmed, not an error
     setobj2t(L, luaH_setnum(L, hvalue(o), n), L->top - 1);
     luaC_barriert(L, hvalue(o), L->top - 1);
     L->top--;
@@ -928,7 +953,7 @@ int lua_setmetatable(lua_State* L, int objindex)
     case LUA_TTABLE:
     {
         if (hvalue(obj)->readonly)
-            luaG_readonlyerror(L);
+            luaG_readonlywrite(L, hvalue(obj)); // FLOPTLE PATCH: an armed table is disarmed, not an error
         hvalue(obj)->metatable = mt;
         if (mt)
             luaC_objbarrier(L, hvalue(obj), mt);
@@ -1535,7 +1560,7 @@ void lua_cleartable(lua_State* L, int idx)
     api_check(L, ttistable(t));
     LuaTable* tt = hvalue(t);
     if (tt->readonly)
-        luaG_readonlyerror(L);
+        luaG_readonlywrite(L, tt); // FLOPTLE PATCH: an armed table is disarmed, not an error
     luaH_clear(tt);
 }
 

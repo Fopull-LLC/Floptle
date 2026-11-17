@@ -243,6 +243,14 @@ pub(super) struct GeomArena {
     /// goes, so compaction can tell nothing has changed since it last found
     /// nothing to do, and do nothing again for free.
     pub(super) changes: u64,
+    /// Pages and growths the device refused for want of video memory since
+    /// made, and whether that has been said: a refusal is reported once, and
+    /// the slot keeps buffers of its own, or the page stays the size it was.
+    pub refused: u64,
+    refused_said: bool,
+    /// A test's stand-in for a full card: the most bytes the pages may
+    /// hold, a page or growth past it refused as the device would.
+    vram_cap: Option<u64>,
     /// The page being emptied: new slots go elsewhere while anywhere else
     /// has room, so the room its slots leave is not taken straight back.
     draining: Option<u32>,
@@ -260,8 +268,8 @@ const FIRST_PAGE_INDICES: u32 = 1 << 15;
 /// tighter, the next chunk to arrive would grow a page straight back.
 const COMPACT_ABOVE: f64 = 1.2;
 
-fn page_buffer(gpu: &Gpu, label: &str, bytes: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
-    gpu.device.create_buffer(&wgpu::BufferDescriptor {
+fn page_buffer(gpu: &Gpu, label: &str, bytes: u64, usage: wgpu::BufferUsages) -> Option<wgpu::Buffer> {
+    gpu.try_create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: bytes,
         usage: usage | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
@@ -283,7 +291,18 @@ impl GeomArena {
         };
         let (max_verts, max_indices) = (fit(VERTEX_BYTES, 1 << 21, FIRST_PAGE_VERTS), fit(4, 1 << 23, FIRST_PAGE_INDICES));
         let (max_verts, max_indices) = if max_verts == 0 || max_indices == 0 { (0, 0) } else { (max_verts, max_indices) };
-        GeomArena { pages: Vec::new(), max_verts, max_indices, written: 0, moved: 0, changes: 0, draining: None }
+        GeomArena {
+            pages: Vec::new(),
+            max_verts,
+            max_indices,
+            written: 0,
+            moved: 0,
+            changes: 0,
+            draining: None,
+            refused: 0,
+            refused_said: false,
+            vram_cap: None,
+        }
     }
 
     /// Hold a page to at most `verts` vertices and `indices` indices (each
@@ -293,6 +312,53 @@ impl GeomArena {
         let fit = |n: u32, first: u32, max: u32| n.next_power_of_two().max(first).min(max);
         self.max_verts = fit(verts, FIRST_PAGE_VERTS, self.max_verts);
         self.max_indices = fit(indices, FIRST_PAGE_INDICES, self.max_indices);
+    }
+
+    /// Hold the pages to `bytes` in all, refusing a page or a growth past it
+    /// as a full card would (`None` lifts it): the out-of-memory road, for a
+    /// test.
+    pub(super) fn cap_vram(&mut self, bytes: Option<u64>) {
+        self.vram_cap = bytes;
+    }
+
+    /// Both buffers of a page, or neither: the vertex and index buffers of
+    /// `vb` and `ib` bytes, refused together when either is.
+    fn page_pair(&mut self, gpu: &Gpu, vb: u64, ib: u64, already: u64) -> Option<(wgpu::Buffer, wgpu::Buffer)> {
+        let (v, i) = self.page_bufs(gpu, Some(vb), Some(ib), already)?;
+        v.zip(i)
+    }
+
+    /// The vertex buffer of `vb` bytes and the index buffer of `ib` bytes
+    /// asked for (`None`: not this one), all made or none: a page grows both
+    /// halves or neither. `already` is what they replace, freed after.
+    fn page_bufs(&mut self, gpu: &Gpu, vb: Option<u64>, ib: Option<u64>, already: u64) -> Option<(Option<wgpu::Buffer>, Option<wgpu::Buffer>)> {
+        let (want_v, want_i) = (vb.unwrap_or(0), ib.unwrap_or(0));
+        let over = self.vram_cap.is_some_and(|cap| (self.bytes() + want_v + want_i).saturating_sub(already) > cap);
+        let made = if over {
+            None
+        } else {
+            let v = vb.map(|b| page_buffer(gpu, "raster-arena-verts", b, wgpu::BufferUsages::VERTEX));
+            let i = ib.map(|b| page_buffer(gpu, "raster-arena-indices", b, wgpu::BufferUsages::INDEX));
+            match (v, i) {
+                (Some(None), _) | (_, Some(None)) => None,
+                (v, i) => Some((v.flatten(), i.flatten())),
+            }
+        };
+        let (vb, ib) = (want_v, want_i);
+        if made.is_none() {
+            self.refused += 1;
+            if !self.refused_said {
+                self.refused_said = true;
+                log::warn!(
+                    "terrain geometry: the GPU is out of video memory for {:.1} MiB more (the pages hold {:.1} MiB); \
+                     chunks that do not fit keep buffers of their own, and the terrain sheds detail through its \
+                     memory budget. Said once.",
+                    (vb + ib) as f64 / 1048576.0,
+                    self.bytes() as f64 / 1048576.0
+                );
+            }
+        }
+        made
     }
 
     /// Bytes the pages hold on the GPU.
@@ -471,12 +537,13 @@ impl GeomArena {
     /// Start a page with room for `verts` vertices and `indices` indices
     /// (the next power of two, at least a first page, at most a page's
     /// limit), and return it.
-    pub(super) fn new_page(&mut self, gpu: &Gpu, verts: u32, indices: u32) -> u32 {
+    pub(super) fn new_page(&mut self, gpu: &Gpu, verts: u32, indices: u32) -> Option<u32> {
         let verts = verts.next_power_of_two().max(FIRST_PAGE_VERTS).min(self.max_verts);
         let indices = indices.next_power_of_two().max(FIRST_PAGE_INDICES).min(self.max_indices);
+        let (vbuf, ibuf) = self.page_pair(gpu, verts as u64 * VERTEX_BYTES, indices as u64 * 4, 0)?;
         let p = Page {
-            vbuf: page_buffer(gpu, "raster-arena-verts", verts as u64 * VERTEX_BYTES, wgpu::BufferUsages::VERTEX),
-            ibuf: page_buffer(gpu, "raster-arena-indices", indices as u64 * 4, wgpu::BufferUsages::INDEX),
+            vbuf,
+            ibuf,
             verts: Buddy::new(verts),
             indices: Buddy::new(indices),
             live: 0,
@@ -485,11 +552,11 @@ impl GeomArena {
         match self.pages.iter().position(Option::is_none) {
             Some(at) => {
                 self.pages[at] = Some(p);
-                at as u32
+                Some(at as u32)
             }
             None => {
                 self.pages.push(Some(p));
-                self.pages.len() as u32 - 1
+                Some(self.pages.len() as u32 - 1)
             }
         }
     }
@@ -556,9 +623,12 @@ impl GeomArena {
         // A new page, as large as this asks for.
         let verts = FIRST_PAGE_VERTS.max(v_cap).min(self.max_verts);
         let indices = FIRST_PAGE_INDICES.max(i_cap).min(self.max_indices);
+        let Some((vbuf, ibuf)) = self.page_pair(gpu, verts as u64 * VERTEX_BYTES, indices as u64 * 4, 0) else {
+            return (None, grown);
+        };
         let mut p = Page {
-            vbuf: page_buffer(gpu, "raster-arena-verts", verts as u64 * VERTEX_BYTES, wgpu::BufferUsages::VERTEX),
-            ibuf: page_buffer(gpu, "raster-arena-indices", indices as u64 * 4, wgpu::BufferUsages::INDEX),
+            vbuf,
+            ibuf,
             verts: Buddy::new(verts),
             indices: Buddy::new(indices),
             live: 0,
@@ -593,17 +663,24 @@ impl GeomArena {
         else {
             return false;
         };
+        let (vs, is) = (p.vbuf.size(), p.ibuf.size());
+        // Both new buffers first: a card out of room for either leaves the
+        // page the size it was, and the ask goes to a new page or to buffers
+        // of the slot's own.
+        let already = if grow_v { vs } else { 0 } + if grow_i { is } else { 0 };
+        let Some((nv, ni)) = self.page_bufs(gpu, grow_v.then_some(vs * 2), grow_i.then_some(is * 2), already) else {
+            return false;
+        };
         self.changes += 1;
+        let p = self.pages[i].as_mut().expect("page");
         let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("arena-grow") });
-        if grow_v {
-            let nb = page_buffer(gpu, "raster-arena-verts", p.vbuf.size() * 2, wgpu::BufferUsages::VERTEX);
+        if let Some(nb) = nv {
             enc.copy_buffer_to_buffer(&p.vbuf, 0, &nb, 0, p.vbuf.size());
             self.written += p.vbuf.size();
             p.vbuf = nb;
             p.verts.grow();
         }
-        if grow_i {
-            let nb = page_buffer(gpu, "raster-arena-indices", p.ibuf.size() * 2, wgpu::BufferUsages::INDEX);
+        if let Some(nb) = ni {
             enc.copy_buffer_to_buffer(&p.ibuf, 0, &nb, 0, p.ibuf.size());
             self.written += p.ibuf.size();
             p.ibuf = nb;

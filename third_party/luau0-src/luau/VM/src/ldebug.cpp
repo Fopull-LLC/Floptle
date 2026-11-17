@@ -305,6 +305,17 @@ l_noret luaG_readonlyerror(lua_State* L)
     luaG_runerror(L, "attempt to modify a readonly table");
 }
 
+// FLOPTLE PATCH: see ldebug.h.
+void luaG_readonlywrite(lua_State* L, LuaTable* t)
+{
+    if (t->readonly == 2)
+    {
+        t->readonly = 0;
+        return;
+    }
+    luaG_readonlyerror(L);
+}
+
 static void pusherror(lua_State* L, const char* msg)
 {
     CallInfo* ci = L->ci;

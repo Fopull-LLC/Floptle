@@ -165,3 +165,75 @@ fn a_models_default_springs_and_a_swapped_spec() {
     assert!(dist(clip, swapped) < 1e-4, "a swapped-in spec with the chain off still moved the hair {:.5}", dist(clip, swapped));
     assert!(back[0] > clip[0] + 0.05, "setSpringBones(nil) did not go back to the model's default: {back:?}");
 }
+
+/// Where Sae's hair tip is at each of `at` (frame numbers, ascending), with
+/// `springs` on her node and the script running `each` every frame.
+fn hair_at(tag: &str, springs: &str, each: &str, at: &[u32]) -> Vec<[f64; 3]> {
+    let d = std::env::temp_dir().join(format!("flspring-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("scenes")).unwrap();
+    std::fs::create_dir_all(d.join("scripts")).unwrap();
+    let sae = concat!(env!("CARGO_MANIFEST_DIR"), "/../floptle-assets/tests/fixtures/Sae.mirrored.rigged.glb");
+    std::fs::copy(sae, d.join("Sae.glb")).unwrap();
+    std::fs::write(d.join("project.ron"), "(title: Some(\"b\"), entry_scene: Some(\"scenes/first.ron\"))").unwrap();
+    let marks: Vec<String> = at.iter().map(|f| f.to_string()).collect();
+    std::fs::write(
+        d.join("scripts/ask.lua"),
+        format!("local frames = 0\n\
+         local marks = {{ {} }}\n\
+         function update(node, dt)\n\
+         \x20 local a = find('Sae'):animator()\n\
+         \x20 {each}\n\
+         \x20 frames = frames + 1\n\
+         \x20 for _, m in ipairs(marks) do\n\
+         \x20   if frames == m then\n\
+         \x20     local p = a:boneWorld('Hair_4')\n\
+         \x20     print(string.format('TIP %d %.5f %.5f %.5f', m, p.x, p.y, p.z))\n\
+         \x20   end\n\
+         \x20 end\n\
+         end\n", marks.join(", ")),
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("scenes/first.ron"),
+        format!(
+            "(name: \"s\", nodes: [\
+             (name: \"Sae\", matter: Mesh(asset_path: \"Sae.glb\"){springs}),\
+             (name: \"Driver\", scripts: [(kind: \"ask\")])])"
+        ),
+    )
+    .unwrap();
+    let last = at.iter().copied().max().unwrap_or(1) + 2;
+    let out = Command::new(env!("CARGO_BIN_EXE_floptle"))
+        .args(["run", &d.to_string_lossy(), "--frames", &last.to_string()])
+        .output()
+        .expect("run floptle");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&d);
+    at.iter()
+        .map(|f| {
+            let tag_line = format!("TIP {f} ");
+            let line = text.lines().find(|l| l.contains(&tag_line)).unwrap_or_else(|| panic!("{tag}: no tip at frame {f}:\n{text}"));
+            let v: Vec<f64> = line.split(&tag_line).nth(1).unwrap().split_whitespace().map(|x| x.parse().unwrap()).collect();
+            [v[0], v[1], v[2]]
+        })
+        .collect()
+}
+
+/// **A chain kicked once comes back to where the clip holds it** (card
+/// 0772). The springs stepped from the pose as drawn, with last frame's
+/// swing already laid on it, so each lock's rest was wherever it had swung
+/// to: nothing pulled it back, and long hair shoved once stood out for good.
+/// A stiff chain is pushed sideways by strong gravity for thirty frames,
+/// then left with none: another hundred frames on, the tip is back near the
+/// clip's pose, a small part of how far the push had moved it.
+#[test]
+fn a_chain_kicked_once_comes_back_to_its_animated_pose() {
+    let chain = ", spring_bones: Some((chains: [(name: \"Hair\", root: \"Hair_root\", stiffness: 4.0, drag: 0.3, max_angle: 170.0)], gravity: (0.0, 0.0, 0.0)))";
+    let still = hair_at("k-none", "", "", &[30, 130]);
+    let kicked = hair_at("k-once", chain, "if frames < 30 then a:setSpringGravity(60, 0, 0) else a:setSpringGravity(0, 0, 0) end", &[30, 130]);
+    let dist = |a: [f64; 3], b: [f64; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+    let (far, back) = (dist(still[0], kicked[0]), dist(still[1], kicked[1]));
+    assert!(far > 0.05, "the fixture: thirty frames of push moved the tip only {far:.4} (clip {:?}, pushed {:?})", still[0], kicked[0]);
+    assert!(back < far * 0.3, "a hundred frames after the push, the tip is {back:.4} from the clip's pose, against {far:.4} at the end of the push: nothing pulled it back");
+}

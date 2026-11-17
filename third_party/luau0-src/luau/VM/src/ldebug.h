@@ -21,6 +21,10 @@ LUAI_FUNC l_noret luaG_ordererror(lua_State* L, const TValue* p1, const TValue* 
 LUAI_FUNC l_noret luaG_indexerror(lua_State* L, const TValue* p1, const TValue* p2);
 LUAI_FUNC l_noret luaG_methoderror(lua_State* L, const TValue* p1, const TString* p2);
 LUAI_FUNC l_noret luaG_readonlyerror(lua_State* L);
+// FLOPTLE PATCH: every write to a readonly table goes through here. An armed
+// table (readonly == 2, see lua_floptle_arm) is disarmed and the write goes on;
+// a frozen one (readonly == 1) raises as before.
+LUAI_FUNC void luaG_readonlywrite(lua_State* L, LuaTable* t);
 
 LUAI_FUNC LUA_PRINTF_ATTR(2, 3) l_noret luaG_runerrorL(lua_State* L, const char* fmt, ...);
 LUAI_FUNC void luaG_pusherror(lua_State* L, const char* error);

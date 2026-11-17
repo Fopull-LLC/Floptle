@@ -254,6 +254,12 @@ pub struct AnimInstance {
     pose_fresh: bool,
     /// Scratch: the rig path's final local pose, script changes included.
     local: Vec<floptle_anim::TransformTRS>,
+    /// The same pose before its spring bones are laid on it: what the
+    /// springs step from. `local` carries where the chains last swung, for
+    /// scripts reading the drawn pose; stepped from that, each lock's rest
+    /// was wherever it swung last frame, nothing pulled it back, and long
+    /// hair shoved once stood out for good.
+    animated: Vec<floptle_anim::TransformTRS>,
     /// Its spring bones, bound to its skeleton ([`advance_springs`]).
     springs: Option<SpringRuntime>,
     /// The rig path posed it this frame, so its springs may step.
@@ -1242,6 +1248,7 @@ pub fn bind_entity(
                 pose_ops: Vec::new(),
                 pose_fresh: false,
                 local: Vec::new(),
+                animated: Vec::new(),
                 springs: None,
                 posed: false,
             })
@@ -1280,6 +1287,7 @@ pub fn bind_entity(
                 pose_ops: Vec::new(),
                 pose_fresh: false,
                 local: Vec::new(),
+                animated: Vec::new(),
                 springs: None,
                 posed: false,
             })
@@ -1322,6 +1330,7 @@ pub fn bind_entity(
                 pose_ops: Vec::new(),
                 pose_fresh: false,
                 local: Vec::new(),
+                animated: Vec::new(),
                 springs: None,
                 posed: false,
             })
@@ -1601,6 +1610,8 @@ pub fn apply_instance(
                 floptle_anim::ik::apply(&rig.skeleton, &mut inst.local, &ops);
             }
             rig.skeleton.world_matrices(&inst.local, &mut inst.world);
+            // The pose as animated, kept for the springs to step from.
+            inst.animated.clone_from(&inst.local);
             // The spring bones where they last swung to, laid on this pose
             // now: scripts reading bones this frame see what is drawn. The
             // frame's step comes after physics (`advance_springs`).
@@ -1864,7 +1875,7 @@ pub fn advance_springs(
                 }
             }
         }
-        if !posed || inst.local.len() != rig.skeleton.len() {
+        if !posed || inst.animated.len() != rig.skeleton.len() {
             rt.last = None;
             continue;
         }
@@ -1908,6 +1919,10 @@ pub fn advance_springs(
         }
         rt.last = Some((pos, rot));
         let gravity = rot.inverse() * Vec3::from(gravity_world) / scale;
+        // From the pose as animated, not as drawn: the chains are pulled
+        // back toward where the clips put them, and their angle limits are
+        // measured from there.
+        inst.local.clone_from(&inst.animated);
         rig.skeleton.world_matrices(&inst.local, &mut rt.skel_world);
         rt.set.step(&rig.skeleton, &mut inst.local, &mut rt.skel_world, gravity, dt);
         inst.world.clear();

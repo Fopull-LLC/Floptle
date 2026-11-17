@@ -312,11 +312,12 @@ fn profiled_frame(host: &mut ScriptHost, world: &mut World, dir: &Path, f: usize
 /// `scriptsUnnamed` 18.6 ms a frame).
 ///
 /// The library must cost under 30% of a busy instance (0.13 after). The
-/// `start`-only script is held to 1.3, its own measured bound: `start` handed
-/// it its `node` table, which a callback may still write through, so the
-/// table is checked every pass for as long as the instance lives — about
-/// 0.8 µs a pass at rest (1.06 after; 1.45 with the at-rest check off, which
-/// this bound also catches).
+/// `start`-only script is held to 0.4: `start` handed it its `node` table,
+/// which a callback may still write through, so the table is checked every
+/// pass for as long as the instance lives. Read field by field that was
+/// about 0.8 µs a pass at rest (1.06; 1.45 with the at-rest check off).
+/// Asked of the table's armed flag once a refresh had begun, 0.51; asked
+/// before the refresh, as now, 0.29.
 #[test]
 fn an_instance_without_a_hook_costs_next_to_nothing_outside_the_hooks() {
     let dir = std::env::temp_dir().join(format!("floptle-perf-hookless-{}", std::process::id()));
@@ -329,7 +330,9 @@ fn an_instance_without_a_hook_costs_next_to_nothing_outside_the_hooks() {
     );
     write_script(&dir, "starter", "defaults = { speed = 1 }\nfunction start(node) node.x = node.x + 0 end\n");
     let (idle, busy, frames) = (2000usize, 50usize, 60usize);
-    for (kind, bound) in [("lib", 0.3f32), ("starter", 1.3)] {
+    // Timed as a game runs, without re-reading every armed table.
+    crate::env::NO_CROSS_CHECK.with(|c| c.set(true));
+    for (kind, bound) in [("lib", 0.3f32), ("starter", 0.4)] {
         let mut tries = String::new();
         let mut passed = false;
         for _ in 0..3 {
@@ -371,6 +374,7 @@ fn an_instance_without_a_hook_costs_next_to_nothing_outside_the_hooks() {
         }
         assert!(passed, "2,000 idle `{kind}` instances cost more than {bound} of a busy one outside the hooks:{tries}");
     }
+    crate::env::NO_CROSS_CHECK.with(|c| c.set(false));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -430,18 +434,9 @@ fn seed_step_cost_over_an_idle_crowd() {
     }
 }
 
-/// **What keeping a handed `node` table current costs at rest**, printed:
-/// 230 instances whose only hook is `start` (so every later pass is one
-/// without a hook, checking the table it was handed), beside 50 running an
-/// `update` interleaved with them, over the frame pass, a tick and the late
-/// pass. Run with `--ignored --nocapture`.
-#[test]
-#[ignore]
-fn kept_node_tables_at_rest_cost() {
-    let dir = std::env::temp_dir().join(format!("floptle-perf-kept-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    write_script(&dir, "busy", "function update(node, dt) node.y = node.y + dt * params.speed end\n");
-    write_script(&dir, "starter", "defaults = { speed = 1 }\nfunction start(node) node.x = node.x + 0 end\n");
+/// The kept-table bench's scene: 230 `idle` instances (`starter`, whose only
+/// hook is `start`, in the bench) and 50 `busy` ones, interleaved.
+fn kept_tables_world(idle: &str) -> World {
     let mut world = World::default();
     for i in 0..280usize {
         let e = world.spawn();
@@ -449,7 +444,7 @@ fn kept_node_tables_at_rest_cost() {
         world.insert(
             e,
             Scripts(vec![floptle_core::ScriptInst {
-                kind: if i % 28 < 23 { "starter".into() } else { "busy".into() },
+                kind: if i % 28 < 23 { idle.into() } else { "busy".into() },
                 enabled: true,
                 params: vec![("speed".into(), 2.0)],
                 refs: Vec::new(),
@@ -458,21 +453,208 @@ fn kept_node_tables_at_rest_cost() {
             }]),
         );
     }
-    let mut host = ScriptHost::new();
-    host.profile().borrow_mut().enable(true);
-    for f in 0..10 {
-        profiled_frame(&mut host, &mut world, &dir, f);
+    world
+}
+
+/// **What keeping a handed `node` table current costs at rest**, printed:
+/// 230 instances whose only hook is `start` (so every later pass is one
+/// without a hook, checking the table it was handed), beside 50 running an
+/// `update` interleaved with them, over the frame pass, a tick and the late
+/// pass, checking each table field by field as before tables were armed and
+/// then armed first. Run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn kept_node_tables_at_rest_cost() {
+    let dir = std::env::temp_dir().join(format!("floptle-perf-kept-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(&dir, "busy", "function update(node, dt) node.y = node.y + dt * params.speed end\n");
+    write_script(&dir, "starter", "defaults = { speed = 1 }\nfunction start(node) node.x = node.x + 0 end\n");
+    // Both ways of checking a table, in the same run: read field by field,
+    // as before tables were armed, then armed first. Without re-reading
+    // every armed answer, as tests otherwise do.
+    crate::env::NO_CROSS_CHECK.with(|c| c.set(true));
+    for (way, chunk_only) in [("read field by field", true), ("armed first", false)] {
+        crate::env::CHUNK_ONLY.with(|c| c.set(chunk_only));
+        let mut world = kept_tables_world("starter");
+        let mut host = ScriptHost::new();
+        host.profile().borrow_mut().enable(true);
+        for f in 0..10 {
+            profiled_frame(&mut host, &mut world, &dir, f);
+        }
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let n = 600;
+        let (mut hookless, mut between) = (0.0f32, 0.0f32);
+        crate::host::STAMP_CHECK_NS.with(|c| c.set(0));
+        crate::host::STAMP_CHECK_TIMED.with(|c| c.set(true));
+        crate::host::STAMPS_SKIPPED.with(|c| c.set(0));
+        crate::host::STAMPS_SKIPPED_EARLY.with(|c| c.set(0));
+        for f in 10..10 + n {
+            let r = profiled_frame(&mut host, &mut world, &dir, f);
+            hookless += r.part("scriptsHookless");
+            between += r.part("scriptsBetweenHooks");
+        }
+        crate::host::STAMP_CHECK_TIMED.with(|c| c.set(false));
+        let check = crate::host::STAMP_CHECK_NS.with(|c| c.get()) as f32 / 1e6;
+        let f = n as f32;
+        let skipped = crate::host::STAMPS_SKIPPED.with(|c| c.get()) as f32 / f;
+        let early = crate::host::STAMPS_SKIPPED_EARLY.with(|c| c.get()) as f32 / f;
+        floptle_say::say_err!(
+            "230 kept tables at rest beside 50 busy, {way}, a frame: scriptsHookless {:.4} ms (the check's Lua call {:.4}, \
+             the rest {:.4}), scriptsBetweenHooks {:.4} ms; {skipped:.0} stamps skipped, {early:.0} of them before any refresh",
+            hookless / f,
+            check / f,
+            (hookless - check) / f,
+            between / f,
+        );
     }
-    assert!(host.errors().is_empty(), "{:?}", host.errors());
-    let n = 600;
-    let mut hookless = 0.0f32;
-    for f in 10..10 + n {
-        hookless += profiled_frame(&mut host, &mut world, &dir, f).part("scriptsHookless");
-    }
-    floptle_say::say_err!("scriptsHookless, 230 kept tables at rest beside 50 busy: {:.4} ms a frame", hookless / n as f32);
+    crate::env::CHUNK_ONLY.with(|c| c.set(false));
+    crate::env::NO_CROSS_CHECK.with(|c| c.set(false));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The script pass's time outside every hook (`scriptsHookless` plus
+/// `scriptsBetweenHooks`) a frame, over 300 frames of [`kept_tables_world`]
+/// with `idle` as the idle script.
+fn outside_hooks_ms(dir: &Path, idle: &str, chunk_only: bool) -> f32 {
+    crate::env::CHUNK_ONLY.with(|c| c.set(chunk_only));
+    let mut world = kept_tables_world(idle);
+    let mut host = ScriptHost::new();
+    host.profile().borrow_mut().enable(true);
+    for f in 0..10 {
+        profiled_frame(&mut host, &mut world, dir, f);
+    }
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let n = 300;
+    let mut ms = 0.0f32;
+    for f in 10..10 + n {
+        let r = profiled_frame(&mut host, &mut world, dir, f);
+        ms += r.part("scriptsHookless") + r.part("scriptsBetweenHooks");
+    }
+    crate::env::CHUNK_ONLY.with(|c| c.set(false));
+    ms / n as f32
+}
+
+/// **A kept `node` table at rest costs next to nothing to check.** 230
+/// instances whose only hook is `start` beside 50 busy ones, over the frame
+/// pass, a tick and the late pass: the pass's time outside the hooks, less
+/// the same for 230 hookless library instances (which hold no table), with
+/// kept tables armed must come to at most 15% of what reading each table
+/// field by field cost, measured in the same run (best of three, so a burst
+/// of load on either side does not decide it).
+///
+/// Reading the table was about 0.8 us a table a pass. Asking its armed flag
+/// instead, but only once a refresh had started, still paid the engine's own
+/// bookkeeping around the check (a profile span, the memory owner, the
+/// budget clock, three instance lookups and a registry fetch): 0.23 to 0.25
+/// of the old cost in a test build (0.20 to 0.26 optimised), which this
+/// bound fails. Asked before any of that, as `hookless_here` does, it is the
+/// instance lookup the pass makes anyway, a body lookup and one byte: 0.09
+/// in a test build and 0.03 to 0.04 optimised when this was written, about
+/// 25 ns a table a pass against 700 ns for the read.
+#[test]
+fn a_kept_node_table_at_rest_costs_next_to_nothing_to_check() {
+    let dir = std::env::temp_dir().join(format!("floptle-perf-armed-rest-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(&dir, "busy", "function update(node, dt) node.y = node.y + dt * params.speed end\n");
+    write_script(&dir, "starter", "defaults = { speed = 1 }\nfunction start(node) node.x = node.x + 0 end\n");
+    write_script(&dir, "lib", "defaults = { speed = 1 }\nlocal count = 0\nfunction bump() count = count + 1 return count end\n");
+    crate::env::NO_CROSS_CHECK.with(|c| c.set(true));
+    let mut tries = String::new();
+    let mut passed = false;
+    for _ in 0..3 {
+        let base = outside_hooks_ms(&dir, "lib", false);
+        let read = outside_hooks_ms(&dir, "starter", true) - base;
+        let armed = outside_hooks_ms(&dir, "starter", false) - base;
+        let ratio = armed / read;
+        tries += &format!(
+            "\n  {ratio:.3}: armed {armed:.4} ms, read field by field {read:.4} ms a frame over the hookless baseline {base:.4}"
+        );
+        if ratio <= 0.15 {
+            passed = true;
+            break;
+        }
+    }
+    crate::env::NO_CROSS_CHECK.with(|c| c.set(false));
+    let _ = std::fs::remove_dir_all(&dir);
+    floptle_say::say_err!("230 kept tables at rest, outside the hooks:{tries}");
+    assert!(passed, "checking 230 armed tables at rest cost more than 15% of reading them:{tries}");
+}
+
+/// A busy script's hook time per frame, best of `rounds`, with kept tables
+/// armed (`chunk_only` false) or read field by field as before: 20
+/// instances of `src` (kind `rw`), 30 frames after 5 to warm up.
+fn busy_hook_ms(dir: &Path, src: &str, chunk_only: bool, rounds: usize) -> f32 {
+    write_script(dir, "rw", src);
+    let mut best = f32::INFINITY;
+    for _ in 0..rounds {
+        crate::env::CHUNK_ONLY.with(|c| c.set(chunk_only));
+        let mut world = scripted_crowd("rw", 20, 0);
+        let mut host = ScriptHost::new();
+        host.profile().borrow_mut().enable(true);
+        for f in 0..5 {
+            profiled_frame(&mut host, &mut world, dir, f);
+        }
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let mut ms = 0.0f32;
+        for f in 5..35 {
+            let r = profiled_frame(&mut host, &mut world, dir, f);
+            ms += r.scripts.iter().filter(|(n, _)| n == "rw").map(|(_, ms)| *ms).sum::<f32>();
+        }
+        crate::env::CHUNK_ONLY.with(|c| c.set(false));
+        best = best.min(ms / 30.0);
+    }
+    best
+}
+
+const BUSY_READS: &str = "function update(node, dt)\n  local s = 0\n  for i = 1, 2000 do s = s + node.x + node.y + node.z end\n  sum = s\nend\n";
+const BUSY_WRITES: &str = "function update(node, dt)\n  local x = node.x\n  for i = 1, 2000 do node.x = x + i * 1e-9 end\n  node.x = x\nend\n";
+
+/// **Arming a kept `node` table costs a busy script nothing.** A script
+/// reading its `node` six thousand times an `update`, and one writing it two
+/// thousand times, timed with kept tables armed and with them read field by
+/// field as before, in the same run (best of five each, alternating, so a
+/// burst of load lands on both): reads within 1.05 of the old cost, writes
+/// within 1.10. An armed table reads through the same direct fields and
+/// inline caches as any table; only the first write after each stamp takes
+/// Luau's slow path, once.
+///
+/// And the measurement has teeth: the same reads through a ten-line proxy
+/// table around `node` (the design this one was chosen over) must come out
+/// well over the bound.
+#[test]
+fn an_armed_node_table_costs_a_busy_script_nothing() {
+    let dir = std::env::temp_dir().join(format!("floptle-perf-armed-rw-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::env::NO_CROSS_CHECK.with(|c| c.set(true));
+    let proxy = "function update(node, dt)\n\
+        local p = setmetatable({}, { __index = node, __newindex = function(_, k, v) node[k] = v end })\n\
+        local s = 0\n  for i = 1, 2000 do s = s + p.x + p.y + p.z end\n  sum = s\nend\n";
+    let mut report = String::new();
+    let mut wrong = Vec::new();
+    for (what, src, bound) in [("reads", BUSY_READS, 1.05f32), ("writes", BUSY_WRITES, 1.10)] {
+        let (mut armed, mut read) = (f32::INFINITY, f32::INFINITY);
+        for _ in 0..5 {
+            armed = armed.min(busy_hook_ms(&dir, src, false, 1));
+            read = read.min(busy_hook_ms(&dir, src, true, 1));
+        }
+        let ratio = armed / read;
+        report += &format!("\n  {what}: armed {armed:.4} ms, read field by field {read:.4} ms a frame, {ratio:.3}");
+        if ratio > bound {
+            wrong.push(format!("{what} cost {ratio:.3} of the old cost, over {bound}"));
+        }
+    }
+    let plain = busy_hook_ms(&dir, BUSY_READS, true, 3);
+    let proxied = busy_hook_ms(&dir, proxy, false, 3);
+    let teeth = proxied / plain;
+    report += &format!("\n  reads through a proxy: {proxied:.4} ms against {plain:.4}, {teeth:.2}");
+    if teeth < 1.5 {
+        wrong.push(format!("reads through a proxy cost only {teeth:.2} of plain reads, so this measures nothing"));
+    }
+    crate::env::NO_CROSS_CHECK.with(|c| c.set(false));
+    let _ = std::fs::remove_dir_all(&dir);
+    floptle_say::say_err!("busy scripts with armed node tables:{report}");
+    assert!(wrong.is_empty(), "{}:{report}", wrong.join("; "));
+}
 
 /// **`perf.sampleLimit` raises the sampler's line limit and says what it
 /// is.** Set, it reads back; asked with nothing, it answers; a limit of zero

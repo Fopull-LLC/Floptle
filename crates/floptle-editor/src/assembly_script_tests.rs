@@ -334,6 +334,75 @@ end
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **A sleeper says what push it rests under, and wakes when that push is
+/// no longer laid.** A force lasts one physics tick, so a craft held up in
+/// part by a steady push (buoyancy, a hover pad) keeps getting it every
+/// fixedUpdate, and falls asleep under it. `assembly.info` gives that push as
+/// `restPush` while it sleeps and nil while it is awake; a script that stops
+/// pushing wakes it, with `force`.
+#[test]
+fn a_sleeper_reports_the_push_it_rests_under_and_wakes_when_it_stops() {
+    let (mut ed, dir) = project(
+        "restpush",
+        r#"
+local ship, parts, step, pushing = nil, {}, 0, true
+function fixedUpdate(node, dt)
+  if ship and #parts == 4 and pushing then
+    local i = assembly.info(ship)
+    if i then assembly.force(ship, vec3(0, 0.5 * i.mass * 9.81, 0)) end
+  end
+end
+function update(node, dt)
+  step = step + 1
+  if step == 1 then
+    spawn("Vessel", vec3(0, 2.0, -10), function(v)
+      ship = v
+      v:getcomponent("RigidBody").gravity = true
+      for i = 1, 4 do
+        local x, z = (i % 2) - 0.5, math.floor((i - 1) / 2) - 0.5
+        spawn("Part", vec3(x, 2.0, -10 + z), function(p)
+          parts[#parts + 1] = p
+          if #parts == 4 then assembly.rebuild(v) end
+        end, v)
+      end
+    end)
+  elseif ship and #parts == 4 then
+    local i = assembly.info(ship)
+    if step == 8 then log(string.format("REST air %s %s", tostring(i.asleep), tostring(i.restPush))) end
+    if step == 240 then
+      local p = i.restPush
+      log(string.format("REST landed %s %.3f", tostring(i.asleep), p and (p.y / (0.5 * i.mass * 9.81)) or -1))
+      pushing = false
+    end
+    if step == 250 then log(string.format("REST dropped %s %s %s", tostring(i.asleep), i.wake, tostring(i.restPush))) end
+  end
+end
+"#,
+    );
+    let ground = ed.world.spawn();
+    ed.world.insert(
+        ground,
+        Transform { translation: DVec3::new(0.0, -1.0, -10.0), rotation: Quat::IDENTITY, scale: Vec3::ONE },
+    );
+    ed.world.insert(ground, Name("Ground".into()));
+    ed.world.insert(ground, Matter::Empty);
+    ed.world.insert(
+        ground,
+        RigidBody { kind: BodyKind::Box, mode: floptle_core::BodyMode::Static, half_extents: [10.0, 1.0, 10.0], ..Default::default() },
+    );
+    let g = ed.world.spawn();
+    ed.world.insert(g, Transform::IDENTITY);
+    ed.world.insert(g, Matter::GravityVolume { mode: floptle_core::GravityMode::Down, strength: 9.81, radius: 1000.0 });
+    ed.toggle_play();
+    run(&mut ed, 252);
+    let got = lines(&mut ed, "REST");
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(got[0], "air false nil", "awake in the air, it rests under nothing: {got:?}");
+    assert!(got[1].starts_with("landed true 1.0"), "asleep, it rests under the push laid on it every tick: {got:?}");
+    assert!(got[2].starts_with("dropped false force nil"), "a push no longer laid wakes it, with force: {got:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A body switched off on a planet that is moving on its rails rides the
 /// planet while it is off, node and all, and is where it was relative to the
 /// planet when it is switched back on.

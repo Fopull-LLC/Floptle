@@ -1211,6 +1211,9 @@ pub struct GeometryArenaStats {
     pub written: u64,
     /// Bytes of slots moved out of emptying pages so far.
     pub moved: u64,
+    /// Pages and growths the GPU refused for want of video memory so far:
+    /// the slots that asked keep buffers of their own instead.
+    pub refused: u64,
 }
 
 fn slot_cap(n: u32) -> u32 {
@@ -1537,6 +1540,8 @@ pub struct Raster {
     field_rev: u64,
     /// Material-shader pipelines built so far, on any thread.
     flsl_built: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Whether a colour store the GPU could not grow has been said (once).
+    tpaint_refused_said: bool,
 }
 
 /// The WGSL every raster-pass module starts from: the pass shader + the shared
@@ -2551,6 +2556,7 @@ impl Raster {
             mesh_rewrites: 0,
             tpaint_buf,
             tpaint_len: 1, // slot 0 is the reserved dummy
+            tpaint_refused_said: false,
             tpaint_free: HashMap::new(),
             dyn_free: Vec::new(),
             skin_joints_buf,
@@ -4661,18 +4667,29 @@ impl Raster {
             );
             return 0;
         }
-        self.tpaint_len += cap + 1;
-
-        let needed = (self.tpaint_len as u64) * 4;
+        let needed = (self.tpaint_len as u64 + cap as u64 + 1) * 4;
         if needed > self.tpaint_buf.size() {
-            let new_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            // A card out of video memory for a bigger store keeps the one it
+            // has: these chunks draw untinted, as when the store is full,
+            // and it is said once rather than raised as a device error.
+            let Some(new_buf) = gpu.try_create_buffer(&wgpu::BufferDescriptor {
                 label: Some("raster-tpaint"),
                 size: needed.next_power_of_two(),
                 usage: wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::COPY_DST
                     | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
-            });
+            }) else {
+                if !self.tpaint_refused_said {
+                    self.tpaint_refused_said = true;
+                    log::warn!(
+                        "terrain colours: the GPU is out of video memory to grow the colour store past {:.1} MiB; \
+                         chunks that do not fit draw untinted. Said once.",
+                        self.tpaint_buf.size() as f64 / 1048576.0
+                    );
+                }
+                return 0;
+            };
             let mut enc = gpu
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("tpaint-grow") });
@@ -4681,6 +4698,7 @@ impl Raster {
             self.tpaint_buf = new_buf;
             self.rebuild_globals_bind(&gpu.device);
         }
+        self.tpaint_len += cap + 1;
         base
     }
 
@@ -4834,8 +4852,11 @@ impl Raster {
         }
         if !left.is_empty() {
             let (v, ix) = left.iter().fold((0u32, 0u32), |(v, ix), (_, r)| (v.saturating_add(r.v_cap), ix.saturating_add(r.i_cap)));
+            // A card out of room for the new page leaves those slots where
+            // they are: the page empties less this time, and nothing breaks.
             let page = self.arena.new_page(gpu, v, ix);
             for (i, old) in left {
+                let Some(page) = page else { break };
                 let new = match self.arena.alloc_in(page, old.v_cap, old.i_cap) {
                     Some(new) => Some(new),
                     None => {
@@ -4932,7 +4953,16 @@ impl Raster {
             live: self.arena.live_bytes(),
             written: self.arena.written,
             moved: self.arena.moved,
+            refused: self.arena.refused,
         }
+    }
+
+    /// Hold the geometry arena's pages to `bytes` in all, refusing a page or
+    /// a growth past it as a card out of video memory would (`None` lifts
+    /// it). For tests of what a full card does: slots that do not fit keep
+    /// buffers of their own and draw as before.
+    pub fn set_geometry_vram_cap(&mut self, bytes: Option<u64>) {
+        self.arena.cap_vram(bytes);
     }
 
     /// The GPU memory meshes `ids` really hold, for a memory budget: the

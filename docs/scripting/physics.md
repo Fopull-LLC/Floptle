@@ -220,7 +220,16 @@ overlapping.
 `assembly.force(node, f)` pushes through the CoM; `assembly.impulseAt` is a
 one-shot kick (explosions, docking bumps). All vectors are world-space
 `vec3`s. Forces are **held per tick** and applied through every physics
-substep — call them from `fixedUpdate` for continuous thrust.
+substep — call them from `fixedUpdate` for continuous thrust. Calls made in
+one tick add up, and a tick with no call pushes nothing.
+
+A craft held up by a steady push (buoyancy, a hover pad, a magnet) can still
+fall asleep, under that push. It stays asleep while the push laid on it each
+tick stays within a fifth of its weight (plus 1%) of what it fell asleep
+under, so keep calling `assembly.force` while it sleeps: a push that stops
+being laid wakes it, with `node.wake` reading `"force"`.
+`assembly.info(node).restPush` and `.restTorque` say what it rests under
+(nil while it is awake).
 
 **Script-assembled vessels:** spawn part prefabs as children of an assembly
 root (`spawn(part, pos, fn, vesselNode)`), then call

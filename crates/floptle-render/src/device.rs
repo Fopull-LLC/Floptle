@@ -515,6 +515,27 @@ impl Gpu {
         true
     }
 
+    /// Make a buffer, or `None` when the device is out of video memory for
+    /// it. The failure is caught here, inside its own error scope, so it is
+    /// answered to the caller rather than raised as a device error: a store
+    /// that cannot grow keeps what it has and sheds detail instead. A browser
+    /// cannot wait on the scope, so there the buffer is made as before.
+    pub fn try_create_buffer(&self, desc: &wgpu::BufferDescriptor<'_>) -> Option<wgpu::Buffer> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let memory = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+            let b = self.device.create_buffer(desc);
+            if pollster::block_on(memory.pop()).is_some() {
+                return None;
+            }
+            Some(b)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Some(self.device.create_buffer(desc))
+        }
+    }
+
     /// Can the device still make a texture and a view of it? Asked inside its
     /// own error scopes, so a failure is answered here and reported nowhere.
     #[cfg(not(target_arch = "wasm32"))]

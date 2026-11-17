@@ -207,6 +207,9 @@ LUA_API void lua_createtable(lua_State* L, int narr, int nrec);
 
 LUA_API void lua_setreadonly(lua_State* L, int idx, int enabled);
 LUA_API int lua_getreadonly(lua_State* L, int idx);
+// FLOPTLE PATCH: see lapi.cpp. `p` is a table's address from lua_topointer.
+LUA_API void lua_floptle_arm(const void* p);
+LUA_API int lua_floptle_armed(const void* p);
 LUA_API void lua_setsafeenv(lua_State* L, int idx, int enabled);
 
 LUA_API int lua_getmetatable(lua_State* L, int objindex);
