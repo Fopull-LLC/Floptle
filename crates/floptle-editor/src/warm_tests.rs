@@ -292,6 +292,13 @@ fn warmed_shaders_land_one_a_frame_under_a_name() {
     assert_eq!(landed, vec![(1, true); SHADERS.len()], "(shaders landed, named) per frame");
 }
 
+/// The built-in glow effect, from the engine's own list. Its seeded copy under
+/// `assets/shaders/examples/ui/` is gitignored and written only when a project
+/// opens, so a fresh checkout does not have it until some other test has run.
+fn ui_glow_source() -> &'static str {
+    crate::ui_shader_lib::UI_EFFECTS.iter().find(|(_, stem, _)| *stem == "ui_glow").expect("ui_glow is a built-in effect").2
+}
+
 /// **UI and screen shaders warm through the same list.** `assets.warm`
 /// refused a `stage ui` shader, so each HUD shader built on the frame it
 /// first drew.
@@ -302,7 +309,7 @@ fn ui_and_screen_shaders_can_be_warmed() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("shaders")).unwrap();
     let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shaders/examples");
-    std::fs::copy(examples.join("ui/ui_glow.flsl"), dir.join("shaders/glow.flsl")).unwrap();
+    std::fs::write(dir.join("shaders/glow.flsl"), ui_glow_source()).unwrap();
     std::fs::copy(examples.join("crtScanlines.flsl"), dir.join("shaders/crt.flsl")).unwrap();
     ed.project_root = dir.clone();
     let (ui, post) = ("shaders/glow.flsl", "shaders/crt.flsl");
@@ -396,8 +403,7 @@ fn a_hud_shader_a_scene_puts_on_screen_is_built_off_the_frame() {
     let dir = std::env::temp_dir().join(format!("floptle-warm-hud-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("shaders")).unwrap();
-    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shaders/examples");
-    std::fs::copy(examples.join("ui/ui_glow.flsl"), dir.join("shaders/glow.flsl")).unwrap();
+    std::fs::write(dir.join("shaders/glow.flsl"), ui_glow_source()).unwrap();
     ed.project_root = dir.clone();
     let ui = "shaders/glow.flsl";
     let e = ed.world.spawn();
