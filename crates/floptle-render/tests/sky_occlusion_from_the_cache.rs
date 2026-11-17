@@ -349,29 +349,40 @@ fn a_proxy_that_moves_darkens_where_it_goes_at_once_and_leaves_its_old_place() {
 }
 
 /// GPU milliseconds a frame of the sea through `bind` takes while the
-/// camera runs back and forth along the shore a tenth of a unit a frame
-/// (six units a second at 60 fps) from `view`, the cache refreshed every
-/// frame (its fill included): the least of several rounds.
-fn walking_cost(beach: &mut Beach, timer: &mut floptle_render::GpuTimer, view: View, bind: floptle_render::FlslBindingId, refresh: bool) -> f32 {
-    const FRAMES: usize = 20;
-    let mut best = f32::MAX;
+/// camera runs back and forth a tenth of a unit a frame (six units a second
+/// at 60 fps) from `view`, along `axis`, the cache refreshed every frame:
+/// (the fill, the draw), each the least of several rounds' mean.
+///
+/// Ahead of each frame the GPU is handed a full march of the sea to draw,
+/// which takes it longer than the CPU takes to plan and submit the frame:
+/// so the GPU never waits on the CPU inside a span, and the spans hold GPU
+/// time alone. Timed back to back, the planner's CPU time had shown up as
+/// fill time, about half of it.
+fn walking_cost(beach: &mut Beach, timer: &mut floptle_render::GpuTimer, view: View, axis: DVec3, bind: floptle_render::FlslBindingId, busy: floptle_render::FlslBindingId, refresh: bool) -> (f32, f32) {
+    const FRAMES: usize = 16;
+    let (mut fill, mut draw) = (f32::MAX, f32::MAX);
     let mut k = 0usize;
     for _ in 0..8 {
         if !timer.begin() {
             continue;
         }
-        timer.mark(&beach.gpu, "walk");
         for _ in 0..FRAMES {
             k += 1;
             let leg = (k % 600) as f64;
-            let shift = DVec3::new(0.0, 0.0, 0.1 * if leg < 300.0 { leg } else { 600.0 - leg } - 15.0);
+            // Back and forth across thirty units: round the start along
+            // the ground, and upward from it, never under the sea.
+            let w = 0.1 * if leg < 300.0 { leg } else { 600.0 - leg };
+            let shift = axis * if axis.y > 0.0 { w } else { w - 15.0 };
             let (g, eye, rm) = beach.stage_with(view, Layout::Crowd, shift);
+            beach.draw(g, eye, busy);
+            timer.mark(&beach.gpu, "fill");
             if refresh {
                 beach.refresh(rm, eye);
             }
+            timer.mark(&beach.gpu, "draw");
             beach.draw(g, eye, bind);
+            timer.mark_gap(&beach.gpu);
         }
-        timer.mark_gap(&beach.gpu);
         timer.end(&beach.gpu);
         for _ in 0..200 {
             beach.gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
@@ -380,11 +391,13 @@ fn walking_cost(beach: &mut Beach, timer: &mut floptle_render::GpuTimer, view: V
                 break;
             }
         }
-        if let Some(s) = timer.spans().iter().find(|s| s.label == "walk") {
-            best = best.min(s.ms / FRAMES as f32);
+        let sum = |label: &str| timer.spans().iter().filter(|s| s.label == label).map(|s| s.ms).sum::<f32>() / FRAMES as f32;
+        if timer.spans().iter().any(|s| s.label == "draw") {
+            fill = fill.min(sum("fill"));
+            draw = draw.min(sum("draw"));
         }
     }
-    best
+    (fill, draw)
 }
 
 /// What `skyOcclusion(worldPos, up, 24)` costs on the crowded beach, over
@@ -408,6 +421,7 @@ fn a_crowded_beach_costs_a_few_field_reads_through_the_cache() {
     let plain = beach.shader("1.0");
     let six = beach.shader(SIX_READS);
     let sky = beach.shader("skyOcclusion(worldPos, vec3(0, 1, 0), 24)");
+    let busy = beach.shader_with("skyOcclusion(worldPos, vec3(0, 1, 0), 24)", Some(("sky_occlusion(", "sky_full(")), FULL_MARCH);
     for view in [View::EyeLevel, View::Above] {
         beach.raymarch.set_sky_cache(&beach.gpu, None);
         let (globals, eye, rm) = beach.stage_with(view, Layout::Crowd, DVec3::ZERO);
@@ -435,15 +449,30 @@ fn a_crowded_beach_costs_a_few_field_reads_through_the_cache() {
         let t = cost(&mut beach, &mut timer, globals, eye, &[plain, six, sky, plain, six, sky]);
         let base2 = t[0].min(t[3]);
         let (reads2, steady) = (t[1].min(t[4]) - base2, t[2].min(t[5]) - base2);
-        let walk_plain = walking_cost(&mut beach, &mut timer, view, plain, false);
-        let walk = walking_cost(&mut beach, &mut timer, view, sky, true) - walk_plain;
-        let fill = walking_cost(&mut beach, &mut timer, view, plain, true) - walk_plain;
+        // Walking along each axis in turn: a scroll exposes a slab across
+        // a different axis of the atlas each way.
+        let mut walks = Vec::new();
+        for axis in [DVec3::Z, DVec3::X, DVec3::Y] {
+            let (_, plain_draw) = walking_cost(&mut beach, &mut timer, view, axis, plain, busy, false);
+            let (fill, draw) = walking_cost(&mut beach, &mut timer, view, axis, sky, busy, true);
+            walks.push((fill, draw - plain_draw));
+        }
+        let walk = |(f, d): (f32, f32)| format!("{:.3} ({f:.3} fill + {d:.3} draw)", f + d);
         println!(
-            "{view:?} crowd: plain {base:.3} ms; over it, six reads {reads:.3} / {reads2:.3}; skyOcclusion reach 24 marched {march:.3}, cache settled {steady:.3}, all proxies moving {moving:.3}, camera walking {walk:.3} (of which the fill {fill:.3})"
+            "{view:?} crowd: plain {base:.3} ms; over it, six reads {reads:.3} / {reads2:.3}; skyOcclusion reach 24 marched {march:.3}, cache settled {steady:.3}, all proxies moving {moving:.3}; camera walking along z {}, x {}, y {}",
+            walk(walks[0]), walk(walks[1]), walk(walks[2])
         );
         let r = reads.min(reads2).max(0.01);
         assert!(steady <= 2.5 * r, "{view:?}: through the settled cache skyOcclusion costs {steady:.3} ms, {:.1} times six reads ({r:.3} ms)", steady / r);
         assert!(moving <= 1.5 * steady.max(0.02), "{view:?}: with every proxy moving it costs {moving:.3} ms, {:.1} times the settled {steady:.3} ms", moving / steady.max(0.02));
+        for ((fill, draw), axis) in walks.into_iter().zip(["z", "x", "y"]) {
+            assert!(
+                fill + draw <= WALK_TIMES * r,
+                "{view:?}: with the camera walking along {axis} skyOcclusion costs {:.3} ms ({fill:.3} of it the fill), {:.1} times six reads ({r:.3} ms)",
+                fill + draw,
+                (fill + draw) / r
+            );
+        }
     }
 }
 
@@ -484,6 +513,11 @@ fn sky_lvl0(p: vec3<f32>, n: vec3<f32>, reach: f32) -> f32 {
     }
 }
 
+/// How many times six reads the op may cost while the camera walks, fill
+/// and draw together. It measures 1.8 to 2.6 times on an RTX 4060; with the
+/// fill marching a cell's six cones one after another in one lane, 3.8.
+const WALK_TIMES: f32 = 3.25;
+
 /// Cells written so far: those with their filled bit, in a read-back buffer.
 fn written(words: &[u32]) -> usize {
     use floptle_render::sky_cache::{SKY_CELLS, SKY_HEADER_WORDS};
@@ -491,9 +525,8 @@ fn written(words: &[u32]) -> usize {
 }
 
 /// From a cache starting from nothing, the GPU fills no more than the
-/// budget's worth of cells in any frame (half again for the dither's
-/// unevenness), fills every cell in the end, and once full, a camera
-/// standing still writes nothing at all.
+/// budget's worth of cells in any frame, fills every cell in the end, and
+/// once full, a camera standing still writes nothing at all.
 #[test]
 fn the_fill_keeps_to_its_budget_and_a_still_camera_writes_nothing() {
     use floptle_render::sky_cache::{SKY_BUDGET, SKY_CELLS, SKY_HEADER_WORDS};
@@ -509,7 +542,7 @@ fn the_fill_keeps_to_its_budget_and_a_still_camera_writes_nothing() {
     }
     println!("most cells written in a frame {most} (budget {SKY_BUDGET}); {last} of {SKY_CELLS} written");
     assert_eq!(last, SKY_CELLS as usize, "not every cell was filled");
-    assert!(most <= SKY_BUDGET as usize * 3 / 2, "a frame wrote {most} cells, over the budget of {SKY_BUDGET}");
+    assert!(most <= SKY_BUDGET as usize, "a frame wrote {most} cells, over the budget of {SKY_BUDGET}");
     let before = beach.raymarch.read_sky_cache(&beach.gpu, 0).unwrap();
     for _ in 0..24 {
         beach.refresh(rm, eye);

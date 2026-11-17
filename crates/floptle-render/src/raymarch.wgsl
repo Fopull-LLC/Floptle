@@ -949,24 +949,71 @@ fn fog_to_pixel(px: vec2<u32>, pdims: vec2<u32>) -> vec4<u32> {
 // slabs front to back into what the camera sees to each slice.
 // ---- The sky cache's fill (`Raymarch::refresh_sky_cache`) --------------------
 //
-// One texel of the atlas per cell, level by level, the levels' cells in the
-// same order as the buffer the atlas is copied into. A cell is filled when a
-// refilling box on its level holds it and it is in that box's dither this
-// frame. A stale cell (filled for another place, or never) that is not due
-// is written empty; everything else is left as it was.
+// Two passes. The first shades the cells due side by side into a small
+// target, six texels a cell (one a lobe) in the order the header's runs
+// number them, so every lane of a wave is a lobe due and a cell's six cones
+// march at once: a frame's few hundred cells fill a sliver of the GPU, and
+// the pass lasts as long as its slowest lane. The second runs over the atlas, one
+// texel a cell, level by level in the same order as the buffer the atlas is
+// copied into: a cell due takes its answer from the first pass's texels
+// (copied behind the cells), a stale cell (filled for another place, or
+// never) that is not due is written empty, and everything else is left as
+// it was.
 
-// The atlas's width, texels (`SKY_ATLAS_W`).
+// The atlas's width, texels (`SKY_ATLAS_W`), and the compact target's.
 const SKYC_ATLAS_W: u32 = 1536u;
+const SKYC_COMPACT_W: u32 = 64u;
 
-// A cell's place in the dither, from its place in storage (which stays the
-// same while the cell stands for the same place). Taken a tile of 8 by 4
-// texels at a time, about what one GPU wave shades: a dither cell by cell
-// left each wave with one or two cells to fill and the rest idle, so a
-// frame's few thousand cells cost what tens of thousands would.
-fn skyc_hash(i: u32) -> u32 {
-    var x = i * 747796405u + 2891336453u;
-    x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
-    return (x >> 22u) ^ x;
+// Run `r`'s size along each axis.
+fn skyc_run_dims(r: u32) -> vec3<u32> {
+    let w = skyc_word(SKYC_RUN + r * SKYC_RUN_WORDS + 1u);
+    return vec3<u32>(w & 63u, (w >> 6u) & 63u, (w >> 12u) & 63u);
+}
+
+// Run `r`'s first lattice cell, the low ten bits on each axis.
+fn skyc_run_lo(r: u32) -> vec3<u32> {
+    let w = skyc_word(SKYC_RUN + r * SKYC_RUN_WORDS);
+    return vec3<u32>(w & 1023u, (w >> 10u) & 1023u, (w >> 20u) & 1023u);
+}
+
+// A level's window corner's lattice cell, the low ten bits on each axis.
+fn skyc_low(l: u32) -> vec3<u32> {
+    let w = skyc_word(SKYC_LEVEL + l * SKYC_LEVEL_WORDS + 7u);
+    return vec3<u32>(w & 1023u, (w >> 10u) & 1023u, (w >> 20u) & 1023u);
+}
+
+@fragment
+fn fs_sky_fill_compact(in: VOut) -> @location(0) vec4<u32> {
+    let px = vec2<u32>(in.clip.xy);
+    let t = px.y * SKYC_COMPACT_W + px.x;
+    let k = t / 6u;
+    if (k >= skyc_word(SKYC_DUE)) {
+        discard;
+    }
+    let nr = min(skyc_word(SKYC_RUNS), 64u);
+    for (var r = 0u; r < nr; r = r + 1u) {
+        let o = SKYC_RUN + r * SKYC_RUN_WORDS;
+        let k0 = skyc_word(o + 4u);
+        if (k < k0 || k >= k0 + skyc_word(o + 5u)) {
+            continue;
+        }
+        let dims = skyc_run_dims(r);
+        let l = skyc_word(o + 1u) >> 24u;
+        let j = skyc_word(o + 3u) + (k - k0) * skyc_word(o + 2u);
+        let d = vec3<u32>(j % dims.x, (j / dims.x) % dims.y, j / (dims.x * dims.y));
+        // Where the cell is in its level's window now, which may have
+        // scrolled on since the run started.
+        let off = (skyc_run_lo(r) + d + vec3<u32>(1024u) - skyc_low(l)) & vec3<u32>(1023u);
+        if (any(off >= vec3<u32>(SKYC_DIMS))) {
+            return vec4<u32>(0u);
+        }
+        let lo = SKYC_LEVEL + l * SKYC_LEVEL_WORDS;
+        let cell = skyc_f(lo + 3u);
+        let c = skyc_corner(l) + (vec3<f32>(off) + vec3<f32>(0.5)) * cell;
+        let lobe = skyc_fill_lobe(c, cell, t % 6u, skyc_f(SKYC_REACH));
+        return vec4<u32>(lobe, skyc_place(skyc_word(lo + 7u), skyc_word(lo + 8u), off));
+    }
+    return vec4<u32>(0u);
 }
 
 @fragment
@@ -982,33 +1029,48 @@ fn fs_sky_fill(in: VOut) -> @location(0) vec4<u32> {
     let s = vec3<u32>(r % SKYC_DIMS, (r / SKYC_DIMS) % SKYC_DIMS, r / (SKYC_DIMS * SKYC_DIMS));
     let o = SKYC_LEVEL + l * SKYC_LEVEL_WORDS;
     let off = (s + vec3<u32>(SKYC_DIMS) - skyc_mod(l)) % vec3<u32>(SKYC_DIMS);
-    let cell = skyc_f(o + 3u);
-    let c = skyc_corner(l) + (vec3<f32>(off) + vec3<f32>(0.5)) * cell;
-    let h = skyc_hash((px.y / 4u) * (SKYC_ATLAS_W / 8u) + px.x / 8u);
-    var due = false;
-    let nb = min(skyc_word(SKYC_BOXES), 16u);
-    for (var k = 0u; k < nb; k = k + 1u) {
-        let b = SKYC_BOX + k * 8u;
-        let pw = skyc_word(b + 3u);
-        if (((pw >> 24u) & (1u << l)) == 0u) {
+    let lat = (skyc_low(l) + off) & vec3<u32>(1023u);
+    // The run holding this cell with it due this frame, and its texel in
+    // the first pass's: the inverse of `fs_sky_fill_compact`'s numbering.
+    let nr = min(skyc_word(SKYC_RUNS), 64u);
+    for (var q = 0u; q < nr; q = q + 1u) {
+        let b = SKYC_RUN + q * SKYC_RUN_WORDS;
+        if ((skyc_word(b + 1u) >> 24u) != l) {
             continue;
         }
-        let lo = vec3<f32>(skyc_f(b), skyc_f(b + 1u), skyc_f(b + 2u));
-        let hi = vec3<f32>(skyc_f(b + 4u), skyc_f(b + 5u), skyc_f(b + 6u));
-        if (all(c >= lo) && all(c <= hi) && h % max(pw & 0xFFFFFFu, 1u) == skyc_word(b + 7u)) {
-            due = true;
-            break;
+        let dims = skyc_run_dims(q);
+        let d = (lat + vec3<u32>(1024u) - skyc_run_lo(q)) & vec3<u32>(1023u);
+        if (any(d >= dims)) {
+            continue;
         }
+        let j = (d.z * dims.y + d.y) * dims.x + d.x;
+        let period = skyc_word(b + 2u);
+        let phase = skyc_word(b + 3u);
+        if (j % period != phase) {
+            continue;
+        }
+        // The cell's six lobes, as the first pass left them.
+        let at = (SKYC_HEADER_WORDS / 4u) + per * SKYC_LEVELS + 6u * (skyc_word(b + 4u) + (j - phase) / period);
+        var x = 0u;
+        var y = 0u;
+        for (var a = 0u; a < 6u; a = a + 1u) {
+            let v = sky_buf[at + a];
+            if (a < 4u) {
+                x = x | (v.x << (8u * a));
+            } else {
+                y = y | (v.x << (8u * (a - 4u)));
+            }
+        }
+        let v = sky_buf[at];
+        return vec4<u32>(x, y | ((v.y & 255u) << 16u) | ((v.y >> 8u) << 24u), v.zw);
     }
     let place = skyc_place(skyc_word(o + 7u), skyc_word(o + 8u), off);
-    if (!due) {
-        let old = sky_buf[SKYC_HEADER_WORDS / 4u + i];
-        if (any(old.zw != place) && any(old != vec4<u32>(0u))) {
-            return vec4<u32>(0u);
-        }
-        discard;
+    let old = sky_buf[SKYC_HEADER_WORDS / 4u + i];
+    if (any(old.zw != place) && any(old != vec4<u32>(0u))) {
+        return vec4<u32>(0u);
     }
-    return skyc_fill(c, cell, place, skyc_f(SKYC_REACH));
+    discard;
+    return old;
 }
 
 @fragment

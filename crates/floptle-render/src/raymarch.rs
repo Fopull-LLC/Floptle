@@ -683,7 +683,8 @@ pub struct Raymarch {
     sky_slots: Vec<SkySlot>,
     sky_idle: u32,
     sky_active: Option<usize>,
-    sky_fill_pipeline: wgpu::RenderPipeline,
+    /// The sky cache's fill: the cells due side by side, then into place.
+    sky_fill_pipeline: [wgpu::RenderPipeline; 2],
     /// What the sky binding holds while no cache is: a header that says off.
     sky_fallback: wgpu::Buffer,
     /// Volume edits since the caches last refreshed (slot, voxel box), and
@@ -1152,10 +1153,12 @@ impl Raymarch {
         self.sky_fill_pipeline = Self::build_sky_fill_pipeline(gpu, &self.pipeline_layout, &module);
     }
 
-    /// The sky cache's fill pass: one texel a cell, into the atlas.
-    fn build_sky_fill_pipeline(gpu: &Gpu, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule) -> wgpu::RenderPipeline {
-        gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raymarch-sky-fill"),
+    /// The sky cache's fill passes: the cells due, one texel each, into the
+    /// compact target (`fs_sky_fill_compact`); then one texel a cell, into
+    /// the atlas (`fs_sky_fill`).
+    fn build_sky_fill_pipeline(gpu: &Gpu, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule) -> [wgpu::RenderPipeline; 2] {
+        ["fs_sky_fill_compact", "fs_sky_fill"].map(|entry| gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(entry),
             layout: Some(layout),
             vertex: wgpu::VertexState {
                 module,
@@ -1168,13 +1171,13 @@ impl Raymarch {
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module,
-                entry_point: Some("fs_sky_fill"),
+                entry_point: Some(entry),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState { format: SKY_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
             }),
             multiview_mask: None,
             cache: gpu.pipeline_cache.as_ref(),
-        })
+        }))
     }
 
     /// The sky-capture pipeline: the same module and the same bind group as the
@@ -2713,26 +2716,49 @@ impl Raymarch {
         if !frame.fill {
             return;
         }
-        use crate::sky_cache::{SKY_ATLAS_W, SKY_HEADER_BYTES, SKY_LEVEL_ROWS, SKY_TEXEL};
+        use crate::sky_cache::{SKY_ATLAS_W, SKY_COMPACT_W, SKY_HEADER_BYTES, SKY_LEVEL_ROWS, SKY_SCRATCH_BYTES, SKY_TEXEL};
         let s = &self.sky_slots[slot];
         // The fill reads this frame's field.
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raymarch-sky-fill") });
+        let pass = |encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, label: &str| {
+            encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(label),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime()
+        };
+        // The cells due, side by side: only the rows they reach.
+        let rows = (frame.cells * crate::sky_cache::SKY_COMPACT_PER_CELL).div_ceil(SKY_COMPACT_W);
         {
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("raymarch-sky-fill"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &s.atlas_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            rp.set_pipeline(&self.sky_fill_pipeline);
+            let mut rp = pass(&mut encoder, &s.compact_view, "raymarch-sky-fill-compact");
+            rp.set_pipeline(&self.sky_fill_pipeline[0]);
+            rp.set_bind_group(0, &self.bind, &[]);
+            rp.set_scissor_rect(0, 0, SKY_COMPACT_W, rows);
+            rp.draw(0..3, 0..1);
+        }
+        // Behind the cells, where the second pass reads them.
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &s.compact, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &s.buf,
+                layout: wgpu::TexelCopyBufferLayout { offset: SKY_SCRATCH_BYTES, bytes_per_row: Some(SKY_COMPACT_W * SKY_TEXEL), rows_per_image: Some(rows) },
+            },
+            wgpu::Extent3d { width: SKY_COMPACT_W, height: rows, depth_or_array_layers: 1 },
+        );
+        {
+            let mut rp = pass(&mut encoder, &s.atlas_view, "raymarch-sky-fill");
+            rp.set_pipeline(&self.sky_fill_pipeline[1]);
             rp.set_bind_group(0, &self.bind, &[]);
             // Only the levels with cells due: each is a band of rows.
             for (l, _) in frame.due.iter().enumerate().filter(|(_, d)| **d) {
@@ -3300,38 +3326,47 @@ pub(crate) fn sky_fallback_buffer(device: &wgpu::Device) -> wgpu::Buffer {
     })
 }
 
-/// One view's sky cache: the planner, the atlas the fill pass renders, and
-/// the buffer the atlas is copied into behind the header, which every
-/// surface reads.
+/// One view's sky cache: the planner, the atlas the fill pass renders, the
+/// compact target its first pass shades the cells due into, and the buffer
+/// the atlas is copied into behind the header, which every surface reads
+/// (with the compact target's copy behind the cells, for the fill alone).
 struct SkySlot {
     view: u64,
     cache: crate::sky_cache::SkyCache,
     atlas: wgpu::Texture,
     atlas_view: wgpu::TextureView,
+    compact: wgpu::Texture,
+    compact_view: wgpu::TextureView,
     buf: wgpu::Buffer,
 }
 
 impl SkySlot {
     fn new(device: &wgpu::Device, view: u64, reach: f32) -> Self {
-        use crate::sky_cache::{SKY_ATLAS_H, SKY_ATLAS_W, SKY_HEADER_BYTES, SKY_TEXEL};
-        let atlas = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("raymarch-sky-atlas"),
-            size: wgpu::Extent3d { width: SKY_ATLAS_W, height: SKY_ATLAS_H, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: SKY_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
+        use crate::sky_cache::{SKY_ATLAS_H, SKY_ATLAS_W, SKY_COMPACT_H, SKY_COMPACT_W, SKY_SCRATCH_BYTES, SKY_TEXEL};
+        let target = |label: &str, width: u32, height: u32| {
+            let t = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: SKY_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let v = t.create_view(&wgpu::TextureViewDescriptor::default());
+            (t, v)
+        };
+        let (atlas, atlas_view) = target("raymarch-sky-atlas", SKY_ATLAS_W, SKY_ATLAS_H);
+        let (compact, compact_view) = target("raymarch-sky-compact", SKY_COMPACT_W, SKY_COMPACT_H);
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raymarch-sky-cache"),
-            size: SKY_HEADER_BYTES + (SKY_ATLAS_W * SKY_ATLAS_H * SKY_TEXEL) as u64,
+            size: SKY_SCRATCH_BYTES + (SKY_COMPACT_W * SKY_COMPACT_H * SKY_TEXEL) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        SkySlot { view, cache: crate::sky_cache::SkyCache::new(reach), atlas, atlas_view, buf }
+        const _: () = assert!(crate::sky_cache::SKY_SCRATCH_BYTES == crate::sky_cache::SKY_HEADER_BYTES + (SKY_ATLAS_W * SKY_ATLAS_H * SKY_TEXEL) as u64);
+        SkySlot { view, cache: crate::sky_cache::SkyCache::new(reach), atlas, atlas_view, compact, compact_view, buf }
     }
 }
 

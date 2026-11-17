@@ -51,6 +51,18 @@
 //! are merged with others like them. A still camera with nothing dirty
 //! refills nothing and runs no pass.
 //!
+//! **The fill's shape.** A started box is frozen as a run of lattice cells
+//! on each of its levels, and its dither is a stride: on the frame `f`
+//! frames into a period of `P`, the cells due are the run's `f`th, then
+//! every `P`th after it, in the run's own order. So the cells due are
+//! counted exactly, never over the budget, and the GPU can number them:
+//! the fill shades them side by side into a small target, a lane for each
+//! of a cell's six lobes, and a second pass puts each cell in its place. A
+//! frame's few hundred cells fill a sliver of the GPU, so the pass lasts as
+//! long as its slowest lane: six cones marched one after another in each
+//! lane of the atlas had made the fill cost more than the cache saved
+//! while the camera walked.
+//!
 //! The GPU half is in `raymarch.rs` (the fill pass and the buffer) and
 //! `field.wgsl` (`sky_cached`, the read).
 
@@ -70,6 +82,8 @@ pub const SKY_BUDGET: u32 = 2048;
 pub const SKY_SETTLE_FRAMES: u32 = 30;
 /// Boxes refilling at once (the header's room for them).
 pub const SKY_MAX_BOXES: usize = 16;
+/// Runs refilling at once: each refilling box, on each of its levels.
+pub const SKY_MAX_RUNS: usize = SKY_MAX_BOXES * SKY_LEVELS;
 /// Boxes waiting at most; past it, a new one merges into a waiting one.
 const MAX_WAITING: usize = 64;
 /// Cells along each side of the moving-proxy mask grid.
@@ -106,6 +120,14 @@ pub const SKY_TEXEL: u32 = 16;
 /// Rows of the atlas each level takes.
 pub const SKY_LEVEL_ROWS: u32 = SKY_DIMS * SKY_DIMS * SKY_DIMS / SKY_ATLAS_W;
 const _: () = assert!(SKY_LEVEL_ROWS * SKY_ATLAS_W == SKY_DIMS * SKY_DIMS * SKY_DIMS);
+/// Texels across the target the cells due are shaded into side by side.
+/// A multiple of 16, as the atlas's.
+pub const SKY_COMPACT_W: u32 = 64;
+/// Texels of it a cell takes: one a lobe.
+pub const SKY_COMPACT_PER_CELL: u32 = 6;
+/// Its rows: room for the budget and every run's rounding up.
+pub const SKY_COMPACT_H: u32 = ((SKY_BUDGET + SKY_MAX_RUNS as u32) * SKY_COMPACT_PER_CELL).div_ceil(SKY_COMPACT_W);
+const _: () = assert!((SKY_COMPACT_W * SKY_TEXEL).is_multiple_of(256));
 
 // The header: 32-bit words at the front of the buffer, ahead of the cells.
 // `field.wgsl` reads them at the same offsets (`SKYC_*`).
@@ -113,23 +135,31 @@ pub(crate) const H_ON: usize = 0;
 pub(crate) const H_REACH: usize = 1;
 pub(crate) const H_SETTLED: usize = 2;
 pub(crate) const H_MOVING: usize = 3;
-pub(crate) const H_BOXES: usize = 4;
+/// Runs in the frame's fill, and the cells due in them all.
+pub(crate) const H_RUNS: usize = 4;
 pub(crate) const H_GRID_CELL: usize = 5;
+pub(crate) const H_DUE: usize = 6;
 pub(crate) const H_GRID_ORIGIN: usize = 8;
 /// Per level, [`H_LEVEL_WORDS`] words: window corner (camera-relative xyz),
 /// cell size, the corner's lattice coordinate modulo the size (xyz), its
 /// low ten bits on each axis packed, and the level's epoch.
 pub(crate) const H_LEVEL: usize = 16;
 pub(crate) const H_LEVEL_WORDS: usize = 12;
-/// Per box, 8 words: min (camera-relative xyz), period with the levels it
-/// covers in the top byte, max (xyz), phase.
-pub(crate) const H_BOX: usize = H_LEVEL + SKY_LEVELS * H_LEVEL_WORDS;
-pub(crate) const H_GRID: usize = 256;
+/// Per run with cells due this frame, [`H_RUN_WORDS`] words: its first
+/// lattice cell's low ten bits on each axis, packed as a level's corner is;
+/// its size, six bits an axis, with its level in the top byte; the period,
+/// the phase, where its cells start in the compact target and how many.
+pub(crate) const H_RUN: usize = H_LEVEL + SKY_LEVELS * H_LEVEL_WORDS;
+pub(crate) const H_RUN_WORDS: usize = 6;
+pub(crate) const H_GRID: usize = 512;
 /// Words in the header.
 pub const SKY_HEADER_WORDS: usize = H_GRID + (SKY_GRID * SKY_GRID * SKY_GRID) as usize;
 /// Bytes of the header: a multiple of 256, so the cells start on a copy row.
 pub const SKY_HEADER_BYTES: u64 = (SKY_HEADER_WORDS * 4) as u64;
-const _: () = assert!(H_BOX + SKY_MAX_BOXES * 8 <= H_GRID);
+const _: () = assert!(H_RUN + SKY_MAX_RUNS * H_RUN_WORDS <= H_GRID);
+const _: () = assert!(SKY_DIMS < 64);
+/// Where the compact target's copy lands in the buffer: behind the cells.
+pub const SKY_SCRATCH_BYTES: u64 = SKY_HEADER_BYTES + (SKY_CELLS * SKY_TEXEL) as u64;
 const _: () = assert!(SKY_HEADER_BYTES.is_multiple_of(256));
 const _: () = assert!((SKY_ATLAS_W * SKY_TEXEL).is_multiple_of(256));
 
@@ -161,11 +191,12 @@ pub struct SkyFrame {
     pub header: Vec<u32>,
     /// Whether the fill pass runs this frame.
     pub fill: bool,
-    /// Cells the fill refills this frame, about (the boxes' shares).
+    /// Cells the fill refills this frame: exactly those due, each a texel
+    /// of the compact target, in order.
     pub cells: u32,
-    /// The levels the fill pass need visit: those a refilling box covers.
-    /// Each is [`SKY_LEVEL_ROWS`] rows of the atlas, so the pass and the
-    /// copy skip the rest.
+    /// The levels the fill pass need visit: those with cells due. Each is
+    /// [`SKY_LEVEL_ROWS`] rows of the atlas, so the pass and the copy skip
+    /// the rest.
     pub due: [bool; SKY_LEVELS],
 }
 
@@ -203,7 +234,46 @@ struct Active {
     job: Job,
     start: u64,
     period: u32,
+    /// The most cells it refills in a frame.
     rate: f64,
+    /// Its cells on each level, as they were when it started.
+    runs: Vec<Run>,
+}
+
+/// A box's cells on one level: the lattice cells from `lo`, `dims` along
+/// each axis, that were in the level's window when the box started. A
+/// window that scrolls on meanwhile brings its own new cells in with a box
+/// of their own, so a run stays as it started; any of its cells the window
+/// has left are skipped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Run {
+    level: usize,
+    lo: [i64; 3],
+    dims: [u32; 3],
+}
+
+impl Run {
+    fn cells(&self) -> u32 {
+        self.dims[0] * self.dims[1] * self.dims[2]
+    }
+}
+
+/// A period for `runs` that fits `left` cells a frame, if one does: as
+/// short as the cells allow, longer where each run's rounding up would go
+/// over.
+fn fit(runs: &[Run], left: f64) -> Option<(u32, f64)> {
+    let cells: u32 = runs.iter().map(Run::cells).sum();
+    let rate = |p: u32| runs.iter().map(|r| r.cells().div_ceil(p)).sum::<u32>() as f64;
+    let mut p = (cells as f64 / left).ceil().max(1.0) as u32;
+    if rate(p) > left {
+        // Each run rounds up by under a cell, so this is always room.
+        let room = left - runs.len() as f64;
+        if room < 1.0 {
+            return None;
+        }
+        p = (cells as f64 / room).ceil().max(1.0) as u32;
+    }
+    Some((p, rate(p)))
 }
 
 /// A proxy as tracked, anchor-relative.
@@ -550,33 +620,30 @@ impl SkyCache {
         let mut left = self.budget as f64 - self.active.iter().map(|b| b.rate).sum::<f64>();
         let mut k = 0;
         while k < self.waiting.len() && self.active.len() < SKY_MAX_BOXES && left >= 1.0 {
-            let cells = self.job_cells(&self.waiting[k]);
-            if cells < 0.5 {
+            let runs = self.job_runs(&self.waiting[k]);
+            if runs.is_empty() {
                 // Nothing of it is in any window now.
                 self.waiting.remove(k);
                 continue;
             }
-            let period = (cells / left).ceil().max(1.0);
-            if period > self.waiting[k].cap as f64 {
+            let Some((period, rate)) = fit(&runs, left).filter(|(p, _)| *p <= self.waiting[k].cap) else {
                 // Too big for the room left: wait for more, and let the
                 // smaller ones behind it in.
                 k += 1;
                 continue;
-            }
-            let period = period as u32;
-            let rate = cells / period as f64;
+            };
             left -= rate;
             let job = self.waiting.remove(k);
-            self.active.push(Active { job, start: frame, period, rate });
+            self.active.push(Active { job, start: frame, period, rate, runs });
         }
-        if self.active.is_empty()
-            && let Some(job) = (!self.waiting.is_empty()).then(|| self.waiting.remove(0))
-        {
+        while self.active.is_empty() && !self.waiting.is_empty() {
             // Nothing refilling and the first box too big for its cap: it
             // goes anyway, over as many frames as the budget asks.
-            let cells = self.job_cells(&job);
-            let period = (cells / self.budget as f64).ceil().max(1.0) as u32;
-            self.active.push(Active { rate: cells / period as f64, job, start: frame, period });
+            let job = self.waiting.remove(0);
+            let runs = self.job_runs(&job);
+            if let Some((period, rate)) = fit(&runs, self.budget as f64).filter(|_| !runs.is_empty()) {
+                self.active.push(Active { job, start: frame, period, rate, runs });
+            }
         }
 
         // Read per pixel: every proxy not baked in, and every one whose
@@ -619,24 +686,34 @@ impl SkyCache {
             h[o + 7] = low;
             h[o + 8] = self.epoch[l];
         }
+        // The runs with cells due: on the frame `f` into its box's period,
+        // a run's cells `f`, `f + P`, `f + 2P`... in its own order (x
+        // fastest), numbered on from the runs before it.
         let mut due = [false; SKY_LEVELS];
-        let mut cells = 0.0;
-        h[H_BOXES] = self.active.len() as u32;
-        for (k, b) in self.active.iter().enumerate() {
-            let o = H_BOX + k * 8;
-            for a in 0..3 {
-                h[o + a] = f((b.job.lo[a] - rel[a]) as f32);
-                h[o + 4 + a] = f((b.job.hi[a] - rel[a]) as f32);
-            }
-            h[o + 3] = b.period | ((b.job.levels as u32) << 24);
-            h[o + 7] = ((frame - b.start) % b.period as u64) as u32;
-            for (l, dl) in due.iter_mut().enumerate() {
-                if b.job.levels & (1 << l) != 0 && self.level_cells(l, b.job.lo, b.job.hi) > 0.0 {
-                    *dl = true;
+        let mut cells = 0u32;
+        let mut runs = 0usize;
+        for b in &self.active {
+            let phase = ((frame - b.start) % b.period as u64) as u32;
+            for r in &b.runs {
+                let n = r.cells();
+                if phase >= n {
+                    continue;
                 }
+                let count = (n - phase).div_ceil(b.period);
+                let o = H_RUN + runs * H_RUN_WORDS;
+                h[o] = (0..3).map(|a| ((r.lo[a] & 1023) as u32) << (10 * a)).sum();
+                h[o + 1] = r.dims[0] | (r.dims[1] << 6) | (r.dims[2] << 12) | ((r.level as u32) << 24);
+                h[o + 2] = b.period;
+                h[o + 3] = phase;
+                h[o + 4] = cells;
+                h[o + 5] = count;
+                cells += count;
+                due[r.level] = true;
+                runs += 1;
             }
-            cells += b.rate;
         }
+        h[H_RUNS] = runs as u32;
+        h[H_DUE] = cells;
         // The moving proxies' mask grid, round the camera.
         let gh = SKY_GRID as f32 * SKY_GRID_CELL * 0.5;
         h[H_GRID_CELL] = f(SKY_GRID_CELL);
@@ -664,7 +741,7 @@ impl SkyCache {
             }
         }
         self.stats = stats;
-        SkyFrame { header: h, fill: due.iter().any(|d| *d), cells: cells.round() as u32, due }
+        SkyFrame { header: h, fill: cells > 0, cells, due }
     }
 
     /// Forget level `l` in every box: its cells there are gone.
@@ -674,8 +751,11 @@ impl SkyCache {
             j.levels &= bit;
         }
         self.waiting.retain(|j| j.levels != 0);
-        // A refilling box keeps its period; refilling a level's new cells
-        // in it is harmless.
+        // A refilling box keeps its period, and its share of the budget,
+        // but its cells on the level are gone.
+        for b in &mut self.active {
+            b.runs.retain(|r| r.level != l);
+        }
     }
 
     /// Queue a box. A waiting box of the same priority and levels that it
@@ -708,8 +788,26 @@ impl SkyCache {
         }
     }
 
-    fn job_cells(&self, j: &Job) -> f64 {
-        (0..SKY_LEVELS).filter(|l| j.levels & (1 << l) != 0).map(|l| self.level_cells(l, j.lo, j.hi)).sum()
+    /// A box's cells on each of its levels now: those whose centres it
+    /// holds, in the level's window.
+    fn job_runs(&self, j: &Job) -> Vec<Run> {
+        let Some(mins) = self.mins else { return Vec::new() };
+        let d = SKY_DIMS as i64;
+        let mut runs = Vec::new();
+        for level in (0..SKY_LEVELS).filter(|l| j.levels & (1 << l) != 0) {
+            let cell = level_cell(level) as f64;
+            let mut r = Run { level, lo: [0; 3], dims: [0; 3] };
+            for (a, &m) in mins[level].iter().enumerate() {
+                let lo = ((j.lo[a] / cell - 0.5).ceil() as i64).max(m);
+                let hi = ((j.hi[a] / cell - 0.5).floor() as i64).min(m + d - 1);
+                r.lo[a] = lo;
+                r.dims[a] = (hi - lo + 1).max(0) as u32;
+            }
+            if r.cells() > 0 {
+                runs.push(r);
+            }
+        }
+        runs
     }
 
     /// Cells of level `l`'s window inside an anchor-relative box.
@@ -791,6 +889,11 @@ impl SkyCache {
     /// The refilling boxes' (start, period), for tests.
     fn active_boxes(&self) -> Vec<(u64, u32)> {
         self.active.iter().map(|b| (b.start, b.period)).collect()
+    }
+
+    /// The refilling boxes' bounds (anchor-relative) and levels, for tests.
+    fn active_jobs(&self) -> Vec<(DVec3, DVec3, u8)> {
+        self.active.iter().map(|b| (b.job.lo, b.job.hi, b.job.levels)).collect()
     }
 
     /// The longest period of a refilling box that is not a level starting
@@ -911,24 +1014,146 @@ mod tests {
         fill_up(&mut c, cam, &g);
         let edit = SkyEdit { min: Vec3::new(1.0, -6.0, 2.0), max: Vec3::new(3.0, -4.0, 3.0) };
         let f = c.plan(&view(cam), &g, &[], &[edit]);
-        assert_eq!(f.header[H_BOXES], 1);
-        let feel = c.feel() as f32;
-        let at = |w: usize| f32::from_bits(f.header[H_BOX + w]);
+        assert_eq!(c.stats().boxes, 1);
+        let feel = c.feel();
+        let (lo, hi, levels) = c.active_jobs()[0];
         for a in 0..3 {
-            assert!((at(a) - (edit.min[a] - feel)).abs() < 1e-3, "min {a}: {}", at(a));
-            assert!((at(4 + a) - (edit.max[a] + feel)).abs() < 1e-3, "max {a}: {}", at(4 + a));
+            assert!((lo[a] - (edit.min[a] as f64 + cam[a] - feel)).abs() < 1e-3, "min {a}: {}", lo[a]);
+            assert!((hi[a] - (edit.max[a] as f64 + cam[a] + feel)).abs() < 1e-3, "max {a}: {}", hi[a]);
         }
-        assert_eq!(f.header[H_BOX + 3] >> 24, 0xF, "on every level");
-        let period = f.header[H_BOX + 3] & 0xFF_FFFF;
+        assert_eq!(levels, 0xF, "on every level");
+        assert_eq!(f.header[H_RUNS], 4, "a run on every level");
+        let period = f.header[H_RUN + 2];
         assert!(period <= CAP_URGENT, "an edit is put right within two seconds: {period} frames");
-        // The box is camera-relative: the camera moving moves it the other way.
         let cam2 = cam + DVec3::new(0.0, 0.0, 0.25);
-        let f = c.plan(&view(cam2), &globals(cam2), &[], &[]);
-        assert!((f32::from_bits(f.header[H_BOX + 2]) - (edit.min.z - feel - 0.25)).abs() < 1e-3);
-        for _ in 0..period {
+        c.plan(&view(cam2), &globals(cam2), &[], &[]);
+        for _ in 1..period {
             c.plan(&view(cam2), &globals(cam2), &[], &[]);
         }
         assert_eq!(c.stats().boxes, 0, "retired once its dither has gone round once");
+    }
+
+    /// The cells due in a frame as the fill numbers them: for each run in
+    /// the header, its `count` cells from `phase` in steps of the period,
+    /// at compact texels from `k0` on. (level, lattice cell's low bits, k).
+    fn numbered(h: &[u32]) -> Vec<(usize, [i64; 3], u32)> {
+        let mut out = Vec::new();
+        for r in 0..h[H_RUNS] as usize {
+            let o = H_RUN + r * H_RUN_WORDS;
+            let lo = [h[o] & 1023, (h[o] >> 10) & 1023, (h[o] >> 20) & 1023];
+            let dims = [h[o + 1] & 63, (h[o + 1] >> 6) & 63, (h[o + 1] >> 12) & 63];
+            let level = (h[o + 1] >> 24) as usize;
+            for i in 0..h[o + 5] {
+                let j = h[o + 3] + i * h[o + 2];
+                let d = [j % dims[0], (j / dims[0]) % dims[1], j / (dims[0] * dims[1])];
+                assert!(d[2] < dims[2], "run {r}: cell {j} is past its {dims:?}");
+                let lat = [0, 1, 2].map(|a| ((lo[a] + d[a]) & 1023) as i64);
+                out.push((level, lat, h[o + 4] + i));
+            }
+        }
+        out
+    }
+
+    /// The compact texel the fill reads back for a cell, the way the second
+    /// pass finds it from the cell's side: the run holding it, and its place
+    /// in the run's order if it is due this frame.
+    fn found(h: &[u32], level: usize, lat: [i64; 3]) -> Option<u32> {
+        for r in 0..h[H_RUNS] as usize {
+            let o = H_RUN + r * H_RUN_WORDS;
+            let dims = [h[o + 1] & 63, (h[o + 1] >> 6) & 63, (h[o + 1] >> 12) & 63];
+            if (h[o + 1] >> 24) as usize != level {
+                continue;
+            }
+            let d = [0, 1, 2].map(|a| ((lat[a] as u32 & 1023) + 1024 - ((h[o] >> (10 * a)) & 1023)) & 1023);
+            if (0..3).any(|a| d[a] >= dims[a]) {
+                continue;
+            }
+            let j = (d[2] * dims[1] + d[1]) * dims[0] + d[0];
+            if j % h[o + 2] == h[o + 3] % h[o + 2] && j >= h[o + 3] {
+                return Some(h[o + 4] + (j - h[o + 3]) / h[o + 2]);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn every_cell_of_a_box_is_refilled_once_over_its_period_and_numbered_both_ways() {
+        let mut c = SkyCache::new(24.0);
+        let cam = DVec3::new(0.3, 5.0, -0.7);
+        let g = globals(cam);
+        fill_up(&mut c, cam, &g);
+        let edit = SkyEdit { min: Vec3::new(1.0, -6.0, 2.0), max: Vec3::new(3.0, -4.0, 3.0) };
+        let mut f = c.plan(&view(cam), &g, &[], &[edit]);
+        let (lo, hi, _) = c.active_jobs()[0];
+        // Every window cell whose centre the box holds, on every level.
+        let mins = c.mins.unwrap();
+        let mut want = std::collections::HashMap::new();
+        for (l, m) in mins.iter().enumerate() {
+            let cell = level_cell(l) as f64;
+            for z in m[2]..m[2] + SKY_DIMS as i64 {
+                for y in m[1]..m[1] + SKY_DIMS as i64 {
+                    for x in m[0]..m[0] + SKY_DIMS as i64 {
+                        let p = (DVec3::new(x as f64, y as f64, z as f64) + 0.5) * cell;
+                        if p.cmpge(lo).all() && p.cmple(hi).all() {
+                            want.insert((l, [x & 1023, y & 1023, z & 1023]), 0u32);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(want.len() > 10_000, "the fixture: {} cells", want.len());
+        let mut frames = 0;
+        while c.stats().boxes > 0 {
+            let cells = numbered(&f.header);
+            assert_eq!(cells.len() as u32, f.cells);
+            assert_eq!(f.header[H_DUE], f.cells);
+            assert!(f.cells <= SKY_BUDGET, "{} cells", f.cells);
+            for (k, &(l, lat, at)) in cells.iter().enumerate() {
+                assert_eq!(at, k as u32, "the compact texels are numbered in order");
+                assert_eq!(found(&f.header, l, lat), Some(at), "level {l} cell {lat:?}: the second pass reads another texel");
+                *want.get_mut(&(l, lat)).unwrap_or_else(|| panic!("level {l} cell {lat:?} is not in the box")) += 1;
+            }
+            f = c.plan(&view(cam), &g, &[], &[]);
+            frames += 1;
+            assert!(frames <= CAP_URGENT, "still refilling after {frames} frames");
+        }
+        let wrong: Vec<_> = want.iter().filter(|(_, n)| **n != 1).take(4).collect();
+        assert!(wrong.is_empty(), "cells refilled other than once: {wrong:?}");
+    }
+
+    /// The shaders read the header at the offsets it is written at.
+    #[test]
+    fn the_shaders_read_the_header_where_it_is_written() {
+        let src = [include_str!("field.wgsl"), include_str!("raymarch.wgsl")].concat();
+        let get = |name: &str| -> usize {
+            let key = format!("const {name}: u32 = ");
+            let at = src.find(&key).unwrap_or_else(|| panic!("{name} is not in the shaders"));
+            let rest = &src[at + key.len()..];
+            rest[..rest.find('u').unwrap()].parse().unwrap()
+        };
+        for (name, want) in [
+            ("SKYC_ON", H_ON),
+            ("SKYC_REACH", H_REACH),
+            ("SKYC_SETTLED", H_SETTLED),
+            ("SKYC_MOVING", H_MOVING),
+            ("SKYC_RUNS", H_RUNS),
+            ("SKYC_GRID_CELL", H_GRID_CELL),
+            ("SKYC_DUE", H_DUE),
+            ("SKYC_GRID_ORIGIN", H_GRID_ORIGIN),
+            ("SKYC_LEVEL", H_LEVEL),
+            ("SKYC_LEVEL_WORDS", H_LEVEL_WORDS),
+            ("SKYC_RUN", H_RUN),
+            ("SKYC_RUN_WORDS", H_RUN_WORDS),
+            ("SKYC_GRID", H_GRID),
+            ("SKYC_GRID_DIMS", SKY_GRID as usize),
+            ("SKYC_HEADER_WORDS", SKY_HEADER_WORDS),
+            ("SKYC_DIMS", SKY_DIMS as usize),
+            ("SKYC_LEVELS", SKY_LEVELS),
+            ("SKYC_ATLAS_W", SKY_ATLAS_W as usize),
+            ("SKYC_COMPACT_W", SKY_COMPACT_W as usize),
+        ] {
+            assert_eq!(get(name), want, "{name}");
+        }
     }
 
     #[test]
@@ -1106,10 +1331,8 @@ mod tests {
         assert_eq!(c.stats().settled, 0b01, "the moved one left the cache");
         assert_eq!(c.stats().moving, 0b10, "and is read per pixel");
         assert_eq!(c.stats().boxes, 1, "its old place is refilled");
-        let lo = f32::from_bits(f.header[H_BOX]);
-        let hi = f32::from_bits(f.header[H_BOX + 4]);
-        let x = 5.0 - cam.x as f32;
-        assert!(lo < x && x < hi, "{lo}..{hi} misses {x}");
+        let (lo, hi, _) = c.active_jobs()[0];
+        assert!(lo.x < 5.0 && 5.0 < hi.x, "{lo}..{hi} misses x = 5");
         let gh = SKY_GRID as f32 * SKY_GRID_CELL * 0.5;
         let cell = |p: Vec3| {
             let i = ((p + Vec3::splat(gh)) / SKY_GRID_CELL).floor().as_ivec3();

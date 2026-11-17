@@ -2554,15 +2554,17 @@ const SKYC_ON: u32 = 0u;
 const SKYC_REACH: u32 = 1u;
 const SKYC_SETTLED: u32 = 2u;
 const SKYC_MOVING: u32 = 3u;
-const SKYC_BOXES: u32 = 4u;
+const SKYC_RUNS: u32 = 4u;
 const SKYC_GRID_CELL: u32 = 5u;
+const SKYC_DUE: u32 = 6u;
 const SKYC_GRID_ORIGIN: u32 = 8u;
 const SKYC_LEVEL: u32 = 16u;
 const SKYC_LEVEL_WORDS: u32 = 12u;
-const SKYC_BOX: u32 = 64u;
-const SKYC_GRID: u32 = 256u;
+const SKYC_RUN: u32 = 64u;
+const SKYC_RUN_WORDS: u32 = 6u;
+const SKYC_GRID: u32 = 512u;
 const SKYC_GRID_DIMS: u32 = 16u;
-const SKYC_HEADER_WORDS: u32 = 4352u;
+const SKYC_HEADER_WORDS: u32 = 4608u;
 const SKYC_DIMS: u32 = 48u;
 const SKYC_LEVELS: u32 = 4u;
 
@@ -2780,15 +2782,18 @@ fn skyc_static(settled: u32) -> FieldSet {
     return FieldSet(vm, settled, true, false, 0.0);
 }
 
-// A cell as the fill pass writes it (`fs_sky_fill`): its answer for the six
-// axis directions, its distance and flags, and `place` (`skyc_place`). `c`
-// is its centre, camera-relative, and `cell` its size.
-fn skyc_fill(c: vec3<f32>, cell: f32, place: vec2<u32>, reach: f32) -> vec4<u32> {
+// One lobe of a cell as the fill shades it (`fs_sky_fill_compact`, a lane
+// a lobe, so a cell's six cones march side by side rather than one after
+// another): the cone's answer along axis `a` (x+, x-, y+, y-, z+, z-), and
+// the cell's distance and flags as the cell's second word carries them
+// above its lobes: (lobe, distance | flags << 8). `c` is the cell's
+// centre, camera-relative, and `cell` its size.
+fn skyc_fill_lobe(c: vec3<f32>, cell: f32, a: u32, reach: f32) -> vec2<u32> {
     let pieces = skyc_static(skyc_word(SKYC_SETTLED));
     let d = field_set_d(c, pieces, 0u);
     let dist = u32(clamp(d / cell * 64.0, 0.0, 255.0));
     if (d <= 0.0) {
-        return vec4<u32>(0u, (dist << 16u) | (1u << 24u), place);
+        return vec2<u32>(0u, dist | (1u << 8u));
     }
     // A cone's rays start a lift off its point, along its axis. Where
     // matter lies inside that stretch (the centre just under a plank), the
@@ -2798,28 +2803,16 @@ fn skyc_fill(c: vec3<f32>, cell: f32, place: vec2<u32>, reach: f32) -> vec4<u32>
     // along the stretch hold all of it; one big one would also take in
     // ground beside the stretch, and the cells by every shore would give up.
     let lift = sky_ray_lift(3u, shadow_lift_base(c));
-    var lobe: array<u32, 6>;
-    for (var a = 0u; a < 6u; a = a + 1u) {
-        var axis = vec3<f32>(0.0);
-        axis[a >> 1u] = select(1.0, -1.0, (a & 1u) == 1u);
-        var hit = false;
-        if (d < lift) {
-            for (var k = 0u; k < 4u; k = k + 1u) {
-                if (field_set_d(c + axis * ((f32(k) + 0.5) * 0.25 * lift), pieces, 0u) < 0.125 * lift) {
-                    hit = true;
-                    break;
-                }
+    var axis = vec3<f32>(0.0);
+    axis[a >> 1u] = select(1.0, -1.0, (a & 1u) == 1u);
+    if (d < lift) {
+        for (var k = 0u; k < 4u; k = k + 1u) {
+            if (field_set_d(c + axis * ((f32(k) + 0.5) * 0.25 * lift), pieces, 0u) < 0.125 * lift) {
+                return vec2<u32>(SKYC_UNSURE, dist | (3u << 8u));
             }
         }
-        if (hit) {
-            lobe[a] = SKYC_UNSURE;
-            continue;
-        }
-        lobe[a] = u32(round(clamp(sky_cone(c, axis, reach, pieces), 0.0, 1.0) * 254.0));
     }
-    let x = lobe[0] | (lobe[1] << 8u) | (lobe[2] << 16u) | (lobe[3] << 24u);
-    let y = lobe[4] | (lobe[5] << 8u) | (dist << 16u) | (3u << 24u);
-    return vec4<u32>(x, y, place);
+    return vec2<u32>(u32(round(clamp(sky_cone(c, axis, reach, pieces), 0.0, 1.0) * 254.0)), dist | (3u << 8u));
 }
 
 // `sky_occlusion`'s cone over only the pieces in `within`: what the four

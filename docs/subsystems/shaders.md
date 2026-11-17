@@ -489,8 +489,12 @@ mean difference from the march is under 0.01 and 95% of the sea is within
 not yet a project setting. `sky_occlusion_from_the_cache.rs` holds its
 answers against the march (still terrain, a thin plank, the crowded beach,
 a deck pushed along) and its cost against six field reads: no more than
-two and a half times, where the march on the crowded beach costs six to
-eight times.
+two and a half times with the camera still, where the march on the crowded
+beach costs six to eight times, and no more than three and a quarter times
+with the camera walking, the refills of the cells it walks into counted in.
+The fill shades the cells due side by side, a GPU lane for each of a cell's
+six cones, so a frame's few hundred cells cost about as long as one cone
+takes to march.
 
 ### 4.5 Moving the surface: `output offset`
 
