@@ -414,6 +414,11 @@ pub enum CullBy {
 
 
 impl AnimSystem {
+    /// Whether any instance plays a rig, so spring bones could have work.
+    pub fn has_springs(&self) -> bool {
+        self.instances.values().any(|i| matches!(i.binding, AnimBinding::Rig))
+    }
+
     /// Hand this frame's skeleton poses to the scripts (`node:bonePos`).
     pub fn publish_bones(
         &mut self,
@@ -1815,6 +1820,40 @@ fn spring_teleport(dt: f32) -> f64 {
     (60.0 * dt as f64).max(2.0)
 }
 
+/// The time spring bones measure a frame's motion over, per node: what the
+/// node's drawn pose actually advanced by. A node a body places (or one riding
+/// under it) is drawn between two ticks, so it moves on the simulation's step,
+/// `drawn`. Anything else moves on the clock its scripts use, which is that
+/// same step when the project runs scripts on the simulation clock and the
+/// frame's otherwise. The two agree until the catch-up budget or slow motion
+/// drops ticks, and then a chain measured over the wrong one feels a shove
+/// every frame that is not there.
+#[derive(Clone, Copy, Debug)]
+pub struct SpringClock<'a> {
+    pub frame: f32,
+    pub drawn: f32,
+    pub scripts_on_sim: bool,
+    /// Nodes the simulation draws interpolated (see
+    /// `PhysicsSim::interpolated_nodes`).
+    pub interpolated: &'a std::collections::HashSet<u32>,
+}
+
+impl SpringClock<'_> {
+    fn for_node(&self, world: &World, e: Entity) -> f32 {
+        if self.scripts_on_sim {
+            return self.drawn;
+        }
+        let mut at = Some(e);
+        while let Some(n) = at {
+            if self.interpolated.contains(&n.index()) {
+                return self.drawn;
+            }
+            at = world.get::<floptle_core::Parent>(n).map(|p| p.0);
+        }
+        self.frame
+    }
+}
+
 /// **Step every rigged model's spring bones** (`floptle_core::SpringBones`)
 /// and lay them into this frame's poses: after physics has moved the bodies
 /// and the late script pose changes have landed, before bone attachments
@@ -1828,7 +1867,7 @@ pub fn advance_springs(
     world: &World,
     mesh_registry: &HashMap<String, MeshAsset>,
     defaults: &HashMap<String, floptle_core::SpringBones>,
-    dt: f32,
+    clock: SpringClock,
     carry: &HashMap<u32, [f64; 3]>,
 ) {
     let mut warn: Vec<(String, String)> = Vec::new();
@@ -1896,6 +1935,9 @@ pub fn advance_springs(
             }
             found.unwrap_or(DVec3::ZERO)
         };
+        // Over the time the node was drawn moving: a body's pose advances
+        // by the simulation's step, which leaves the frame's when ticks drop.
+        let dt = clock.for_node(world, e);
         match rt.last {
             Some((was, was_rot)) if dt > 0.0 => {
                 let moved = pos - was - rides;

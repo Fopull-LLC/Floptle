@@ -415,6 +415,13 @@ on the frames that ran no tick, and an eased camera or a UI animation driven
 from it is as smooth as on the frame clock. The two clocks only part when
 ticks are dropped.
 
+`drawDt` is the time the drawn world moved between the last two frames drawn:
+what a body's on-screen pose advanced by. A script that works out a speed or
+an acceleration by differencing positions it reads each frame divides by
+`drawDt`, not `dt`. The two agree until ticks are dropped. Then a frame's `dt`
+can be several milliseconds longer than the motion it shows, and every such
+frame reads as a jolt. Spring bones measure their node's motion the same way.
+
 A networked session ignores both and always catches up, because its clock is
 shared with the other machines and running slow would desync it.
 

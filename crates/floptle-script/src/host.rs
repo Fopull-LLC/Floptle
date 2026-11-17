@@ -7308,6 +7308,13 @@ impl ScriptHost {
         }
     }
 
+    /// `drawDt`: seconds the drawn world moved between the last two frames
+    /// drawn. Set once a frame, at the late pass, so `update` reads the step
+    /// the positions it sees were drawn over. Equals `dt` until ticks drop.
+    pub fn set_draw_dt(&self, draw_dt: f32) {
+        let _ = self.lua.globals().raw_set("drawDt", draw_dt);
+    }
+
     /// The simulation's clock, for the pass about to run: `simTime` is the
     /// seconds the simulation has actually advanced (ticks run times the
     /// step), `simDt` what it advanced since this pass last ran. They equal

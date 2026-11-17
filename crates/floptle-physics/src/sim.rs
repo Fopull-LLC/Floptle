@@ -2516,6 +2516,18 @@ impl Sim {
         std::mem::take(&mut self.events)
     }
 
+    /// The nodes [`Self::writeback_interpolated`] places: every body and
+    /// compound whose drawn pose is blended between two ticks, so it moves on
+    /// the simulation's clock rather than the frame's.
+    pub fn interpolated_nodes(&self) -> impl Iterator<Item = u32> + '_ {
+        let bodies = self.map.iter().filter(|l| {
+            let b = &self.world.bodies[l.body];
+            b.active && !b.kinematic
+        });
+        let compounds = self.cmap.iter().filter(|l| self.world.compounds[l.compound].active);
+        bodies.map(|l| l.entity.index()).chain(compounds.map(|l| l.entity.index()))
+    }
+
     /// Write interpolated body transforms to the ECS: `alpha` in `[0,1)` is how far
     /// render time has progressed into the current gameplay tick, so each body renders
     /// `lerp(tick_start, tick_end, alpha)`. Pair with [`Self::step_tick`]; frames where

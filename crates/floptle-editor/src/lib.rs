@@ -192,6 +192,8 @@ mod scene_texture_gate_tests;
 #[cfg(test)]
 mod tick_overload_tests;
 #[cfg(test)]
+mod spring_clock_tests;
+#[cfg(test)]
 mod underwater_look_tests;
 #[cfg(test)]
 mod water_sheet_tests;
@@ -3723,6 +3725,12 @@ struct Editor {
     /// pass last ran. See `Self::sim_clock_for`.
     sim_t_update: f64,
     sim_t_late: f64,
+    /// How far the drawn world moved between the last two frames drawn: the
+    /// late pass's step of the smooth simulation clock, which is what bodies'
+    /// interpolated poses advance by, or the frame's own step with no
+    /// simulation. Scripts read it as `drawDt`; spring bones measure motion
+    /// over it. Set by `Self::sim_clock_for`.
+    draw_dt: f32,
     play_snapshot: Option<SceneDoc>,
     /// The open scene file as a project-root-relative path ("scenes/first.ron")
     /// — what multiplayer sessions name scenes by on the wire. Kept in lockstep
