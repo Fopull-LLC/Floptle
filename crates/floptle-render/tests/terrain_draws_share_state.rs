@@ -715,3 +715,38 @@ fn pages_left_part_full_by_a_walk_give_back_the_room_between_them() {
     same("colour after emptying part-full pages", &px_on[0], &px_off[0]);
     same("sun map after emptying part-full pages", &px_on[1], &px_off[1]);
 }
+
+/// **A card out of video memory for the arena still draws every chunk.**
+/// A page or growth the GPU could not make was taken anyway and raised as a
+/// device error ("out of video memory" in Solar's smokes). Now the arena
+/// asks inside an error scope: a refused page leaves the slot buffers of its
+/// own, a refused growth leaves the page as it was, and it is said once.
+/// Capped at 1 MiB, the arena refuses, holds no more than that, and the
+/// frame is the one drawn with buffers of their own.
+#[test]
+fn a_full_card_refuses_arena_pages_and_still_draws_every_chunk() {
+    let gpu = Gpu::headless(SIZE, SIZE);
+    if !gpu.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
+        // CI's OpenGL cannot build the raster pass.
+        return;
+    }
+    let colour = target(&gpu, "arena-full-colour", gpu.scene_format());
+    const CAP: u64 = 1 << 20;
+    let raster_with = |arena: bool, cap: Option<u64>| {
+        let mut r = Raster::new(&gpu);
+        r.set_sun_map_layout(&gpu, 512, true);
+        r.set_geometry_arena(arena);
+        r.set_geometry_vram_cap(cap);
+        let (s, _, _) = coloured_scene(&gpu, &mut r, CHUNKS, 1);
+        (r, s)
+    };
+    let (mut full, s_full) = raster_with(true, Some(CAP));
+    let (mut own, s_own) = raster_with(false, None);
+    let st = full.geometry_arena_stats();
+    assert!(st.refused > 0, "the fixture: a 1 MiB arena should refuse room for {CHUNKS} chunks ({} pages, {} bytes)", st.pages, st.bytes);
+    assert!(st.bytes <= CAP, "a capped arena holds {} bytes, over its {CAP}", st.bytes);
+    let (_, px_full) = planned_frame(&gpu, &mut full, &s_full, &colour);
+    let (_, px_own) = planned_frame(&gpu, &mut own, &s_own, &colour);
+    same("colour on a full card", &px_full[0], &px_own[0]);
+    same("sun map on a full card", &px_full[1], &px_own[1]);
+}
