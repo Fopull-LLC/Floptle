@@ -118,6 +118,73 @@ fn a_scaled_planets_sea_is_read_in_its_own_frame() {
     assert!((got[&e][0].margin - WaterLevel::MARGIN * 0.5).abs() < 1e-6);
 }
 
+/// **A sea kept beside its world is that world's sea, wherever it trails.**
+/// A Water Volume sea that is no child of its planet but is moved to its
+/// centre (a script keeping it there, a frame behind a world on its orbit)
+/// sits a frame's travel off the centre. Read as it stood, the level moved
+/// every frame, and every move asked the far ground under it to be meshed
+/// again before the last meshes landed: the ground was never built. Taken
+/// as the world's own sea for being centred on it, it is centred on it.
+#[test]
+fn a_sea_trailing_its_world_is_centred_on_it() {
+    let mut ed = crate::Editor::default();
+    let at = DVec3::new(4000.0, -250.0, 90.0);
+    let e = planet(&mut ed, at, 40.0);
+    let sea = spawn(&mut ed, Transform { translation: at, ..Transform::IDENTITY }, water(WaterKind::Sea, 43.0, [0.0; 3]), None);
+    let still = ed.terrain_water_levels()[&e].clone();
+    // A frame's travel behind, either way.
+    for off in [DVec3::new(1.5, 0.0, 0.0), DVec3::new(-0.8, 1.1, 0.4)] {
+        ed.world.insert(sea, Transform { translation: at + off, ..Transform::IDENTITY });
+        assert_eq!(ed.terrain_water_levels()[&e], still, "a sea {off:?} off its world's centre moved its level");
+    }
+}
+
+/// **A lake on a moving world rides it.** A lake declared on a planet
+/// holds the planet's place as the simulation's tick put it, and a world on
+/// its orbit is drawn part-way to the next tick. Read against the drawn
+/// planet, the lake moved by the gap every frame, and its far ground was
+/// asked for again every frame and never built. Its level must be where
+/// the planet is now, so it is the same in the planet's frame wherever the
+/// planet has got to since the tick.
+#[test]
+fn a_lake_on_a_moving_world_rides_it() {
+    let dir = std::env::temp_dir().join(format!("floptle-lake-rides-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+    floptle_vfs::write(
+        dir.join("scripts/lake.lua"),
+        "water.addVolume{ shape = \"lake\", parent = \"Planet\", center = vec3(0, 41, 0), reach = 20 }\n",
+    )
+    .unwrap();
+    let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+    let at = DVec3::new(4000.0, -250.0, 90.0);
+    let e = planet(&mut ed, at, 40.0);
+    ed.world.insert(e, floptle_core::Name("Planet".into()));
+    ed.world.insert(
+        e,
+        floptle_core::Scripts(vec![floptle_core::ScriptInst {
+            kind: "lake".into(),
+            enabled: true,
+            params: Vec::new(),
+            refs: Vec::new(),
+            strs: Vec::new(),
+            pinned_bools: None,
+        }]),
+    );
+    ed.toggle_play();
+    for _ in 0..3 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    let held = ed.terrain_water_levels().get(&e).cloned().unwrap_or_default();
+    assert!(held.iter().any(|w| w.within.is_some()), "the fixture: the lake should be the planet's water ({held:?})");
+    // The planet drawn further along its orbit than its last tick.
+    ed.world.insert(e, Transform { translation: at + DVec3::new(3.0, -1.0, 2.0), ..Transform::IDENTITY });
+    let now = ed.terrain_water_levels().get(&e).cloned().unwrap_or_default();
+    assert_eq!(now, held, "a lake on a planet moved in the planet's frame when the planet moved");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The far meshes a terrain draws, by chunk.
 fn far_meshes(ed: &crate::Editor, e: floptle_core::ecs::Entity) -> std::collections::HashMap<[i32; 3], Vec<[f32; 3]>> {
     ed.terrain_render[&e].far.iter().map(|(c, m)| (*c, m.positions.clone())).collect()
@@ -129,7 +196,7 @@ fn far_meshes(ed: &crate::Editor, e: floptle_core::ecs::Entity) -> std::collecti
 /// take a few at a time as they do any streaming, and every chunk draws its
 /// old mesh until its new one lands. When they have, each far chunk is the
 /// mesh its field makes under the water, and one made under the old water
-/// that was still on its way was not taken for it.
+/// that was still on its way was made again.
 #[test]
 fn a_sea_that_changes_remeshes_far_ground_over_frames() {
     let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
@@ -185,6 +252,50 @@ fn a_sea_that_changes_remeshes_far_ground_over_frames() {
     // The same level again is no change, and asks for nothing.
     ed.sync_terrain_meshes(false, cam);
     assert!(ed.terrain_render[&e].stale.is_empty(), "an unchanged level asked for meshes again");
+}
+
+/// **Far ground under water that keeps moving is still built.** A coarse
+/// mesh on its way when the water changed was dropped, and the chunk asked
+/// for again. Water that moved every frame (a tide, or a level read a
+/// frame apart from its world) dropped every coarse mesh before it landed:
+/// that ground never built, and `meshesPending` never fell below it.
+/// Each mesh must land and be drawn, and the chunk be made again after.
+#[test]
+fn far_ground_under_moving_water_is_still_built() {
+    let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+    let e = planet(&mut ed, DVec3::ZERO, 90.0);
+    let cam = DVec3::new(0.0, 0.0, 420.0);
+    use floptle_script::{TerrainWater, TerrainWaterRule};
+    let all = ed.terrains[&e].field.chunk_coords().len();
+    ed.sync_terrain_meshes(true, cam);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut frame = 0u32;
+    loop {
+        // A sea over the ground that rises and falls a metre every frame.
+        let level = 92.0 + if frame.is_multiple_of(2) { 0.5 } else { -0.5 };
+        ed.terrain_water_rules.insert(7, TerrainWaterRule { water: TerrainWater::At(level), ..Default::default() });
+        ed.sync_terrain_meshes(false, cam);
+        frame += 1;
+        let r = &ed.terrain_render[&e];
+        if r.slots.len() + r.empty.len() >= all {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "under moving water only {} of {all} chunks were ever drawn ({} empty, {} on their way) after {frame} frames",
+            r.slots.len(),
+            r.empty.len(),
+            r.pending.len()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(4));
+    }
+    // And once it stands still the far ground settles under it.
+    assert!(ed.settle_terrain_meshes(cam, std::time::Duration::from_secs(120)), "the far ground never settled once the water stood still");
+    for _ in 0..8 {
+        ed.sync_terrain_meshes(false, cam);
+    }
+    let r = &ed.terrain_render[&e];
+    assert!(r.stale.is_empty() && r.pending.is_empty() && r.waiting == 0, "{} stale, {} on their way, {} waiting", r.stale.len(), r.pending.len(), r.waiting);
 }
 
 /// **A world all under a sea draws its far ball under it too.** A body

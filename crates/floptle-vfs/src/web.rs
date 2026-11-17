@@ -146,6 +146,12 @@ pub(crate) fn modified_impl(_path: &Path) -> Option<floptle_core::time::SystemTi
     None
 }
 
+/// Whether the path exists, and its mtime: a browser has none, so a file
+/// that is there answers `Some(None)`.
+pub fn presence<P: AsRef<Path>>(path: P) -> Option<Option<floptle_core::time::SystemTime>> {
+    exists(path).then_some(None)
+}
+
 pub fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<Vec<DirEntry>> {
     lock().as_ref().ok_or_else(unmounted)?.fs.read_dir(path.as_ref())
 }

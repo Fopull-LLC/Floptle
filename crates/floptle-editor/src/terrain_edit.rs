@@ -359,6 +359,11 @@ pub(crate) struct TerrainRender {
     /// again at the level it is drawn at, nearest first, and draws its old
     /// mesh until the new one lands.
     pub stale: std::collections::HashSet<[i32; 3]>,
+    /// Chunks whose coarse mesh was on its way when the water it is kept
+    /// under changed, with the last job epoch sent before the change: the
+    /// mesh still lands and is drawn, and the chunk is meshed again under
+    /// the new water.
+    pub rewater: HashMap<[i32; 3], u64>,
     /// Chunks that wanted a mesh at this terrain's last scan and were left
     /// for a later frame because the workers were full: with [`Self::pending`],
     /// what `perf.counts().meshesPending` reports.
@@ -1140,6 +1145,14 @@ const WORKER_IN_FLIGHT_CAP: usize = 16;
 /// the player is worse than a deep queue.
 const DIRTY_PRIORITY_BOOST: i32 = 1_000_000;
 
+/// Added to the queue priority of a drawn chunk asked for again only because
+/// its mesh is out of date (`TerrainRender::stale`), at the level it already
+/// has: it draws its old mesh meanwhile, so ground with no mesh at all, or at
+/// the wrong level, is built first. Water that changed every frame marked
+/// the same drawn chunks stale every frame, their re-meshes filled the
+/// workers, and the ground never yet drawn waited behind them for good.
+const REFRESH_PRIORITY_PENALTY: i32 = 500_000;
+
 /// How close to a body's centre, in body radii, counts as being on it.
 ///
 /// Generous — an aircraft at altitude, or a ship on approach, is still landing
@@ -1877,6 +1890,9 @@ impl Editor {
                     continue; // superseded while in flight
                 }
                 render.pending.remove(&done.coord);
+                // Made under water that has changed since: drawn now, and
+                // asked for again.
+                let rewater = render.rewater.remove(&done.coord).is_some_and(|at| done.epoch <= at);
                 if done.mesh.is_empty() {
                     if let Some((mid, _)) = render.slots.remove(&done.coord) {
                         raster.free_dynamic(mid);
@@ -1887,6 +1903,9 @@ impl Editor {
                 } else {
                     render.empty.remove(&done.coord);
                     upload_chunk(gpu, raster, render, done.coord, &done.mesh, done.lod, now);
+                    if rewater {
+                        render.stale.insert(done.coord);
+                    }
                 }
             }
         }
@@ -1910,8 +1929,13 @@ impl Editor {
         let mut near_left = if self.playing { NEAR_MESHES_A_FRAME } else { usize::MAX };
         for (&e, terrain) in &self.terrains {
             // Hidden: nothing drawn, so nothing to plan. Its meshes stay for
-            // when it is shown again.
+            // when it is shown again. Nothing waits on a worker for it
+            // either: the count its last scan left would otherwise stand in
+            // `meshesPending` for as long as it stays hidden.
             if floptle_core::is_hidden(&self.world, e) || floptle_core::is_disabled(&self.world, e) {
+                if let Some(r) = self.terrain_render.get_mut(&e) {
+                    r.waiting = 0;
+                }
                 continue;
             }
             let structural = full_rebuild || !self.terrain_render.contains_key(&e) || self.terrain_replan.remove(&e);
@@ -2200,7 +2224,8 @@ impl Editor {
                             continue;
                         }
                         if (want != cur || render.stale.contains(&coord)) && !render.pending.contains_key(&coord) {
-                            queue.push((prio_of(coord), e, coord, want));
+                            let refresh = if want == cur { REFRESH_PRIORITY_PENALTY } else { 0 };
+                            queue.push((prio_of(coord) + refresh, e, coord, want));
                         }
                     }
                 }
@@ -7048,6 +7073,89 @@ mod residency_tests {
         assert!(s.meshes_gpu >= after.bytes, "terrain.stats counts {} bytes of GPU mesh, and the pages hold {}", s.meshes_gpu, after.bytes);
     }
 
+    /// **A walk round a small world and back gives its GPU memory back.**
+    /// On a world small enough to be drawn whole, every page keeps some of
+    /// the far ground on it: walked round, the ground under the player
+    /// moved from page to page, and each page grew to take it, but none
+    /// emptied to the quarter that compaction waited for. Back where the
+    /// walk began, with the same ground drawn as at the start, the pages
+    /// held half as much again as they had. Once the player stands still,
+    /// the pages must come back to about what they held at the start for
+    /// the ground they draw.
+    #[test]
+    fn a_walk_round_a_small_world_gives_its_gpu_memory_back() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.project.terrain_shape = Some(floptle_scene::TerrainShapeDoc::Natural);
+        let fill = floptle_field::procgen::PlanetFill { seed: 3, radius: 300.0, voxel: 2.0, relief: 0.0, cave_depth: 0.0, ..Default::default() };
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(e, floptle_core::CelestialBody { body_radius: 300.0, ..Default::default() });
+        ed.terrains.insert(e, EditorTerrain::new(floptle_field::procgen::generate_planet(&fill)));
+        // Pages of 2 MiB of vertices: a small world fills several, as a
+        // large one fills pages of the full size.
+        ed.raster.as_mut().unwrap().set_geometry_page_limit(1 << 16, 1 << 18);
+        let held = |ed: &crate::Editor| ed.raster.as_ref().unwrap().geometry_arena_stats();
+        // Until nothing waits on a mesh for a while, and compaction (once a
+        // frame, inside the sync) has nothing left to move.
+        let stand = |ed: &mut crate::Editor, at: DVec3| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            let mut quiet = 0;
+            let mut last = held(ed).moved;
+            while quiet < 40 {
+                ed.sync_terrain_meshes(false, at);
+                let r = &ed.terrain_render[&e];
+                let moved = held(ed).moved;
+                quiet = if r.pending.is_empty() && r.waiting == 0 && moved == last { quiet + 1 } else { 0 };
+                last = moved;
+                assert!(std::time::Instant::now() < until, "the world never settled at {at:?}");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        let here = DVec3::new(0.0, 312.0, 0.0);
+        ed.sync_terrain_meshes(true, here);
+        settle(&mut ed, e, here);
+        stand(&mut ed, here);
+        let start = held(&ed);
+        // Round the world in twelve steps, standing at each, and back.
+        let mut peak = start;
+        for step in 1..=12 {
+            let a = std::f64::consts::TAU * step as f64 / 12.0;
+            let at = DVec3::new(312.0 * a.sin(), 312.0 * a.cos(), 0.0);
+            stand(&mut ed, at);
+            let now = held(&ed);
+            floptle_say::say_err!("step {step}: {} bytes held in {} pages, {} live", now.bytes, now.pages, now.live);
+            if now.bytes > peak.bytes {
+                peak = now;
+            }
+        }
+        let back = held(&ed);
+        floptle_say::say_err!(
+            "start {} held / {} live in {} pages; peak {} / {} in {}; back {} / {} in {}; {} bytes moved",
+            start.bytes, start.live, start.pages, peak.bytes, peak.live, peak.pages, back.bytes, back.live, back.pages, back.moved
+        );
+        assert!(peak.bytes > start.bytes, "the fixture: the walk should need more pages than the start ({} against {})", peak.bytes, start.bytes);
+        // A little more than at the start: a chunk is only drawn coarser
+        // once clearly past its ring, so some stay finer than they began.
+        assert!(
+            back.live * 20 <= start.live * 23,
+            "the fixture: back at the start about the same ground should be drawn ({} live bytes, against {})",
+            back.live,
+            start.live
+        );
+        // What the pages hold for each byte drawn, against the start: the
+        // slack the walk left, whatever finer ground it left drawn.
+        assert!(
+            (back.bytes as u128 * start.live as u128 * 5) <= (start.bytes as u128 * back.live as u128 * 6),
+            "back where the walk began the pages hold {} bytes ({} live, {} pages), against {} ({} live, {} pages) at the start",
+            back.bytes,
+            back.live,
+            back.pages,
+            start.bytes,
+            start.live,
+            start.pages
+        );
+    }
+
     /// **The ground still to come can be counted** (`perf.counts().meshesPending`).
     /// The workers take sixteen chunks at a time and the rest wait for a
     /// later frame, so the chunks in flight alone said a world was nearly
@@ -7081,6 +7189,31 @@ mod residency_tests {
             ed.sync_terrain_meshes(false, cam);
         }
         assert_eq!(ed.terrain_mesh_backlog(), (0, 0), "the world is built, and the count still says ground is to come");
+    }
+
+    /// **A hidden world has no ground still to come.** A hidden terrain is
+    /// not planned, so its scans stop; the count of chunks its last scan
+    /// left waiting for a worker stayed in `perf.counts().meshesPending`
+    /// for as long as it was hidden, and the count never reached zero.
+    #[test]
+    fn a_hidden_world_has_no_ground_still_to_come() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.project.terrain_shape = Some(floptle_scene::TerrainShapeDoc::Natural);
+        let fill = floptle_field::procgen::PlanetFill { seed: 3, radius: 300.0, voxel: 2.0, relief: 0.0, cave_depth: 0.0, ..Default::default() };
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        let cam = DVec3::new(0.0, 312.0, 0.0);
+        ed.terrains.insert(e, EditorTerrain::new(floptle_field::procgen::generate_planet(&fill)));
+        ed.sync_terrain_meshes(true, cam);
+        assert!(ed.terrain_mesh_backlog().1 > 0, "the fixture: chunks should be waiting for a worker");
+        ed.world.insert(e, floptle_core::Visible(false));
+        // Past the scan throttle, and long enough for the jobs in flight to land.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while ed.terrain_mesh_backlog() != (0, 0) && std::time::Instant::now() < until {
+            ed.sync_terrain_meshes(false, cam);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(ed.terrain_mesh_backlog(), (0, 0), "a hidden world still counts ground to come (in flight, waiting)");
     }
 
     /// **A re-plan keeps a dig's remesh.** A full re-plan drops the jobs in

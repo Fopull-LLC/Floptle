@@ -31,6 +31,12 @@ use crate::Editor;
 
 /// How often the mtime poll actually stats files.
 const POLL_EVERY: Duration = Duration::from_millis(500);
+
+/// How often a build run from the editor (`floptle play`) looks at the files
+/// it hot-reloads: textures, and Aseprite sources. Still live, for whoever
+/// edits art while their game runs, at a pace a game that is only being
+/// played does not feel; the editor's own panels keep their quicker one.
+pub(crate) const PLAY_POLL_EVERY: Duration = Duration::from_secs(2);
 /// The quiet gap after an edit before a `Live` document re-exports its PNG.
 const LIVE_DEBOUNCE: Duration = Duration::from_millis(250);
 
@@ -90,11 +96,17 @@ impl Editor {
         }
     }
 
+    /// How long the asset polls wait between looks: `editor`, theirs in the
+    /// editor, or [`PLAY_POLL_EVERY`] in a build, whichever is longer.
+    pub(crate) fn asset_poll_every(&self, editor: Duration) -> Duration {
+        if self.player_mode { editor.max(PLAY_POLL_EVERY) } else { editor }
+    }
+
     /// mtime poll over resident textures — an external save (Aseprite, Krita, a
     /// build script) reloads without anyone pressing anything.
     pub(crate) fn poll_texture_hot_reload(&mut self) {
         let now = Instant::now();
-        if self.texture_poll_at.is_some_and(|t| now.duration_since(t) < POLL_EVERY) {
+        if self.texture_poll_at.is_some_and(|t| now.duration_since(t) < self.asset_poll_every(POLL_EVERY)) {
             return;
         }
         self.texture_poll_at = Some(now);

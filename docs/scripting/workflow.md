@@ -101,10 +101,12 @@ The same list lives on the tab's **§ Docs** page.
   script name + line — double-click to jump to the source.
 - **Hot-reload:** just save. The script re-runs in a fresh environment, so avoid
   relying on state surviving a reload mid-Play.
-- **A loop without an exit stops the script, not the editor.** A pass into your
-  scripts may use **2 seconds** of its own CPU time (500 ms on a dedicated
-  server); past that the pass is abandoned with an error saying how long it
-  ran, in CPU and wall time, and the script runs again next frame. A script
+- **A loop without an exit stops the script, not the editor.** Each script's
+  hook may use **2 seconds** of CPU time in a pass (500 ms on a dedicated
+  server); past that its pass is abandoned with an error saying how long it
+  ran, in CPU and wall time, and the script runs again next frame. Each
+  script is timed on its own: the scripts that run after one that overran
+  start with the whole budget, and are not blamed for it. A script
   that overruns **3 passes in a row** is stopped, and is not called again
   until you edit its file, so one slow pass never loses a script for the rest
   of a game, and a loop that never ends costs three budgets, not forever. The clock is the script thread's CPU time, so a machine busy
@@ -354,11 +356,18 @@ end
 Each sample carries the wall time since the one before, so a long engine call
 (a sweep, a terrain query) is charged to the line that made it. The clock
 starts afresh at every entry into Lua, a callback from `spawn` or
-`assembly.split` included, so the engine's work before a callback is not
-charged to its first line. Every frame
+`assembly.split` included, and at every script the engine hands a pass to, so
+the engine's work before a callback or a hook (a `fixedUpdate`'s first line
+included) is not charged to its first line, and the engine's own checks
+between hooks are no script's line. Every frame
 record and every hitch keeps its ten hottest lines, so a 559 ms frame says the
 function it was in. The sampler makes a tight loop slower while it runs, which
 is why it is off until asked for.
+
+`perf.samples()` keeps 512 distinct lines between two reads, and adds up
+the rest in a row named `(other)`. A large game read every few seconds
+outgrows that: `perf.sampleLimit(4000)` keeps more (up to 65,536), and
+`perf.sampleLimit()` says what it is.
 
 `perf.scripts()` rows also carry `engineMs` and `calls`: last frame's raycasts
 and sweeps made from that script, so "27 ms, 25 of it in `spherecast`" is one
@@ -441,6 +450,16 @@ would do.
 craft with a dozen sweeps a frame shows up here rather than only as its
 script's time.
 
+`scriptsSeeded` and `scriptsSeedSkipped` are what last frame's seed did, the
+step named `scriptsSeed` in `perf.parts()` that readies every script before
+the first `update`. An instance is seeded when it is new, when its file
+changed (a hot reload), or when its `node` or `params` was replaced (by the
+script itself, through its handle, or through `getfenv`); every other
+instance is passed by, so a scene of scripts at rest reads nearly all
+skipped. What the seed still pays for those is a look at each script file a
+frame, so that an edit runs the next frame: it grows with how many different
+scripts a scene uses, not how many nodes carry them.
+
 `mirrorRebuilds` above zero on every frame means something replaces the scene,
 or a node's id, every frame, and `perf.mirrorCause()` names what.
 
@@ -471,6 +490,11 @@ it can't check the distance itself. Instead it wakes on its own terms:
 wakes it after that much game time. A collision or trigger on its node also
 wakes it, and so does `script.wake(node, "enemy")` from another script, for
 instance the one that just shot it.
+
+The seconds go in the table: `script.sleep{ seconds = 2 }`. A bare number,
+`script.sleep(2)`, is not a form it takes; it raises, and because a `pcall`
+around it would hide that every frame while the script never slept, the
+Console says so too, when the script loads and on the first call.
 
 For NPCs in view but far away, `script.setRate(10)` runs `fixedUpdate` ten
 times a second instead of sixty, handing it the time since its last call.

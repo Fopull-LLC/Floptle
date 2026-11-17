@@ -1461,6 +1461,9 @@ pub struct Raster {
     /// Bytes [`Raster::maintain_geometry`] moves a call, at most
     /// ([`ARENA_MOVE_BUDGET`] unless a test sets less).
     move_budget: u64,
+    /// The arena's change count ([`GeomArena::changes`]) when compaction last
+    /// found nothing to move.
+    compact_idle: Option<u64>,
     /// Put new coloured dynamic slots in the arena (the default). Off gives
     /// each its own buffers, as before: a debug switch for tests that compare
     /// the two.
@@ -2593,6 +2596,7 @@ impl Raster {
             arena: GeomArena::new(gpu),
             use_arena: true,
             move_budget: ARENA_MOVE_BUDGET,
+            compact_idle: None,
             empty_geom: None,
             meshes: Vec::new(),
             sun_map_casts: (0, 0),
@@ -4749,10 +4753,13 @@ impl Raster {
     }
 
     /// Give memory back from the geometry arena: when a page has emptied
-    /// to under a quarter ([`geom_arena::GeomArena::victim`]), move its
-    /// slots to other pages, up to [`ARENA_MOVE_BUDGET`] bytes a call, and
-    /// let the page go once the last one has left. Call it once a frame;
-    /// terrain streaming does. Returns the bytes moved.
+    /// to under a quarter, or the pages hold well over what is live and
+    /// one page's slots fit in the others ([`geom_arena::GeomArena::victim`]),
+    /// move its slots to other pages, up to [`ARENA_MOVE_BUDGET`] bytes a
+    /// call, and let the page go once the last one has left. Call it once a
+    /// frame; terrain streaming does. A frame after nothing in the arena
+    /// changed and there was nothing to move costs one compare. Returns the
+    /// bytes moved.
     ///
     /// A move is a GPU copy of the slot's vertices into its new range, its
     /// indices written again offset by the new first vertex, and the word
@@ -4764,14 +4771,32 @@ impl Raster {
         // as the emptiest page of all and be chosen every frame, with
         // nothing in it to move, and nothing else would ever be compacted.
         self.arena.drop_empty();
-        let Some(victim) = self.arena.victim() else { return 0 };
+        // Nothing taken, given back or let go since the last look found
+        // nothing to move: nothing to move now either. A player standing
+        // still costs this compare a frame.
+        if self.compact_idle == Some(self.arena.changes) {
+            return 0;
+        }
+        // Every arena slot by page, largest first: power-of-two blocks
+        // taken largest first pack a page with no gaps.
+        let mut by_page: HashMap<u32, Vec<(usize, ArenaRange)>> = HashMap::new();
+        for (i, m) in self.meshes.iter().enumerate() {
+            if let Some(r) = m.dynamic.as_ref().and_then(|d| d.arena) {
+                by_page.entry(r.page).or_default().push((i, r));
+            }
+        }
+        for v in by_page.values_mut() {
+            v.sort_by_key(|&(i, r)| (std::cmp::Reverse(r.v_cap), i));
+        }
+        let caps: HashMap<u32, Vec<(u32, u32)>> =
+            by_page.iter().map(|(&p, v)| (p, v.iter().map(|&(_, r)| (r.v_cap, r.i_cap)).collect())).collect();
+        let Some(geom_arena::Victim { page: victim, new_pages }) = self.arena.victim(&caps) else {
+            self.compact_idle = Some(self.arena.changes);
+            return 0;
+        };
         let vb = geom_arena::VERTEX_BYTES;
-        // This call's share of the victim's slots, largest first:
-        // power-of-two blocks taken largest first pack a page with no gaps.
-        let mut on_victim: Vec<(usize, ArenaRange)> = (0..self.meshes.len())
-            .filter_map(|i| Some((i, self.meshes[i].dynamic.as_ref()?.arena.filter(|r| r.page == victim)?)))
-            .collect();
-        on_victim.sort_by_key(|&(i, r)| (std::cmp::Reverse(r.v_cap), i));
+        // This call's share of the victim's slots.
+        let on_victim = by_page.remove(&victim).unwrap_or_default();
         let mut chosen: Vec<(usize, ArenaRange)> = Vec::new();
         let mut moved = 0u64;
         for (i, old) in on_victim {
@@ -4784,11 +4809,25 @@ impl Raster {
         }
         // First into pages that already have the room; then, for what is
         // left, one page sized to what is left, so a page started here
-        // always takes a slot; then wherever the arena finds room.
+        // always takes a slot; then wherever the arena finds room. A page
+        // emptied because the others can take its slots grows one of them
+        // instead, as the victim's dry run did, and starts none.
         let mut moves: Vec<(usize, ArenaRange, ArenaRange)> = Vec::new();
         let mut left: Vec<(usize, ArenaRange)> = Vec::new();
+        let order = self.arena.fullest_first(victim);
         for (i, old) in chosen {
-            match self.arena.alloc_existing(old.v_cap, old.i_cap, victim) {
+            if !new_pages {
+                let (new, grown) = self.arena.place(gpu, old.v_cap, old.i_cap, &order);
+                if let Some(p) = grown {
+                    self.refresh_page(p);
+                }
+                match new {
+                    Some(new) => moves.push((i, old, new)),
+                    None => break,
+                }
+                continue;
+            }
+            match self.arena.alloc_existing(old.v_cap, old.i_cap, &order) {
                 Some(new) => moves.push((i, old, new)),
                 None => left.push((i, old)),
             }

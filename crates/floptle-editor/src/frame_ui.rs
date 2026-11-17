@@ -74,7 +74,10 @@ pub(crate) struct UiOut {
     pub(crate) view_ortho: Option<f32>,
     pub(crate) voice_test_pick: bool,
     pub(crate) voice_test_stop: bool,
-    pub(crate) perf_snapshot: PerfSnapshot,
+    /// What the ⏱ Frame cost window draws, taken only while it is open:
+    /// copying every bucket's statistics and every script's out of the
+    /// profile is work a frame with the window shut has no reader for.
+    pub(crate) perf_snapshot: Option<PerfSnapshot>,
     pub(crate) perf_toggle: Option<bool>,
     pub(crate) cmd: EditorCmd,
     pub(crate) want_save: bool,
@@ -99,7 +102,7 @@ pub(crate) struct NetSnapshot {
 }
 
 impl Editor {
-    fn net_snapshot(&self) -> NetSnapshot {
+    pub(crate) fn net_snapshot(&self) -> NetSnapshot {
         let net_hosting = self.net_server.is_some();
         let net_peer_count = self.net_server.as_ref().map(|s| s.peers().len()).unwrap_or(0);
         let net_as_player = self.net_play_client.is_some();
@@ -126,7 +129,10 @@ impl Editor {
             .map(|h| h.session.late_inputs())
             .or_else(|| self.net_server.as_ref().map(|s| s.late_inputs()))
             .unwrap_or(0);
-        let replays = crate::shadow::list_replays(self.runtime_base());
+        // A folder listing, read for the 🌐 window's replay list: only while
+        // that window is open, not every frame of every game.
+        let replays =
+            if self.show_net_panel { crate::shadow::list_replays(self.runtime_base()) } else { Vec::new() };
         // A real session (quic) has no hub: the link is the actual network, so
         // the simulated latency/loss sliders and ghost worlds don't apply.
         let net_is_real = (self.net_server.is_some() || self.net_play_client.is_some())
@@ -278,7 +284,7 @@ impl Editor {
             view_ortho: self.camera.ortho,
             voice_test_pick: false,
             voice_test_stop: false,
-            perf_snapshot: PerfSnapshot::take(&profile.borrow()),
+            perf_snapshot: self.show_perf_panel.then(|| PerfSnapshot::take(&profile.borrow())),
             perf_toggle: None,
             cmd: EditorCmd::default(),
             want_save: false,
@@ -302,21 +308,23 @@ impl Editor {
             // their own `host:port`.
             self.net_relay_addr = "cloud".into();
         }
-        let setup = self.pacing_setup();
-        out.perf_snapshot.pacing = Pacing {
-            mean_ms: self.frame_ms,
-            p99_ms: self.frame_low_ms,
-            // `refresh_period` is in seconds (it is compared against `dt`).
-            refresh_ms: self.refresh_period * 1000.0,
-            snap_rate: self.dt_snap_rate,
-            present_wait_ms: self.present_wait_ms,
-            cost_ms: (self.frame_ms - self.present_wait_ms).max(0.0),
-            present_mode: setup.present_mode,
-            vsync: setup.vsync,
-            frame_cap: self.frame_cap,
-            on: self.refresh_output().cloned(),
-            outputs: self.refresh_outputs.clone(),
-        };
+        if let Some(snap) = out.perf_snapshot.as_mut() {
+            let setup = self.pacing_setup();
+            snap.pacing = Pacing {
+                mean_ms: self.frame_ms,
+                p99_ms: self.frame_low_ms,
+                // `refresh_period` is in seconds (it is compared against `dt`).
+                refresh_ms: self.refresh_period * 1000.0,
+                snap_rate: self.dt_snap_rate,
+                present_wait_ms: self.present_wait_ms,
+                cost_ms: (self.frame_ms - self.present_wait_ms).max(0.0),
+                present_mode: setup.present_mode,
+                vsync: setup.vsync,
+                frame_cap: self.frame_cap,
+                on: self.refresh_output().cloned(),
+                outputs: self.refresh_outputs.clone(),
+            };
+        }
         // Player mode (an exported build / --play): no editor chrome at all —
         // the Game view is the window. F1 (handled at the winit layer) toggles
         // the multiplayer window, which still works for LAN/relay sessions.
@@ -934,13 +942,17 @@ impl Editor {
         out: &mut UiOut,
     ) {
         // ---- ⏱ frame cost ----
-        if self.show_perf_panel {
+        // Taken at the top of the frame when the window was open then; one
+        // opened during this frame's UI shows from the next.
+        if self.show_perf_panel
+            && let Some(snap) = out.perf_snapshot.as_ref()
+        {
             let mut open = true;
             egui::Window::new("⏱ Frame cost")
                 .open(&mut open)
                 .default_width(320.0)
                 .show(ui, |ui| {
-                    perf_readout(ui, &out.perf_snapshot);
+                    perf_readout(ui, snap);
                 });
             if !open {
                 self.show_perf_panel = false;
@@ -960,6 +972,10 @@ impl Editor {
         playing: bool,
         net: &NetSnapshot,
     ) {
+        // Everything below is read for the window alone.
+        if !self.show_net_panel {
+            return;
+        }
         let net_hosting = net.net_hosting;
         let net_has_client = self.net_client.is_some();
         // Per-player pings, host side — what a relay could never report.
@@ -1335,8 +1351,14 @@ impl Editor {
         scene_name: &String,
         tool: Tool,
     ) {
+        // A maximized Scene or Game tab is the only thing drawn — which a
+        // build always is, its Game view filling the window. The panels'
+        // inputs gathered below (every node's name, every rig's bones, the
+        // bake and package readouts) would then be read every frame for no
+        // panel at all.
+        let panels_drawn = panels_drawn(self.fullscreen_tab);
         // The Terrain tab's Fine paint row: read before the dock borrows self.
-        let terrain_fine_paint = self.target_terrain().map(|e| {
+        let terrain_fine_paint = panels_drawn.then(|| self.target_terrain()).flatten().map(|e| {
             let f = self.world.get::<floptle_core::TerrainFinePaint>(e).map_or(0, |f| f.0);
             let bytes = self.terrains.get(&e).map_or(0, |t| t.field.fine_bytes());
             (f, bytes)
@@ -1344,7 +1366,7 @@ impl Editor {
         let dock_state = self.dock_state.get_or_insert_with(default_dock);
         // ⚙ Settings tab inputs. Only gathered when the tab is actually open,
         // so a closed Settings tab costs nothing per frame.
-        let settings_open = dock_state.find_tab(&crate::dock::EditorTab::Settings).is_some();
+        let settings_open = panels_drawn && dock_state.find_tab(&crate::dock::EditorTab::Settings).is_some();
         let settings_scene_files = if settings_open {
             crate::project::scene_files_in(&self.project_root)
         } else {
@@ -1361,17 +1383,24 @@ impl Editor {
             }
         };
         // Every named entity, Matter nodes and the Lighting node alike.
-        let entity_names: Vec<(Entity, String)> =
-            self.world.query::<Name>().map(|(e, n)| (e, n.0.clone())).collect();
+        let entity_names: Vec<(Entity, String)> = if panels_drawn {
+            self.world.query::<Name>().map(|(e, n)| (e, n.0.clone())).collect()
+        } else {
+            Vec::new()
+        };
         // Read before `self` is split into the panel context's borrows.
-        let gi_status = crate::gi_bake::gi_status(
-            &self.world,
-            self.gi_bake.as_ref(),
-            self.gi_baked.as_ref(),
-            self.gi_show_only,
-            self.gi_show_probes,
-        );
-        let nav_status = crate::nav_bake::nav_status(
+        let gi_status = if panels_drawn {
+            crate::gi_bake::gi_status(
+                &self.world,
+                self.gi_bake.as_ref(),
+                self.gi_baked.as_ref(),
+                self.gi_show_only,
+                self.gi_show_probes,
+            )
+        } else {
+            Default::default()
+        };
+        let nav_status = if !panels_drawn { Default::default() } else { crate::nav_bake::nav_status(
             &self.world,
             crate::nav_bake::nav_node(&self.world).as_ref().map(|(_, m)| m),
             crate::nav_bake::NavHeld {
@@ -1383,11 +1412,11 @@ impl Editor {
                 coverage: self.nav_coverage.as_ref(),
             },
             &self.project_root,
-        );
+        ) };
         // Bone names per rigged Mesh entity (name + parent index) — for the hierarchy's
         // expandable sub-objects and the inspector's bone-attach picker. Built read-only
         // before the borrow split so the UI never touches the mesh registry itself.
-        let bone_names: HashMap<Entity, Vec<crate::RigNode>> = self
+        let bone_names: HashMap<Entity, Vec<crate::RigNode>> = if !panels_drawn { HashMap::new() } else { self
             .world
             .query::<Matter>()
             .filter_map(|(e, m)| match m {
@@ -1411,7 +1440,7 @@ impl Editor {
                     }),
                 _ => None,
             })
-            .collect();
+            .collect() };
         let map_arm = self.map_arm;
         let map_knife_on = self.map_knife_on;
         let map_tool_on = self.tool == Tool::MapEdit;
@@ -1426,11 +1455,11 @@ impl Editor {
         // the tab strip can name them without the panel being able to reach into
         // another document's undo stack.
         let image_parked: Vec<String> =
-            self.image_stash.iter().map(|s| s.tab_label()).collect();
+            if panels_drawn { self.image_stash.iter().map(|s| s.tab_label()).collect() } else { Vec::new() };
         let terrain_present = !self.terrains.is_empty();
         // Terrain 2.0 stats: volumes, resident data chunks, resident bytes — the
         // honest sparse numbers (the dense field's O(n³) voxel count is gone).
-        let terrain_stats = (!self.terrains.is_empty()).then(|| {
+        let terrain_stats = (panels_drawn && !self.terrains.is_empty()).then(|| {
             let chunks: usize = self.terrains.values().map(|t| t.field.data_chunks()).sum();
             let bytes: usize = self.terrains.values().map(|t| t.field.memory_bytes()).sum();
             (self.terrains.len(), chunks, bytes)
@@ -1452,7 +1481,7 @@ impl Editor {
         // What the last load found, read off the host before it is borrowed
         // mutably for the tab viewer — the 📦 Packages tab draws from inside
         // that viewer and cannot hold a second borrow of the host itself.
-        let pkg_load = crate::packages_ui::PkgLoad::of(&self.ext);
+        let pkg_load = if panels_drawn { crate::packages_ui::PkgLoad::of(&self.ext) } else { Default::default() };
         let ext_project_root = self.project_root.clone();
         // The gizmo menu's checkbox writes this directly; remember it so the change can
         // be persisted after the dock UI runs.
@@ -3520,4 +3549,12 @@ fn net_impair_ui(ui: &mut egui::Ui) {
         );
         ui.separator();
     }
+}
+
+/// Whether this frame's dock draws any panel: not when one view tab, Scene
+/// or Game, is maximized over the window, as a build's Game view always is.
+/// What only the panels read is gathered when this says so.
+#[cfg(feature = "editor-ui")]
+pub(crate) fn panels_drawn(fullscreen_tab: Option<EditorTab>) -> bool {
+    !matches!(fullscreen_tab, Some(EditorTab::Scene | EditorTab::Game))
 }

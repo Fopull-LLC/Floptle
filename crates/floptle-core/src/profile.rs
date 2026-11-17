@@ -141,10 +141,13 @@ pub const FRAME_SAMPLES: usize = 10;
 /// How many assemblies and bodies a frame record keeps, costliest first.
 pub const FRAME_BODIES: usize = 16;
 /// The most distinct lines the sampler holds in one frame or between two reads
-/// of [`FrameProfile::take_samples`]; past that, new lines are folded into one
-/// row named `(other)`, so a script with thousands of hot lines cannot grow
-/// the profile without bound.
+/// of [`FrameProfile::take_samples`], unless a game asks for more
+/// ([`FrameProfile::set_sample_lines`], `perf.sampleLimit`); past that, new
+/// lines are folded into one row named `(other)`, so a script with thousands
+/// of hot lines cannot grow the profile without bound.
 pub const MAX_SAMPLE_LINES: usize = 512;
+/// The most a game may raise [`MAX_SAMPLE_LINES`] to.
+pub const SAMPLE_LINES_CEILING: usize = 65_536;
 
 /// Engine calls one script made in a frame: `n` calls of `call` that took
 /// `ms` between them. A part of that script's own time, not beside it.
@@ -611,6 +614,9 @@ pub struct FrameProfile {
     overloaded: bool,
     /// Last frame's animators and how many were culled.
     anim_counts: (usize, usize),
+    /// The last script frame pass's seed: instances seeded, and instances
+    /// passed by as already current.
+    seed_counts: (u32, u32),
     /// Simulated water last frame: points awake, points solved, tiles held.
     water_counts: (usize, usize, usize),
     /// Tiled sims' tiles awake last frame, by why (`water::AWAKE_REASONS`).
@@ -683,6 +689,12 @@ pub struct FrameProfile {
     /// [`Self::take_samples`].
     samples_frame: Vec<Sample>,
     samples_total: Vec<Sample>,
+    /// Where each line sits in `samples_total`, so folding a frame's lines
+    /// in stays one lookup each however many lines a game lets it keep.
+    samples_index: rustc_hash::FxHashMap<(String, String, u32), usize>,
+    /// The distinct lines kept, when a game has said (`perf.sampleLimit`);
+    /// [`MAX_SAMPLE_LINES`] otherwise.
+    sample_lines: Option<usize>,
     /// Physics owners' cost this frame by node name, and last frame's.
     bodies_frame: Vec<(String, f32)>,
     bodies_last: Vec<(String, f32)>,
@@ -736,6 +748,7 @@ impl FrameProfile {
         self.calls_last.clear();
         self.samples_frame.clear();
         self.samples_total.clear();
+        self.samples_index.clear();
         self.bodies_frame.clear();
         self.bodies_last.clear();
         self.parts_frame.clear();
@@ -841,12 +854,28 @@ impl FrameProfile {
         if !self.on || self.sampling.is_none() {
             return;
         }
-        add_sample(&mut self.samples_frame, script, func, line, 1, ms);
+        let cap = self.sample_lines();
+        add_sample(&mut self.samples_frame, script, func, line, 1, ms, cap);
+    }
+
+    /// The distinct lines the sampler keeps in a frame and between two reads
+    /// of [`Self::take_samples`] before folding new ones into `(other)`.
+    pub fn sample_lines(&self) -> usize {
+        self.sample_lines.unwrap_or(MAX_SAMPLE_LINES)
+    }
+
+    /// Keep up to `n` distinct sampled lines (clamped to 16 ..
+    /// [`SAMPLE_LINES_CEILING`]): a profile read every few seconds over a
+    /// large game outgrows the default, and folded into `(other)` it says
+    /// nothing.
+    pub fn set_sample_lines(&mut self, n: usize) {
+        self.sample_lines = Some(n.clamp(16, SAMPLE_LINES_CEILING));
     }
 
     /// Every sampled line since the last call, costliest first.
     pub fn take_samples(&mut self) -> Vec<Sample> {
         let mut v = std::mem::take(&mut self.samples_total);
+        self.samples_index.clear();
         v.sort_by(|a, b| b.ms.total_cmp(&a.ms));
         v
     }
@@ -1036,6 +1065,18 @@ impl FrameProfile {
     /// [`Self::set_water_awake_by`]'s numbers.
     pub fn water_awake_by(&self) -> [usize; 6] {
         self.water_awake_by
+    }
+
+    /// The script frame pass's seed: instances it seeded (built, a hot
+    /// reload, `node` or `params` put back, `params` given) and instances it
+    /// passed by because nothing they were seeded from had changed.
+    pub fn set_seed_counts(&mut self, seeded: u32, skipped: u32) {
+        self.seed_counts = (seeded, skipped);
+    }
+
+    /// [`Self::set_seed_counts`]'s numbers.
+    pub fn seed_counts(&self) -> (u32, u32) {
+        self.seed_counts
     }
 
     /// Last frame's animators, and how many culling skipped.
@@ -1287,8 +1328,28 @@ impl FrameProfile {
         calls.sort_by(|a, b| b.ms.total_cmp(&a.ms));
         self.calls_last.clone_from(&calls);
         let mut samples = std::mem::take(&mut self.samples_frame);
+        let cap = self.sample_lines();
         for x in &samples {
-            add_sample(&mut self.samples_total, &x.script, &x.func, x.line, x.n, x.ms);
+            let key = (x.script.clone(), x.func.clone(), x.line);
+            match self.samples_index.get(&key) {
+                Some(&i) => {
+                    self.samples_total[i].n += x.n;
+                    self.samples_total[i].ms += x.ms;
+                }
+                None => {
+                    let before = self.samples_total.len();
+                    add_sample(&mut self.samples_total, &x.script, &x.func, x.line, x.n, x.ms, cap);
+                    // The row now holding this line: its own, or `(other)`.
+                    let at = if self.samples_total.len() > before {
+                        Some(before)
+                    } else {
+                        self.samples_total.iter().rposition(|s| s.script == "(other)")
+                    };
+                    if let Some(at) = at {
+                        self.samples_index.insert(key, at);
+                    }
+                }
+            }
         }
         samples.sort_by(|a, b| b.ms.total_cmp(&a.ms));
         samples.truncate(FRAME_SAMPLES);
@@ -1463,21 +1524,22 @@ impl FrameProfile {
     }
 }
 
-/// Fold `n` samples of `ms` at one line into a list, keeping it to
-/// [`MAX_SAMPLE_LINES`] rows: past that, a new line lands in `(other)`.
-fn add_sample(list: &mut Vec<Sample>, script: &str, func: &str, line: u32, n: u32, ms: f32) {
+/// Fold `n` samples of `ms` at one line into a list, keeping it to `cap`
+/// lines: past that, a new line lands in one more row, `(other)`. Every line
+/// already kept stays whole — the row `(other)` is added beside them, never
+/// in place of the last one.
+fn add_sample(list: &mut Vec<Sample>, script: &str, func: &str, line: u32, n: u32, ms: f32, cap: usize) {
     if let Some(x) = list.iter_mut().find(|x| x.line == line && x.script == script && x.func == func) {
         x.n += n;
         x.ms += ms;
         return;
     }
-    if list.len() >= MAX_SAMPLE_LINES {
+    if list.iter().filter(|x| x.script != "(other)").count() >= cap {
         if let Some(x) = list.iter_mut().find(|x| x.script == "(other)") {
             x.n += n;
             x.ms += ms;
             return;
         }
-        list.pop();
         list.push(Sample { script: "(other)".into(), func: String::new(), line: 0, n, ms });
         return;
     }
@@ -1919,10 +1981,37 @@ mod frame_record_tests {
         assert!(r.bucket(Bucket::Other) >= 5.0, "{r:?}");
         let mut list = Vec::new();
         for i in 0..MAX_SAMPLE_LINES as u32 + 50 {
-            add_sample(&mut list, "s", "f", i, 1, 1.0);
+            add_sample(&mut list, "s", "f", i, 1, 1.0, MAX_SAMPLE_LINES);
         }
-        assert_eq!(list.len(), MAX_SAMPLE_LINES);
+        assert_eq!(list.len(), MAX_SAMPLE_LINES + 1, "every kept line, and one row for the rest");
         assert_eq!(list.last().unwrap().script, "(other)");
+        assert_eq!(list.last().unwrap().n, 50);
+    }
+
+    /// **A game can keep a whole profile.** Past the sampler's line limit
+    /// new lines fold into `(other)`; a game reading every few seconds raises
+    /// the limit and gets every line, each line's samples in one row across
+    /// frames, and only what is past the new limit in `(other)`.
+    #[test]
+    fn a_game_can_raise_the_sampler_line_limit() {
+        let mut p = FrameProfile::default();
+        p.enable(true);
+        p.set_sampling(Some(0.1));
+        assert_eq!(p.sample_lines(), MAX_SAMPLE_LINES);
+        p.set_sample_lines(1000);
+        for frame in 0..2 {
+            for line in 0..1200u32 {
+                p.record_sample("big", "f", line, 1.0);
+            }
+            p.end_frame();
+            let _ = frame;
+        }
+        let all = p.take_samples();
+        let other: Vec<&Sample> = all.iter().filter(|s| s.script == "(other)").collect();
+        assert_eq!(all.len(), 1001, "a thousand lines and one row for the rest");
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].n, 400, "two frames of the 200 lines past the limit");
+        assert!(all.iter().filter(|s| s.script == "big").all(|s| s.n == 2), "a line split across rows");
     }
 
     /// **The rest of a frame's `untimed` can be named after the fact.** The

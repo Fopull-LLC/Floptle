@@ -21,8 +21,8 @@ use floptle_render::{
     Raster, Raymarch, RaymarchGlobals, RenderCamera, Vertex,
 };
 
-const W: u32 = 1280;
-const H: u32 = 720;
+const W: u32 = 2560;
+const H: u32 = 1440;
 /// The seabed's depth under the sea, which sits at y = 0.
 const DEPTH: f32 = 15.0;
 /// The rock roof: a slab from y = 3 to 8 over everything at z < -20.
@@ -291,17 +291,32 @@ fn sky_occlusion_over_open_sea_costs_next_to_nothing() {
     let (globals, _, eye) = sea.stage(DVec3::new(0.0, 12.0, 30.0));
     let plain = sea.shader("1.0");
     let near = sea.shader("skyOcclusion(worldPos, vec3(0, 1, 0), 0.05)");
+    // The same op with a reach longer than the sea is deep: the bed is in
+    // reach, so it marches its four rays. What a frame pays without the
+    // shortcut, measured in the same run as what it pays with it.
+    let marched = sea.shader("skyOcclusion(worldPos, vec3(0, 1, 0), 40.0)");
     // The fixture: open water reads open, so the op is doing what it should.
     sea.draw(globals, eye, near);
     let px = sea.read();
     let lo = px.iter().copied().fold(f32::MAX, f32::min);
     assert!(lo > 0.85, "open sea reads as low as {lo:.3}");
-    let t = cost(&mut sea, &mut timer, globals, eye, &[plain, near, plain, near]);
-    let (without, with) = (t[0].min(t[2]), t[1].min(t[3]));
-    assert!(without < f32::MAX && with < f32::MAX, "no timing came back");
+    // Each the least of four, taken in turn: a single frame on a shared
+    // desktop card wobbles by more than the margin this guard holds to.
+    // Each the least of four, taken in turn.
+    let t = cost(&mut sea, &mut timer, globals, eye, &[plain, near, marched, plain, near, marched, plain, near, marched, plain, near, marched]);
+    let least = |k: usize| t.iter().skip(k).step_by(3).copied().fold(f32::MAX, f32::min);
+    let (without, with, march) = (least(0), least(1), least(2));
+    assert!(without < f32::MAX && with < f32::MAX && march < f32::MAX, "no timing came back");
+    // A ratio, not a time: another program sharing the card scales every
+    // number in a run together, and an absolute bar failed and passed by
+    // chance.
+    let (op, full) = (with - without, march - without);
+    assert!(full > 0.2, "the fixture: marching the rays should cost something ({full:.3} ms)");
+    // Measured on an RTX 4060 at 2560x1440: 0.09-0.15 of the march with the
+    // one-read shortcut, 0.23-0.32 without it (the march itself 3.8-5.3 ms).
     assert!(
-        with - without <= 0.1,
-        "skyOcclusion at a reach of 0.05 over open sea costs {:.3} ms a {W}x{H} frame ({without:.3} ms without it, {with:.3} ms with)",
-        with - without
+        op <= full * 0.19,
+        "skyOcclusion at a reach of 0.05 over open sea costs {op:.3} ms a {W}x{H} frame, {:.2} of the {full:.3} ms its four marches cost",
+        op / full
     );
 }

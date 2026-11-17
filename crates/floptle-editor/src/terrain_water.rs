@@ -116,10 +116,26 @@ impl crate::Editor {
         }
         for w in self.script_host.declared_water().iter() {
             let floptle_core::water::Surface::Lake { radius, axis, reach } = &w.surface else { continue };
-            let middle = w.frame.to_world(axis.try_normalize().unwrap_or(DVec3::Y) * *radius);
+            // Where its node is now, as the terrain is read now. The frame
+            // the water holds was set where the simulation's tick put the
+            // node, and a world on its orbit is drawn part-way to the next
+            // tick: read against the terrain's drawn place, a lake on a
+            // moving world moved by the gap every frame. Every move asked
+            // its far ground to be meshed again, and dropped the meshes on
+            // their way, so that ground was never built.
+            let frame = self
+                .water_sims
+                .anchors
+                .iter()
+                .find(|(id, _)| *id == w.id)
+                .map_or(w.frame, |&(_, n)| {
+                    let wt = floptle_core::world_transform(&self.world, n);
+                    floptle_core::scatter::Frame { origin: wt.translation, rot: wt.rotation.normalize() }
+                });
+            let middle = frame.to_world(axis.try_normalize().unwrap_or(DVec3::Y) * *radius);
             // A lake that reaches right round its world is a sea.
             let cap = (*reach < std::f64::consts::PI * radius * 0.999).then_some((middle, *reach));
-            out.push(Found::Round { node: None, centre: w.frame.origin, radius: *radius, cap });
+            out.push(Found::Round { node: None, centre: frame.origin, radius: *radius, cap });
         }
         out
     }
@@ -171,10 +187,17 @@ impl crate::Editor {
                                 // This terrain's own water: a child of it, or
                                 // centred where it is. Another world's sea is
                                 // not, however near it passes.
-                                let own = node.is_some_and(|n| self.is_under(n, e)) || c.length() <= (2.0 * voxel).max(0.02 * r);
-                                if !own {
+                                let child = node.is_some_and(|n| self.is_under(n, e));
+                                let centred = c.length() <= (2.0 * voxel).max(0.02 * r);
+                                if !child && !centred {
                                     continue;
                                 }
+                                // Taken as this world's own for being centred
+                                // on it, it is centred on it: a sea that a
+                                // script keeps beside its planet trails it by
+                                // a frame's travel, and read as it stands it
+                                // moved every frame.
+                                let c = if child { c } else { Vec3::ZERO };
                                 let within = cap.map(|(p, reach)| (to_field(p).to_array(), reach as f32 / ts));
                                 levels.push(level(WaterSurface::Sphere { centre: c.to_array(), radius: r }, within));
                             }
@@ -213,8 +236,9 @@ impl crate::Editor {
     /// Each is meshed again on the workers at the level it is drawn at, a
     /// few a frame like any other streaming, and draws its old mesh until the
     /// new one lands: a sea that rises does not stall the frame it rises in.
-    /// A coarse mesh already on its way was made under the old water, and is
-    /// not taken. Full-detail meshes never read the level and are left.
+    /// A coarse mesh already on its way was made under the old water: it is
+    /// drawn when it lands, and the chunk is meshed again. Full-detail
+    /// meshes never read the level and are left.
     pub(crate) fn sync_terrain_water(&mut self) {
         for (id, rule) in self.script_host.take_terrain_water_levels() {
             if rule == Default::default() {
@@ -241,7 +265,16 @@ impl crate::Editor {
             let again: Vec<[i32; 3]> =
                 r.slots.iter().filter(|(c, (_, lod))| *lod > 0 && reaches(&changed, **c, chunk_units)).map(|(c, _)| *c).collect();
             r.stale.extend(again);
-            r.pending.retain(|c, (lod, _)| *lod == 0 || !reaches(&changed, *c, chunk_units));
+            // A coarse mesh on its way was made under the old water. It still
+            // lands, so the ground is drawn, and is then meshed again. Dropped
+            // instead, water that moved every frame dropped every mesh made
+            // for the ground it reaches, and that ground never built.
+            let sent = self.terrain_epoch;
+            for (c, (lod, _)) in &r.pending {
+                if *lod > 0 && reaches(&changed, *c, chunk_units) {
+                    r.rewater.insert(*c, sent);
+                }
+            }
         }
     }
 }
