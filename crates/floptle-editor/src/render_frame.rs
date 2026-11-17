@@ -122,21 +122,15 @@ impl Editor {
         }
     }
 
+    /// The editor's tools, once a frame: a held selection let go of when
+    /// the world emptied it, the terrain and paint brushes, a Tiles stroke,
+    /// the Map and Tiles tools' overlays and the 🎓 Learn tab's scan. A build (`floptle play`, an exported game)
+    /// has none of these tools, and pays nothing for them.
     #[cfg(feature = "editor-ui")]
-    pub(crate) fn render(&mut self) {
-        // The frame's own work starts here; the time before it, back to the
-        // last frame's end, was the window system and the OS.
-        self.script_host.profile().borrow_mut().begin_frame();
-        // The frame's pacing: `frameSetup`, with a frame cap's wait inside it
-        // named `frameCap`.
-        let setup = self.open_wait();
-        self.publish_pacing_setup();
-        self.pace_frame();
-        self.close_wait(setup, "frameSetup");
-        // From here to the input pump: the editor's own upkeep, named
-        // `editorUpkeep` inside `untimed` (the terrain and asset work in it
-        // keeps its own buckets).
-        let upkeep = self.open_wait();
+    pub(crate) fn tools_upkeep(&mut self) {
+        if self.player_mode {
+            return;
+        }
         // A held selection the world has emptied — the node deleted, the scene
         // switched — releases here, before anything draws. The lock's only
         // switch is on the Inspector's name row, so a lock over nothing would
@@ -152,26 +146,105 @@ impl Editor {
         if self.tool == crate::gizmo::Tool::Tiles && !self.playing {
             self.tile_frame_update(self.cursor);
         }
-        // Map meshes: heal duplicated ids and re-upload edited geometry so the
-        // gather below always finds a current `@map/<id>` registry entry; then
-        // the Map tool's hover/selection overlay.
-        self.sync_map_meshes();
-        // …and re-attach any paint to the surfaces that survived the edit,
-        // before anything draws with a stale block.
-        self.sync_map_paint();
+        // The Map tool's hover/selection overlay, and the Tiles tool's.
         self.map_edit_frame_update();
         self.tile_frame_viz();
-        // 2D: rebuild any tilemap whose grid or sheet changed.
-        self.sync_tilemaps();
         // The 🎓 Learn tab answers its checks from a snapshot of the scene and
         // the project's files. Taken up here with the other whole-`self` passes,
         // before the GPU destructure below splits `self` apart — and only while
         // the tab is actually visible, because it reads every script in the
         // project and a panel nobody has open is not worth a file walk.
         self.refresh_learn();
-        // A finished "test voice from a WAV" pick — up here with the other
-        // whole-`self` passes, before the GPU destructure splits `self` apart.
+    }
+
+    /// The panels' own upkeep, once a frame: the Inspector's asset preview
+    /// (returned, for the panel to draw) and its script params, the IDE's
+    /// live syntax check, autosave, and the export and ship jobs started
+    /// from the editor. None
+    /// in a build, which has no panels to show them and starts no jobs.
+    #[cfg(feature = "editor-ui")]
+    pub(crate) fn panels_upkeep(&mut self) -> Option<crate::PreviewView> {
+        if self.player_mode {
+            return None;
+        }
+        // Inspector asset preview: render the spinning model/material (or load the
+        // texture) before the GPU/egui destructure borrows below. `preview_dt` is a
+        // cheap peek at the frame delta — only the turntable angle uses it.
+        let preview_dt = self.last.map(|l| l.elapsed().as_secs_f32()).unwrap_or(0.0).min(0.1);
+        self.update_asset_preview(preview_dt);
+        let preview_view = self.preview_view();
+        // Live Lua syntax check for the active IDE file (drives red squiggles).
+        self.check_active_script_syntax();
+        // Crash safety: periodically snapshot a dirty scene to `.floptle/autosave`
+        // (deleted on a real save; offered for recovery at the next open).
+        self.autosave_tick();
+        // Reap a finished cross-target export build (Windows-from-Linux etc.).
+        self.poll_export_build();
+        self.poll_ship();
+        // Keep the Inspector's script param list in sync with each script's `defaults`
+        // (cheap: cached by file mtime, selected node only) so editing a script surfaces
+        // new tunables and drops removed ones live.
+        self.sync_selected_script_params();
+        preview_view
+    }
+
+    /// Which dock tab holds focus, and the dopesheet's claim on Ctrl+C let go.
+    #[cfg(feature = "editor-ui")]
+    fn dock_upkeep(&mut self) {
+        // Which dock tab holds focus (from last frame's dock state — the raw winit
+        // key handler runs between frames, so a one-frame-old read is exact). Lets
+        // that handler route Delete/arrows/F to a focused timeline panel instead of
+        // the scene. Fullscreen forces its own tab.
+        self.focused_tab = self.fullscreen_tab.or_else(|| {
+            self.dock_state.as_mut().and_then(|d| d.find_active_focused().map(|(_, t)| *t))
+        });
+        // Cleared here, set again by the dopesheet if it draws this frame. A
+        // panel that is no longer on screen must not keep claiming Ctrl+C — the
+        // flag has to expire on its own rather than wait to be corrected.
+        self.anim_ui.sheet_hovered = false;
+    }
+
+    /// 🖼 Image tab: frame playback, toasts, external-change reload, and the
+    /// Live re-export that keeps the mesh in step with the brush.
+    #[cfg(feature = "editor-ui")]
+    fn image_upkeep(&mut self, dt: f32) {
+        let image_visible = std::mem::take(&mut self.image.tab_visible);
+        self.image.tick(dt);
+        if image_visible {
+            self.poll_image_doc_reload();
+            self.step_image_live();
+        }
+    }
+
+    #[cfg(feature = "editor-ui")]
+    pub(crate) fn render(&mut self) {
+        // The frame's own work starts here; the time before it, back to the
+        // last frame's end, was the window system and the OS.
+        self.script_host.profile().borrow_mut().begin_frame();
+        // The frame's pacing: `frameSetup`, with a frame cap's wait inside it
+        // named `frameCap`.
+        let setup = self.open_wait();
+        self.publish_pacing_setup();
+        self.pace_frame();
+        self.close_wait(setup, "frameSetup");
+        // From here to the input pump: the editor's own upkeep, named
+        // `editorUpkeep` inside `untimed` (the terrain and asset work in it
+        // keeps its own buckets).
+        let upkeep = self.open_wait();
+        // The editor's own tools: selection, brushes, the Map and Tiles tools'
+        // overlays, the Learn tab, a voice-test pick. None of it is the game's.
+        self.tools_upkeep();
+        // A finished "test voice from a WAV" pick, asked for from the 🌐
+        // window, which a build has too (F1).
         self.poll_voice_test_pick();
+        // Map meshes: heal duplicated ids and re-upload edited geometry so the
+        // gather below always finds a current `@map/<id>` registry entry.
+        self.sync_map_meshes();
+        // …and re-attach any paint to the surfaces that survived the edit,
+        // before anything draws with a stale block.
+        self.sync_map_paint();
+        // 2D: rebuild any tilemap whose grid or sheet changed.
+        self.sync_tilemaps();
         // The project's packages get their frame here — before the GPU state is
         // borrowed for the rest of `render`, because an extension's hooks need
         // the whole editor and the draw path holds pieces of it. What they
@@ -186,21 +259,9 @@ impl Editor {
             self.account = Some(floptle_account::Account::new(floptle_account::DEFAULT_BASE));
         }
 
-        // Inspector asset preview: render the spinning model/material (or load the
-        // texture) before the GPU/egui destructure borrows below. `preview_dt` is a
-        // cheap peek at the frame delta — only the turntable angle uses it.
-        let preview_dt = self.last.map(|l| l.elapsed().as_secs_f32()).unwrap_or(0.0).min(0.1);
-        self.update_asset_preview(preview_dt);
-        let preview_view = self.preview_view();
-
-        // Live Lua syntax check for the active IDE file (drives red squiggles).
-        self.check_active_script_syntax();
-        // Crash safety: periodically snapshot a dirty scene to `.floptle/autosave`
-        // (deleted on a real save; offered for recovery at the next open).
-        self.autosave_tick();
-        // Reap a finished cross-target export build (Windows-from-Linux etc.).
-        self.poll_export_build();
-        self.poll_ship();
+        // The panels' own upkeep: the Inspector's asset preview, the IDE's
+        // syntax check, autosave, export and ship jobs.
+        let preview_view = self.panels_upkeep();
         // Terrain volumes render per-volume, each at native resolution: moving a
         // terrain needs no GPU work — only structural changes re-upload into the
         // shared 3D atlas (where shadow-only mesh occluders also live).
@@ -264,10 +325,6 @@ impl Editor {
             // dab shows the same frame it lands.
             ed.sync_tex_paint_mirrors();
         });
-        // Keep the Inspector's script param list in sync with each script's `defaults`
-        // (cheap: cached by file mtime, selected node only) so editing a script surfaces
-        // new tunables and drops removed ones live.
-        self.sync_selected_script_params();
         // Whether the Game viewport is focused (precomputed before the GPU borrow): game
         // input only feeds scripts here. `game_view()` is pointer-aware in split view, so
         // when both tabs show, input goes to whichever viewport the mouse is over and the
@@ -286,7 +343,6 @@ impl Editor {
         // rewritten by anything (Aseprite, a build script, a git checkout)
         // re-uploads here. See image_io.rs.
         self.timed_wait("assetPoll", |ed| {
-            #[cfg(feature = "editor-ui")]
             ed.poll_aseprite_files();
             ed.poll_texture_hot_reload();
         });
@@ -307,35 +363,19 @@ impl Editor {
         }
 
         let upkeep = self.open_wait();
-        // Which dock tab holds focus (from last frame's dock state — the raw winit
-        // key handler runs between frames, so a one-frame-old read is exact). Lets
-        // that handler route Delete/arrows/F to a focused timeline panel instead of
-        // the scene. Fullscreen forces its own tab.
-        self.focused_tab = self.fullscreen_tab.or(self
-            .dock_state
-            .as_mut()
-            .and_then(|d| d.find_active_focused().map(|(_, t)| *t)));
-        // Cleared here, set again by the dopesheet if it draws this frame. A
-        // panel that is no longer on screen must not keep claiming Ctrl+C — the
-        // flag has to expire on its own rather than wait to be corrected.
-        self.anim_ui.sheet_hovered = false;
-
+        self.dock_upkeep();
         let (dt, elapsed) = self.advance_clock(game_focused);
-        // 🖼 Image tab: frame playback, toasts, external-change reload, and the
-        // Live re-export that keeps the mesh in step with the brush.
-        let image_visible = std::mem::take(&mut self.image.tab_visible);
-        self.image.tick(dt);
-        if image_visible {
-            self.poll_image_doc_reload();
-            self.step_image_live();
+        // A build has no 🖼 Image tab, nor an undo history to keep.
+        if !self.player_mode {
+            self.image_upkeep(dt);
+            // History frame boundary: capture this frame's pre-edit scene+selection
+            // (what `begin_edit` coalesces a gizmo/inspector drag against), and turn
+            // any selection change since the last boundary into its own undo step.
+            // Skipped while playing — script-driven transforms must not enter the
+            // undo history — and while recording (the world carries previewed clip
+            // values then; edits go to the clip as keys, not to scene undo).
+            self.begin_history_frame();
         }
-        // History frame boundary: capture this frame's pre-edit scene+selection
-        // (what `begin_edit` coalesces a gizmo/inspector drag against), and turn
-        // any selection change since the last boundary into its own undo step.
-        // Skipped while playing — script-driven transforms must not enter the
-        // undo history — and while recording (the world carries previewed clip
-        // values then; edits go to the clip as keys, not to scene undo).
-        self.begin_history_frame();
         self.close_wait(upkeep, "editorUpkeep");
 
         self.play_step(dt, game_focused);
@@ -1708,5 +1748,109 @@ mod egui_skip_tests {
         assert!(egui_paints(&pass(|ui| {
             ui.painter().line_segment([egui::pos2(10.0, 10.0), egui::pos2(200.0, 40.0)], egui::Stroke::new(2.0, egui::Color32::RED));
         })));
+    }
+}
+
+/// What a build (`floptle play`) leaves out of the editor's frame, and what
+/// the editor keeps doing for its own panels. No GPU: these are the passes
+/// around the play frame, on an editor with no window.
+#[cfg(feature = "editor-ui")]
+#[cfg(test)]
+mod build_upkeep_tests {
+    use crate::Editor;
+
+    /// An editor whose tools and panels each have something to do this
+    /// frame: a held selection over nothing to let go of, and an open script
+    /// with a syntax error for the live check to report.
+    fn busy_editor(player_mode: bool) -> Editor {
+        let mut ed = Editor { player_mode, ..Default::default() };
+        ed.selection_locked = true;
+        ed.ide.open.push(crate::ide::OpenScript {
+            path: "scripts/broken.lua".into(),
+            name: "broken".into(),
+            text: "function update(\n".into(),
+            dirty: false,
+        });
+        ed.ide.active = Some(0);
+        ed
+    }
+
+    /// **A build skips the editor's own upkeep; the editor keeps it.** The
+    /// same frame's passes on an editor and on a build, each with work
+    /// waiting: the editor lets go of the empty held selection and reports
+    /// the open script's syntax error, the build does neither — it has no
+    /// selection to hold and no Scripting tab to show the error in.
+    #[test]
+    fn a_build_skips_the_editors_upkeep_and_the_editor_keeps_it() {
+        let mut editor = busy_editor(false);
+        editor.tools_upkeep();
+        assert!(editor.panels_upkeep().is_none(), "nothing is selected to preview");
+        assert!(!editor.selection_locked, "the editor kept a held selection over nothing");
+        assert!(editor.ide_diag.is_some(), "the editor did not check the open script");
+
+        let mut build = busy_editor(true);
+        build.tools_upkeep();
+        assert!(build.panels_upkeep().is_none());
+        assert!(build.selection_locked, "a build ran the editor's selection upkeep");
+        assert!(build.ide_diag.is_none(), "a build syntax-checked the IDE's open script");
+    }
+
+    /// **The panels' inputs are gathered only when a panel draws.** A
+    /// maximized Scene or Game view — every build's window — draws no
+    /// panel; a docked layout, or any other tab maximized, does.
+    #[test]
+    fn panel_inputs_are_gathered_only_when_a_panel_draws() {
+        use crate::EditorTab;
+        assert!(!crate::frame_ui::panels_drawn(Some(EditorTab::Game)));
+        assert!(!crate::frame_ui::panels_drawn(Some(EditorTab::Scene)));
+        assert!(crate::frame_ui::panels_drawn(None));
+        assert!(crate::frame_ui::panels_drawn(Some(EditorTab::Inspector)));
+    }
+
+    /// **The 🌐 window's replay list is read only while it is open.** It
+    /// is a folder listing, and it was taken every frame of every game.
+    #[test]
+    fn the_replay_folder_is_listed_only_while_the_multiplayer_window_is_open() {
+        let dir = std::env::temp_dir().join(format!("floptle-replay-list-{}", std::process::id()));
+        std::fs::create_dir_all(crate::shadow::replay_dir(&dir)).unwrap();
+        std::fs::write(crate::shadow::replay_dir(&dir).join("match.floptlereplay"), b"").unwrap();
+        let mut ed = Editor { project_root: dir.clone(), player_mode: true, ..Default::default() };
+        assert!(ed.net_snapshot().replays.is_empty(), "listed with the window shut");
+        ed.show_net_panel = true;
+        assert_eq!(ed.net_snapshot().replays.len(), 1, "the open window lost its replay");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A build looks at its hot-reloaded textures at its own, slower
+    /// pace.** A second after the last look the editor looks again and
+    /// drops a texture that changed; a build waits out its two seconds,
+    /// then does the same.
+    #[test]
+    fn a_build_polls_hot_reloaded_textures_at_its_own_pace() {
+        use floptle_core::time::Instant;
+        use std::time::Duration;
+        let dir = std::env::temp_dir().join(format!("floptle-play-poll-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("textures")).unwrap();
+        let file = dir.join("textures/wall.png");
+        floptle_image::io::save_png(&file, &[1, 2, 3, 255], 1, 1).unwrap();
+        for player_mode in [false, true] {
+            let mut ed = Editor { project_root: dir.clone(), player_mode, ..Default::default() };
+            ed.texture_registry.insert("textures/wall.png".into(), floptle_render::TexId(1));
+            ed.poll_texture_hot_reload();
+            assert!(ed.texture_mtime.contains_key("textures/wall.png"));
+            // Changed on disk since that look.
+            ed.texture_mtime.insert("textures/wall.png".into(), std::time::SystemTime::UNIX_EPOCH);
+            ed.texture_poll_at = Some(Instant::now() - Duration::from_secs(1));
+            ed.poll_texture_hot_reload();
+            assert_eq!(
+                ed.texture_registry.contains_key("textures/wall.png"),
+                player_mode,
+                "a second after the last look (build: {player_mode})"
+            );
+            ed.texture_poll_at = Some(Instant::now() - crate::image_io::PLAY_POLL_EVERY);
+            ed.poll_texture_hot_reload();
+            assert!(!ed.texture_registry.contains_key("textures/wall.png"), "never reloaded (build: {player_mode})");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -11,6 +11,14 @@
 //! [`ScriptHost`](crate::ScriptHost)'s stopped set, and is not called again
 //! until its file is edited.
 //!
+//! **Each script is timed on its own clock.** The driver starts the clock
+//! again ([`Budget::restart`]) as it hands the pass to each script's hook,
+//! and again after an overrun, so a script is judged by the time it spent
+//! itself. One clock shared by the whole pass blamed every script that ran
+//! after an overrun: the deadline had already gone by, so each of them
+//! raised the budget's error at its first check, and fifteen scripts that
+//! had run for microseconds were reported, and struck, for one that looped.
+//!
 //! **One slow pass does not end a script.** In Play or a shipped game there
 //! is no edit to bring a stopped script back, so stopping on the first
 //! overrun lost it for the session: a builder holding 500 parts overran once
@@ -79,6 +87,10 @@ pub struct Budget {
     /// time then where the platform can say.
     deadline: Cell<Option<(Instant, Option<Duration>)>>,
     ticks: Cell<u32>,
+    /// The clock is to start again at the next check: a new script has the
+    /// pass, or the last one overran. Read at the next clock read rather than
+    /// taken now, so handing over costs a flag, not two clock reads.
+    fresh: Cell<bool>,
     /// Outermost entries into Lua so far, so a reader of the interrupt (the
     /// script sampler) can tell one pass from the next.
     entries: Cell<u64>,
@@ -101,6 +113,7 @@ impl Budget {
             limit: Cell::new(DEFAULT_BUDGET),
             deadline: Cell::new(None),
             ticks: Cell::new(0),
+            fresh: Cell::new(false),
             entries: Cell::new(0),
             gc_at_arm: Cell::new(Duration::ZERO),
             gc_report: RefCell::new(None),
@@ -123,11 +136,27 @@ impl Budget {
     pub fn arm(self: &Rc<Self>) -> Armed {
         let prev = self.deadline.get();
         if prev.is_none() {
+            self.fresh.set(false);
             self.deadline.set(Some((Instant::now(), thread_cpu())));
             self.entries.set(self.entries.get().wrapping_add(1));
             self.gc_at_arm.set(gc_spent());
         }
         Armed { budget: self.clone(), prev }
+    }
+
+    /// Start the clock again for the script about to run, within the armed
+    /// entry: nothing it had spent before belongs to the next one. Cheap — a
+    /// flag the next check reads. Nested calls never come through here; it
+    /// is the driver's, at each script it hands the pass to.
+    ///
+    /// It counts as a new entry for the script sampler too, whose clock
+    /// starts again at the script's first line: the engine's own work since
+    /// the last sample (stamps, the scene mirror, timers' bookkeeping) is
+    /// nobody's line, and it was charged to the first line the next script
+    /// ran, the first line of a `fixedUpdate` most visibly.
+    pub fn restart(&self) {
+        self.fresh.set(true);
+        self.entries.set(self.entries.get().wrapping_add(1));
     }
 
     /// The interrupt body: cheap on every call; every [`CHECK_EVERY`] a clock
@@ -144,7 +173,9 @@ impl Budget {
         let t = self.ticks.get().wrapping_add(1);
         self.ticks.set(t);
         if t.is_multiple_of(CHECK_EVERY) {
-            if let Some((wall0, cpu0)) = self.deadline.get() {
+            if self.fresh.replace(false) && self.deadline.get().is_some() {
+                self.deadline.set(Some((Instant::now(), thread_cpu())));
+            } else if let Some((wall0, cpu0)) = self.deadline.get() {
                 let limit = self.limit.get();
                 let wall = wall0.elapsed();
                 let cpu = cpu0.zip(thread_cpu()).map(|(a, b)| b.saturating_sub(a));
@@ -153,6 +184,9 @@ impl Budget {
                     None => wall > limit,
                 };
                 if over {
+                    // The overrun is this script's alone: whatever runs next
+                    // starts with the whole budget.
+                    self.fresh.set(true);
                     return Err(mlua::Error::RuntimeError(self.message(wall, cpu)));
                 }
             }
@@ -189,7 +223,8 @@ impl Budget {
         msg.contains(MARKER)
     }
 
-    /// Outermost entries into Lua so far.
+    /// Entries into Lua so far: outermost ones, and each script the driver
+    /// hands a pass to ([`Self::restart`]).
     pub fn entries(&self) -> u64 {
         self.entries.get()
     }

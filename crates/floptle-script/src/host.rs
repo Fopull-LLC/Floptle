@@ -3446,8 +3446,29 @@ impl ScriptHost {
             sleepers.clone(),
             net.current.clone(),
             script_clock.clone(),
+            logs.clone(),
         ) {
             floptle_say::say_err!("[lua] failed to install the script API: {e}");
+        }
+        // `script.generation(kind)`: a number that moves whenever
+        // `findScripts(kind)` could answer differently, so a game that asks
+        // for the same list every frame can keep it until it does.
+        {
+            let scene = shared.scene.clone();
+            let generation = lua.create_function(move |_, kind: String| {
+                let s = scene.borrow();
+                let canonical = match crate::match_kind(s.by_kind.keys().map(String::as_str), &kind) {
+                    crate::KindMatch::One(k) => k,
+                    _ => kind,
+                };
+                Ok(s.kind_generation(&canonical))
+            });
+            match (lua.globals().get::<mlua::Table>("script"), generation) {
+                (Ok(t), Ok(f)) => {
+                    let _ = t.set("generation", f);
+                }
+                _ => floptle_say::say_err!("[lua] failed to install script.generation"),
+            }
         }
         // The `space.*` orbital readouts (solar demo S2).
         let space_info: Rc<RefCell<crate::space_api::SpaceInfo>> =
@@ -3573,6 +3594,7 @@ impl ScriptHost {
         Self {
             lua,
             stamp_unchanged,
+            sampler: sampler.clone(),
             extra_script_dirs: Vec::new(),
             sources: HashMap::new(),
             alloc_by_kind: RefCell::new(HashMap::new()),
@@ -3663,6 +3685,7 @@ impl ScriptHost {
             sleepers,
             destroy_told: std::collections::HashSet::new(),
             kinds_this_frame: Default::default(),
+            kind_direct: Default::default(),
             last_scripts_dir: None,
             script_clock,
             space_info,
@@ -7156,6 +7179,7 @@ impl ScriptHost {
         }
         let seed_t = self.part_start();
         self.mark_rebound();
+        let (mut seeded, mut skipped) = (0u32, 0u32);
         for &e in &work {
             let Some(scripts) = world.get::<Scripts>(e) else { continue };
             for inst in &scripts.0 {
@@ -7164,10 +7188,13 @@ impl ScriptHost {
                     // frame asks of it is to be counted as still here. The
                     // seed is for what changed — a new instance, a hot
                     // reload, a node index taken by a new node, a `params`
-                    // a sleeper has not been given yet.
+                    // a sleeper has not been given yet, a `node` or
+                    // `params` somebody replaced.
                     if self.seed_is_current(e, &inst.kind, scripts_dir) {
+                        skipped += 1;
                         continue;
                     }
+                    seeded += 1;
                     self.charge_memory_to(Some(&inst.kind));
                     self.ensure_instance(e, &inst.kind, scripts_dir);
                     // A sleeper's params are seeded when it wakes, by the tick
@@ -7180,6 +7207,9 @@ impl ScriptHost {
         }
         self.charge_memory_to(None);
         self.keep_switched_off_instances(world);
+        if let Ok(mut p) = self.profile.try_borrow_mut() {
+            p.set_seed_counts(seeded, skipped);
+        }
         self.part_end("scriptsSeed", seed_t);
         // Web replies land here — the frame pass, never the tick pass. A reply
         // arrives when it arrives, so a rollback replay must never see one.
@@ -7581,6 +7611,11 @@ impl ScriptHost {
                         Hookless::Refresh(key) => {
                             let span = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
                             self.charge_memory_to(Some(&inst.kind));
+                            // Engine work, not the script's: the stamp check
+                            // runs a little Lua, which the sampler must not
+                            // take for a script line nor charge the engine's
+                            // time since the last sample to.
+                            self.budget.restart();
                             self.refresh_hookless(key, &inst.kind, &mut tr);
                             if let Some(span) = span {
                                 let ms = span.ms();
@@ -7606,6 +7641,9 @@ impl ScriptHost {
                     // but two per instance per pass is still not free.
                     let heap0 = self.alloc_track.get().then(|| self.lua.used_memory());
                     self.charge_memory_to(Some(&inst.kind));
+                    // This script's own clock: what the ones before it spent
+                    // is not its time — see `budget`.
+                    self.budget.restart();
                     let called = self.tick_instance(
                         *e, &inst.kind, &inst.params, &inst.refs, &inst.strs,
                         inst.pinned_bools.as_deref(), &mut tr, dt, time, pass,
@@ -8326,6 +8364,7 @@ impl ScriptHost {
         s.fine_paint.clear();
         s.by_kind.clear();
         s.by_tag.clear();
+        s.bump_scope();
         for (e, tr) in world.query::<Transform>() {
             Self::mirror_entity(&mut s, world, e, tr, Some(&mut live_tilemaps));
         }
@@ -8456,7 +8495,8 @@ impl ScriptHost {
         s.transforms.remove(&id);
         s.names.remove(&id);
         s.tags.remove(&id);
-        s.parent.remove(&id);
+        s.set_parent(id, None);
+        s.set_disabled(id, false);
         s.scripts.remove(&id);
         s.tilemaps.remove(&id);
         s.dirty.remove(&id);
@@ -8476,7 +8516,7 @@ impl ScriptHost {
             s.names.insert(id, n.0.clone());
         }
         if let Some(p) = world.get::<floptle_core::Parent>(e) {
-            s.parent.insert(id, p.0.index());
+            s.set_parent(id, Some(p.0.index()));
         }
         if let Some(sc) = world.get::<Scripts>(e) {
             s.scripts.insert(id, sc.0.iter().map(|i| i.kind.clone()).collect());
@@ -8492,6 +8532,7 @@ impl ScriptHost {
         s.by_name.clear();
         s.by_kind.clear();
         s.by_tag.clear();
+        s.bump_scope();
         let old_children = std::mem::take(&mut s.children);
         for (e, _) in world.query::<Transform>() {
             let id = e.index();
@@ -8633,7 +8674,7 @@ impl ScriptHost {
 
         let parent = world.get::<floptle_core::Parent>(e).map(|p| p.0.index());
         if s.parent.get(&id).copied() != parent {
-            if let Some(old) = s.parent.remove(&id)
+            if let Some(old) = s.set_parent(id, None)
                 && let Some(v) = s.children.get_mut(&old)
             {
                 v.retain(|&x| x != id);
@@ -8643,7 +8684,7 @@ impl ScriptHost {
                 s.bump_children(old);
             }
             if let Some(p) = parent {
-                s.parent.insert(id, p);
+                s.set_parent(id, Some(p));
                 insert(s.children.entry(p).or_default(), &s.ents);
                 s.bump_children(p);
             }
@@ -8653,10 +8694,12 @@ impl ScriptHost {
         if s.scripts.get(&id) != kinds.as_ref() {
             for k in s.scripts.remove(&id).unwrap_or_default() {
                 remove(&mut s.by_kind, &k);
+                s.bump_kind(&k);
             }
             if let Some(kinds) = kinds {
                 for k in &kinds {
                     insert(s.by_kind.entry(k.clone()).or_default(), &s.ents);
+                    s.bump_kind(k);
                 }
                 s.scripts.insert(id, kinds);
             }
@@ -8681,7 +8724,8 @@ impl ScriptHost {
         s.shader_state.remove(&id);
         s.visible.remove(&id);
         s.cast_shadow.remove(&id);
-        s.disabled.remove(&id);
+        // `disabled` is not dropped here: `mirror_values` sets it either way,
+        // and moves `script.generation` only if it changed.
         s.persistent.remove(&id);
         s.layers.remove(&id);
     }
@@ -8724,7 +8768,7 @@ impl ScriptHost {
             }
             if let Some(p) = world.get::<floptle_core::Parent>(e) {
                 let pid = p.0.index();
-                s.parent.insert(id, pid);
+                s.set_parent(id, Some(pid));
                 s.children.entry(pid).or_default().push(id);
                 // A whole rebuild stamps by comparing lists once at the end.
                 if !rebuilding {
@@ -8734,6 +8778,7 @@ impl ScriptHost {
             if let Some(sc) = world.get::<Scripts>(e) {
                 for inst in &sc.0 {
                     s.by_kind.entry(inst.kind.clone()).or_default().push(id);
+                    s.bump_kind(&inst.kind);
                 }
                 s.scripts.insert(id, sc.0.iter().map(|i| i.kind.clone()).collect());
             }
@@ -8881,9 +8926,7 @@ impl ScriptHost {
             if let Some(c) = world.get::<floptle_core::CastShadow>(e) {
                 s.cast_shadow.insert(id, c.0);
             }
-            if world.get::<floptle_core::Disabled>(e).is_some() {
-                s.disabled.insert(id);
-            }
+            s.set_disabled(id, world.get::<floptle_core::Disabled>(e).is_some());
             if world.get::<floptle_core::Persistent>(e).is_some() {
                 s.persistent.insert(id);
             }
@@ -9044,8 +9087,24 @@ impl ScriptHost {
         if let Some(g) = self.kinds_this_frame.get(&kid) {
             return *g;
         }
-        let path = resolve_script_path(scripts_dir, &self.extra_script_dirs, name);
-        let g = self.ensure_source(name, &path);
+        // The project's own file, when it is there, is where every other
+        // place a script can live would be looked past to: one question to
+        // the disk answers both where the file is and whether it changed.
+        let direct = match self.kind_direct.get(&kid) {
+            Some((dir, p)) if dir.as_os_str() == scripts_dir.as_os_str() => Some(p.clone()),
+            _ => floptle_vfs::contain(scripts_dir, &format!("{name}.lua")).map(|p| {
+                let p: std::rc::Rc<Path> = p.into();
+                self.kind_direct.insert(kid, (scripts_dir.to_path_buf(), p.clone()));
+                p
+            }),
+        };
+        let g = match direct.and_then(|p| floptle_vfs::presence(&p).map(|m| (p, m))) {
+            Some((path, mtime)) => Some(self.note_source(name, &path, mtime)),
+            None => {
+                let path = resolve_script_path(scripts_dir, &self.extra_script_dirs, name);
+                self.ensure_source(name, &path)
+            }
+        };
         self.kinds_this_frame.insert(kid, g);
         g
     }
@@ -9058,15 +9117,43 @@ impl ScriptHost {
     /// and doing that for every instance every frame was most of
     /// `scriptsSeed`: two `String` keys, two registry fetches, a fresh `node`
     /// handle and a fresh registry slot each, per instance per frame.
+    ///
+    /// A sleeper not yet given its `params` is current too: the seed leaves
+    /// that to the tick that wakes it. And an instance whose `node` or
+    /// `params` might have been replaced — by its own source, through its
+    /// handle, or by a script that reaches environments by function — is
+    /// current while `node` is still the handle the seed put there and
+    /// `params` is still set: the two things the seed would put back.
     fn seed_is_current(&mut self, e: Entity, name: &str, scripts_dir: &Path) -> bool {
         let kid = self.intern_kind(name);
         let Some(generation) = self.kind_generation(kid, name, scripts_dir) else { return false };
-        let Some(inst) = self.instances.get_mut(&(e.index(), kid)) else { return false };
-        if inst.generation != generation || inst.entity != e || !inst.seeded || inst.rebinds_globals || self.any_fenv {
+        let Some(inst) = self.instances.get(&(e.index(), kid)) else { return false };
+        if inst.generation != generation || inst.entity != e {
             return false;
         }
-        inst.seen = true;
+        if !inst.seeded && !self.sleepers.borrow().is_asleep(e.index(), name) {
+            return false;
+        }
+        if (inst.rebinds_globals || self.any_fenv) && !self.globals_in_place(inst) {
+            return false;
+        }
+        if let Some(inst) = self.instances.get_mut(&(e.index(), kid)) {
+            inst.seen = true;
+        }
         true
+    }
+
+    /// Whether `inst`'s environment still holds, raw, the `node` handle the
+    /// seed last put there and a `params` (unless it is a sleeper the seed
+    /// has not given one yet) — everything the seed would otherwise put back.
+    fn globals_in_place(&self, inst: &Instance) -> bool {
+        let Some((_, addr)) = inst.own_handle.as_ref() else { return false };
+        let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return false };
+        let node_held = match env.raw_get::<Value>("node") {
+            Ok(v @ Value::Table(_)) => v.to_pointer() as usize == *addr,
+            _ => false,
+        };
+        node_held && (!inst.seeded || env.raw_get::<Value>("params").is_ok_and(|v| !v.is_nil()))
     }
 
     fn ensure_instance(&mut self, e: Entity, name: &str, scripts_dir: &Path) -> bool {
@@ -9115,6 +9202,7 @@ impl ScriptHost {
                     }
                     self.stopped.remove(name);
                     self.warn_upvalue_pressure(name, generation, &src);
+                    self.warn_sleep_numbers(name, generation, &src);
                     if let Some(old) = self.instances.remove(&id) {
                         let _ = self.lua.remove_registry_value(old.env);
                     }
@@ -9155,6 +9243,7 @@ impl ScriptHost {
                                     params_dirty: false,
                                     seeded: false,
                                     rebinds_globals,
+                                    own_handle: None,
                                 },
                             );
                         }
@@ -9185,7 +9274,12 @@ impl ScriptHost {
         // A persistent `node` handle for this script's own entity, so methods called from
         // other scripts (which don't get the per-call `node` argument) can still reach it.
         if let Ok(h) = new_node_handle(&self.lua, e.index()) {
+            let addr = Value::Table(h.clone()).to_pointer() as usize;
+            let key = self.lua.create_registry_value(&h).ok();
             let _ = env.set("node", h);
+            if let Some(inst) = self.instances.get_mut(&id) {
+                inst.own_handle = key.map(|k| (k, addr));
+            }
         }
         // Publish the live environment for other scripts' handles.
         // Published as a registry key: a live `Table` per instance is what the
@@ -10060,33 +10154,39 @@ impl ScriptHost {
     fn ensure_source(&mut self, name: &str, path: &Path) -> Option<u64> {
         // A browser build has no mtimes at all: a file there is present or
         // absent, and never newer. Only absence answers `None`.
-        if !floptle_vfs::exists(path) {
-            return None;
+        let mtime = floptle_vfs::presence(path)?;
+        Some(self.note_source(name, path, mtime))
+    }
+
+    /// [`Self::ensure_source`] for a file already found at `path` with
+    /// `mtime`: the generation, bumped if the mtime moved.
+    fn note_source(&mut self, name: &str, path: &Path, mtime: Option<floptle_core::time::SystemTime>) -> u64 {
+        if !self.sources.contains_key(name) {
+            self.sources.insert(
+                name.to_string(),
+                Source { generation: 0, mtime: None, error: None, path: path.to_path_buf(), text: None, reads: 0 },
+            );
         }
-        let mtime = floptle_vfs::modified(path);
-        let entry = self.sources.entry(name.to_string()).or_insert_with(|| Source {
-            generation: 0,
-            mtime: None,
-            error: None,
-            path: path.to_path_buf(),
-            text: None,
-            reads: 0,
-        });
+        let Some(entry) = self.sources.get_mut(name) else { return 0 };
         // A script can move between package folders and the project's own
         // (the project wins — see `resolve`), so the path is refreshed rather
         // than fixed at first sight: quoting a line out of the file that is no
-        // longer the one running would be worse than quoting none.
-        if entry.path != path {
+        // longer the one running would be worse than quoting none. Another
+        // file is another source, whatever its mtime says: a project file
+        // written in the same second as the package's it now shadows is still
+        // the one that must run.
+        let moved = entry.path != path;
+        if moved {
             entry.path = path.to_path_buf();
         }
-        if entry.mtime != mtime {
+        if moved || entry.mtime != mtime {
             entry.mtime = mtime;
             entry.generation += 1;
             entry.error = None;
             // A quoted line must come from the file that is running.
             entry.text = None;
         }
-        Some(entry.generation)
+        entry.generation
     }
 
     /// A script failed to load. Three things have to happen, and they are not
@@ -10202,6 +10302,23 @@ impl ScriptHost {
     #[cfg(test)]
     pub(crate) fn source_reads(&self, name: &str) -> u32 {
         self.sources.get(name).map_or(0, |s| s.reads)
+    }
+
+    /// Say, when a script loads, where it calls `script.sleep` with a number
+    /// — once per version of the file. The call raises every time it runs,
+    /// and a `pcall` around it hides that.
+    fn warn_sleep_numbers(&mut self, name: &str, generation: u64, src: &str) {
+        let calls = crate::sleep_api::sleep_number_calls(src);
+        if calls.is_empty() || !self.upvalue_warned.insert((format!("{name}#sleep"), generation)) {
+            return;
+        }
+        for (line, n) in calls {
+            self.logs.borrow_mut().push(ScriptLog {
+                level: LogLevel::Warn,
+                msg: format!("{name}.lua:{line}: {}", crate::sleep_api::sleep_number_message(&n)),
+                source: Some((name.to_string(), line as u32)),
+            });
+        }
     }
 
     /// Warn a script that is one edit from unloadable.
@@ -11562,6 +11679,81 @@ mod host_tests {
         let cb: f32 = samples.iter().filter(|s| s.script == "split_cb").map(|s| s.ms).sum();
         assert!(samples.iter().any(|s| s.script == "pass"), "the pass was never sampled: {samples:?}");
         assert!(cb < 10.0, "the callback was charged {cb:.2} ms for a short loop after 20 ms of engine work: {samples:?}");
+    }
+
+    /// **Each script the pass is handed to starts the sampler's clock
+    /// afresh.** The engine's work between two hooks of one pass (stamps,
+    /// the scene mirror, a tick's timers) was charged to the first line the
+    /// next script ran: the first line of a `fixedUpdate` most visibly. Here
+    /// 20 ms of engine work sits between a sampled hook and a short one in
+    /// the same armed pass.
+    #[test]
+    fn each_script_handed_the_pass_starts_the_sampler_clock_afresh() {
+        let host = ScriptHost::new();
+        host.profile().borrow_mut().enable(true);
+        let first: mlua::Function = host
+            .lua
+            .load("return function()\n  perf.sampleScripts(true, 0.05)\n  local x = 0\n  for i = 1, 200000 do x = x + i end\nend\n")
+            .set_name("=first")
+            .eval()
+            .unwrap();
+        let next: mlua::Function = host
+            .lua
+            .load("return function()\n  local x = 0\n  for i = 1, 2000 do x = x + i end\nend\n")
+            .set_name("=next")
+            .eval()
+            .unwrap();
+        {
+            let _pass = host.budget.arm();
+            first.call::<()>(()).unwrap();
+            let t = floptle_core::time::Instant::now();
+            while t.elapsed().as_secs_f32() < 0.02 {}
+            host.budget.restart();
+            next.call::<()>(()).unwrap();
+        }
+        host.profile().borrow_mut().end_frame();
+        let samples = host.profile().borrow_mut().take_samples();
+        let charged: f32 = samples.iter().filter(|s| s.script == "next").map(|s| s.ms).sum();
+        assert!(samples.iter().any(|s| s.script == "first"), "the first hook was never sampled: {samples:?}");
+        assert!(charged < 10.0, "the next hook was charged {charged:.2} ms for a short loop after 20 ms of engine work");
+    }
+
+    /// **The engine's check of a kept `node` table is no script's line.** A
+    /// crowd whose hooks were handed their `node` tables is checked every
+    /// pass without a hook; that check is a little Lua of the engine's own,
+    /// and the sampler named it the hottest line of a game.
+    #[test]
+    fn the_engines_node_table_check_is_never_a_sampled_line() {
+        let dir = std::env::temp_dir().join(format!("floptle-sampler-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::tests::write_script(&dir, "starter", "function start(node) node.x = node.x + 0 end\n");
+        crate::tests::write_script(
+            &dir,
+            "busy",
+            "function update(node, dt) local x = 0 for i = 1, 3000 do x = x + i end end\n",
+        );
+        let mut world = World::default();
+        for i in 0..200 {
+            let e = world.spawn();
+            world.insert(e, floptle_core::transform::Transform::IDENTITY);
+            world.insert(e, Scripts(vec![floptle_core::ScriptInst::new(if i % 10 == 0 { "busy" } else { "starter" })]));
+        }
+        let mut host = ScriptHost::new();
+        host.profile().borrow_mut().enable(true);
+        host.profile().borrow_mut().set_sampling(Some(0.01));
+        host.sampler.set(Some(0.01));
+        for f in 0..20 {
+            host.run(&mut world, &dir, 1.0 / 60.0, f as f32 / 60.0);
+            host.run_fixed(&mut world, 1.0 / 60.0, f as f32 / 60.0);
+            host.run_late(&mut world, 1.0 / 60.0, f as f32 / 60.0);
+            host.profile().borrow_mut().end_frame();
+        }
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let samples = host.profile().borrow_mut().take_samples();
+        assert!(samples.iter().any(|s| s.script == "busy"), "nothing was sampled: {samples:?}");
+        let stamp: Vec<_> = samples.iter().filter(|s| s.script.contains("stamp_unchanged")).collect();
+        assert!(stamp.is_empty(), "the engine's check was charged as a line: {stamp:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **`terrain.saveDir` is a directory the engine writes into**, so it is

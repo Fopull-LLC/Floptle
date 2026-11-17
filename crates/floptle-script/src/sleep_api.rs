@@ -22,7 +22,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use mlua::{Lua, Table, Value};
+use mlua::{Lua, Value};
 
 /// One sleeping instance: which script on the node, and what wakes it besides
 /// `script.wake` and an event.
@@ -154,18 +154,78 @@ fn node_id(v: &Value) -> Option<u32> {
     }
 }
 
+/// What `script.sleep` says when it is handed a number: the seconds go in
+/// the options table. The number form was never one, and a `pcall` around the
+/// call hid the error every frame while the script never slept.
+pub(crate) fn sleep_number_message(n: &str) -> String {
+    format!(
+        "script.sleep({n}) does not take a number: write script.sleep{{ seconds = {n} }} to sleep \
+         for that long, or script.sleep() to sleep until woken"
+    )
+}
+
+/// Where `script.sleep(<number>)` is written in `src`, as 1-based lines with
+/// the number: the load-time half of [`sleep_number_message`], for the call
+/// a `pcall` would hide.
+pub(crate) fn sleep_number_calls(src: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        let code = line.split("--").next().unwrap_or("");
+        let mut from = 0;
+        while let Some(at) = code[from..].find("script.sleep(") {
+            let rest = code[from + at + "script.sleep(".len()..].trim_start();
+            let n: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
+            if n.chars().any(|c| c.is_ascii_digit()) {
+                out.push((i + 1, n));
+            }
+            from += at + 1;
+        }
+    }
+    out
+}
+
 pub(crate) fn install_sleep_api(
     lua: &Lua,
     sleepers: Rc<RefCell<Sleepers>>,
     current: Rc<RefCell<Option<(u32, String)>>>,
     clock: Rc<std::cell::Cell<f64>>,
+    logs: Rc<RefCell<Vec<crate::ScriptLog>>>,
 ) -> mlua::Result<()> {
     let t = lua.create_table()?;
 
     let (s, cur, clk) = (sleepers.clone(), current.clone(), clock.clone());
+    let warned: RefCell<std::collections::HashSet<String>> = RefCell::default();
     t.set(
         "sleep",
-        lua.create_function(move |_, opts: Option<Table>| {
+        lua.create_function(move |_, opts: Option<Value>| {
+            let opts = match opts {
+                None | Some(Value::Nil) => None,
+                Some(Value::Table(t)) => Some(t),
+                Some(v @ (Value::Number(_) | Value::Integer(_))) => {
+                    let n = match v {
+                        Value::Integer(i) => i.to_string(),
+                        Value::Number(f) => f.to_string(),
+                        _ => unreachable!(),
+                    };
+                    let msg = sleep_number_message(&n);
+                    // Said in the Console once per script, whatever catches
+                    // the error: a `pcall` around it is how this went unseen.
+                    let kind = cur.borrow().as_ref().map(|(_, k)| k.clone()).unwrap_or_default();
+                    if warned.borrow_mut().insert(kind.clone()) {
+                        logs.borrow_mut().push(crate::ScriptLog {
+                            level: crate::LogLevel::Warn,
+                            msg: if kind.is_empty() { msg.clone() } else { format!("{kind}: {msg}") },
+                            source: (!kind.is_empty()).then(|| (kind.clone(), 0)),
+                        });
+                    }
+                    return Err(mlua::Error::runtime(msg));
+                }
+                Some(_) => {
+                    return Err(mlua::Error::runtime(
+                        "script.sleep(opts?): pass nothing, or an options table such as { seconds = 2 }",
+                    ));
+                }
+            };
             if let Some(o) = &opts {
                 crate::opts::check_keys(o, SLEEP_KEYS, "script.sleep")?;
             }

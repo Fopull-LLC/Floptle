@@ -169,6 +169,7 @@ Scene-wide lookups are globals:
 | `findAll("Coin")` | an array of every node with that name |
 | `findScript("GameManager")` | a **script handle** for the first node anywhere running that script (the manager pattern), or `nil` |
 | `findScripts("third_person")` | an array of script handles — EVERY node carrying that script, in scene order (pair with `net.isMine` to pick the local player among many avatars) |
+| `script.generation("third_person")` | a number that changes whenever `findScripts("third_person")` could answer differently (a node gaining or losing the script, made or destroyed, switched on or off, moved under another parent): keep the list, and ask for it again only when this has moved |
 
 **When a script handle has something behind it.** A spawned node's scripts are
 loaded before `spawn`'s callback runs, so the callback can hand them their setup

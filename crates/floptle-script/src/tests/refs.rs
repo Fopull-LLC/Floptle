@@ -1353,3 +1353,66 @@ fn find_misses_cost_the_same_in_a_big_scene_and_still_name_a_switched_off_node()
     // machine running tests in parallel from reading as a regression.
     assert!(big < small.max(0.05) * 10.0, "3,000 misses took {big:.2} ms among 20,000 nodes against {small:.2} ms among 200");
 }
+
+/// **`script.generation(kind)` moves exactly when `findScripts(kind)` could
+/// answer differently.** Idle frames, a node moving and another kind coming
+/// and going leave it where it is; a node gaining or losing the script,
+/// being switched off or on, or being moved under a switched-off parent
+/// moves it — so a game can keep the list it asked for until it does.
+#[test]
+fn script_generation_moves_when_find_scripts_could_change() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_generation_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(&dir, "vessel", "function update(node, dt) end\n");
+    write_script(&dir, "other", "function update(node, dt) end\n");
+    let spawn = |world: &mut World, kind: &str| {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst::new(kind)]));
+        e
+    };
+    let mut world = World::default();
+    let a = spawn(&mut world, "vessel");
+    let _b = spawn(&mut world, "vessel");
+    let folder = world.spawn();
+    world.insert(folder, Transform::IDENTITY);
+    let mut host = ScriptHost::new();
+    let mut f = 0;
+    let mut generation = |host: &mut ScriptHost, world: &mut World| -> f64 {
+        host.run(world, &dir, 1.0 / 60.0, f as f32 / 60.0);
+        f += 1;
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        host.lua.load("return script.generation('vessel')").eval::<f64>().unwrap()
+    };
+    let g0 = generation(&mut host, &mut world);
+    assert_eq!(generation(&mut host, &mut world), g0, "an idle frame moved it");
+    world.get_mut::<Transform>(a).unwrap().translation.x = 5.0;
+    assert_eq!(generation(&mut host, &mut world), g0, "a vessel moving moved it");
+    let o = spawn(&mut world, "other");
+    assert_eq!(generation(&mut host, &mut world), g0, "another kind's node arriving moved it");
+    world.despawn(o);
+    let g = generation(&mut host, &mut world);
+    let c = spawn(&mut world, "vessel");
+    let g1 = generation(&mut host, &mut world);
+    assert!(g1 != g, "a new vessel did not move it");
+    assert_eq!(generation(&mut host, &mut world), g1);
+    world.insert(c, floptle_core::Disabled);
+    let g2 = generation(&mut host, &mut world);
+    assert!(g2 != g1, "a vessel switched off did not move it");
+    world.remove::<floptle_core::Disabled>(c);
+    let g3 = generation(&mut host, &mut world);
+    assert!(g3 != g2, "a vessel switched back on did not move it");
+    world.insert(folder, floptle_core::Disabled);
+    let g4 = generation(&mut host, &mut world);
+    world.insert(c, floptle_core::Parent(folder));
+    let g5 = generation(&mut host, &mut world);
+    assert!(g5 != g4, "a vessel moved under a switched-off folder did not move it");
+    world.insert(c, Scripts(vec![floptle_core::ScriptInst::new("other")]));
+    let g6 = generation(&mut host, &mut world);
+    assert!(g6 != g5, "a node losing the script did not move it");
+    world.despawn(a);
+    let g7 = generation(&mut host, &mut world);
+    assert!(g7 != g6, "a vessel destroyed did not move it");
+    assert_eq!(generation(&mut host, &mut world), g7);
+    let _ = std::fs::remove_dir_all(&dir);
+}
