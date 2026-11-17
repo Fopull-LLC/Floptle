@@ -281,6 +281,9 @@ alike. In the Inspector it is the 🎲 on a curve row.
   `stretch` lengthens a velocity-aligned quad along its motion, and
   `speed_stretch` adds length per unit of speed, so a fast spark draws a long
   streak and a slow one stays a dot.
+  The texture path is relative to the project folder. A texture that cannot
+  be loaded leaves the track drawing plain quads in its tint, and the
+  Console says so once, naming the effect, the track and the path.
 - **`Mesh { asset_path }`** — instanced geometry through the raster pass. Debris
   that is actually shaped like debris.
 - **`Beam { texture }`** — a single camera-facing ribbon from the effect origin to

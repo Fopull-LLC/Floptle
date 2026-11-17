@@ -734,8 +734,9 @@ impl Editor {
                 }
             }
         }
-        for p in self.vfx.texture_paths() {
-            push(&mut tex, &p);
+        let refs = self.vfx.texture_refs();
+        for r in &refs {
+            push(&mut tex, &r.path);
         }
         for p in self.vfx.mesh_paths() {
             push(&mut meshes, &p);
@@ -745,10 +746,39 @@ impl Editor {
                 self.ensure_texture(&p);
             }
         }
+        self.report_missing_vfx_textures(&refs);
         for p in meshes {
             if !self.mesh_registry.contains_key(&p) {
                 self.import_model(&p);
             }
+        }
+    }
+
+    /// Say in the Console, once each, which effect tracks wear a texture
+    /// that did not load. Such a track still draws, untextured: plain quads
+    /// in its tint, which look like a shader or blend problem unless
+    /// something names the file. Only with a GPU: without one nothing is
+    /// registered, and nothing is missing either.
+    fn report_missing_vfx_textures(&mut self, refs: &[crate::vfx::TextureRef]) {
+        if self.gpu.is_none() || self.raster.is_none() {
+            return;
+        }
+        for r in refs {
+            if self.texture_registry.contains_key(&r.path) || crate::runtime_textures::names_no_file(&r.path) {
+                continue;
+            }
+            if !self.vfx_missing_said.insert((r.effect.clone(), r.track.clone(), r.path.clone())) {
+                continue;
+            }
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "effect \"{}\", track \"{}\": its texture \"{}\" could not be loaded, so the track draws \
+                     plain quads in its tint. Check the path, relative to the project folder.",
+                    r.effect, r.track, r.path
+                ),
+                None,
+            );
         }
     }
 }

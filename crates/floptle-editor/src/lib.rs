@@ -207,6 +207,9 @@ mod template_gen;
 mod template_village;
 #[cfg(test)]
 mod vfx_frame_tests;
+// Draws through `shot`, which the authoring half carries.
+#[cfg(all(test, feature = "editor-ui"))]
+mod billboard_texture_tests;
 #[cfg(all(test, feature = "editor-ui"))]
 mod imported_maps_tests;
 #[cfg(all(test, feature = "editor-ui"))]
@@ -2798,6 +2801,9 @@ struct Editor {
     occluder_overflow_said: bool,
     /// "The GPU refused the shadow atlas for lack of memory" has been said.
     atlas_oom_said: bool,
+    /// The effect tracks whose texture would not load that the Console has
+    /// been told about: (effect, track, path), each said once a session.
+    vfx_missing_said: std::collections::HashSet<(String, String, String)>,
     /// A node whose rotation or scale has changed since its bake: the shape it
     /// is heading for, and for how many frames running it has held it. See
     /// [`Editor::refresh_mesh_occluders`].

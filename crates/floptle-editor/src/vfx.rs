@@ -63,6 +63,15 @@ impl VfxAsset {
     }
 }
 
+/// One texture a track wears: which effect, which track, and the path as
+/// written in the effect.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextureRef {
+    pub effect: String,
+    pub track: String,
+    pub path: String,
+}
+
 /// The Particles tab's live preview: a deterministic instance driven by the
 /// tab's playhead, anchored to a scene node carrying the edited effect (or the
 /// world origin when none does).
@@ -1063,17 +1072,17 @@ impl VfxSystem {
         }
     }
 
-    /// Every texture path any registered effect's billboard / beam / trail tracks
-    /// reference — for the editor's texture pre-warm. Includes the live preview's
-    /// tracks so a just-picked (unsaved) texture resolves next frame.
-    pub fn texture_paths(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        let mut scan = |fx: &CompiledEffect| {
+    /// Every texture any registered effect's billboard / beam / trail tracks
+    /// wear, with the effect and the track that name it: for the editor's
+    /// texture pre-warm, and what a texture that will not load is reported
+    /// against. Includes the live preview's tracks so a just-picked (unsaved)
+    /// texture resolves next frame.
+    pub fn texture_refs(&self) -> Vec<TextureRef> {
+        let mut out: Vec<TextureRef> = Vec::new();
+        let mut scan = |key: &str, fx: &CompiledEffect| {
             for track in &fx.tracks {
                 let mut push = |p: &String| {
-                    if !out.contains(p) {
-                        out.push(p.clone());
-                    }
+                    out.push(TextureRef { effect: key.to_string(), track: track.name.clone(), path: p.clone() });
                 };
                 match &track.look.render {
                     RenderMode::Billboard { texture: Some(p) } => push(p),
@@ -1085,12 +1094,13 @@ impl VfxSystem {
                 }
             }
         };
-        for (_, asset) in &self.effects {
-            scan(&asset.compiled);
+        for (key, asset) in &self.effects {
+            scan(key, &asset.compiled);
         }
         if let Some(p) = &self.preview {
-            scan(&p.inst.effect);
+            scan(&p.key, &p.inst.effect);
         }
+        out.retain(|r| !r.path.is_empty());
         out
     }
 
@@ -1676,7 +1686,7 @@ mod tests {
     }
 
     // Localizes the "texture never applies" bug: proves the editor-side resolve
-    // path (preview → texture_paths → collect → batch.texture) is correct, so any
+    // path (preview → texture_refs → collect → batch.texture) is correct, so any
     // remaining failure is registration/GPU, not this logic.
     #[test]
     fn preview_texture_resolves_through_registry() {
@@ -1699,7 +1709,8 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert_eq!(sys.texture_paths(), vec![P.to_string()], "prewarm sees the preview texture");
+        let paths: Vec<String> = sys.texture_refs().into_iter().map(|r| r.path).collect();
+        assert_eq!(paths, vec![P.to_string()], "prewarm sees the preview texture");
 
         let mut registry = HashMap::new();
         registry.insert(P.to_string(), TexId(7));
