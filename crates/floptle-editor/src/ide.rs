@@ -3753,7 +3753,7 @@ pub(crate) const LUA_KEYWORDS: &[&str] = &[
 
 /// Identifiers highlighted as engine/builtin API (teal).
 pub(crate) const LUA_API_WORDS: &[&str] = &[
-    "node", "params", "time", "dt", "simTime", "simDt", "defaults", "log", "start", "update", "fixedUpdate", "lateUpdate", "input", "math",
+    "node", "params", "time", "dt", "simTime", "simDt", "drawDt", "defaults", "log", "start", "update", "fixedUpdate", "lateUpdate", "input", "math",
     "string", "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
     "raycast", "find", "findAll", "findScript", "findScriptInScene", "findScripts", "findTagged",
     "spawn", "destroy", "spawnEffect",
@@ -4718,6 +4718,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "dt", insert: "dt", doc: "Seconds since the last frame (number). With Script clock \"simulation\", the simulation seconds since the last frame instead (simDt)." },
     ApiEntry { label: "simTime", insert: "simTime", doc: "Seconds the simulation has actually advanced (number): whole fixed ticks in fixedUpdate; in update and lateUpdate also the time banked towards the next tick (the fraction the renderer blends by), so it moves smoothly every frame at any frame rate. The same in every script within a pass. Equals time until the catch-up budget or slow motion drops ticks; then time keeps the frame and simTime keeps the physics, so a timeout on something physical, a cooldown on a physical action or a controller's integral belongs on simTime." },
     ApiEntry { label: "simDt", insert: "simDt", doc: "Simulation seconds since this pass last ran (number): the step in fixedUpdate; in update and lateUpdate, how far the smooth simulation clock moved, so a steady frame reads a steady simDt and never 0 while the game runs. Equals dt while nothing is dropped." },
+    ApiEntry { label: "drawDt", insert: "drawDt", doc: "Seconds the drawn world moved between the last two frames drawn (number): what a body's on-screen pose advanced by, so the step to divide by when differencing positions a script reads frame to frame (a speed, an acceleration). Equals dt until the catch-up budget or slow motion drops ticks; then dt keeps the frame and drawDt what was drawn. Set once a frame at the late pass, so update reads the step the positions it sees were drawn over. Spring bones measure motion over it too." },
     ApiEntry { label: "log", insert: "log(", doc: "log(\"message\") — print to the engine console." },
     ApiEntry { label: "input", insert: "input", doc: "Player input (play mode). input.key/pressed/axis/mouse/button — make interactive games." },
     ApiEntry { label: "input.key", insert: "input.key(", doc: "input.key(\"w\") — true while the key is held. Names: a-z, 0-9, space, enter, shift, ctrl, alt, left/right/up/down, escape, tab." },

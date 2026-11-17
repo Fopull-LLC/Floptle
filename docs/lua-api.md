@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 236
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 237
 - [node — transform & body fields](#node--transform--body-fields) — 45
 - [node — methods & handles](#node--methods--handles) — 41
 - [vectors, directions & easing](#vectors-directions--easing) — 51
@@ -406,6 +406,10 @@ defaults = {
 ### `destroy`
 
 destroy(node) — remove a node AND its whole subtree (physics body included). Queued: applied after the pass, so the handle stays readable through the current call. Method form: node:destroy(). On a client, replicated nodes refuse (server authority — net.despawn). Any node can be destroyed, including an empty root such as one assembly.split makes; a handle to a node already gone logs a warning and removes nothing.
+
+### `drawDt`
+
+Seconds the drawn world moved between the last two frames drawn (number): what a body's on-screen pose advanced by, so the step to divide by when differencing positions a script reads frame to frame (a speed, an acceleration). Equals dt until the catch-up budget or slow motion drops ticks; then dt keeps the frame and drawDt what was drawn. Set once a frame at the late pass, so update reads the step the positions it sees were drawn over. Spring bones measure motion over it too.
 
 ### `dt`
 

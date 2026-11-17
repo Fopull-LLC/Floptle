@@ -1518,6 +1518,10 @@ impl Editor {
         let sim_dt = now - *last;
         *last = now;
         self.script_host.set_sim_clock(now, sim_dt);
+        if late {
+            self.draw_dt = if self.sim.is_some() { sim_dt as f32 } else { frame_dt };
+            self.script_host.set_draw_dt(self.draw_dt);
+        }
         if self.project.script_clock == floptle_scene::ScriptClockDoc::Simulation {
             (sim_dt as f32, now as f32)
         } else {
@@ -1822,7 +1826,17 @@ impl Editor {
         {
             // Named, so the chains' cost is not lost in `untimed`.
             let span = floptle_core::profile::Span::new();
-            anim::advance_springs(&mut self.anim, &self.world, &self.mesh_registry, &self.spring_defaults, sdt, &self.frame_carry);
+            let interpolated: std::collections::HashSet<u32> = match self.sim.as_ref() {
+                Some(sim) if self.anim.has_springs() => sim.interpolated_nodes().collect(),
+                _ => Default::default(),
+            };
+            let clock = anim::SpringClock {
+                frame: sdt,
+                drawn: if self.sim.is_some() { self.draw_dt } else { sdt },
+                scripts_on_sim: self.project.script_clock == floptle_scene::ScriptClockDoc::Simulation,
+                interpolated: &interpolated,
+            };
+            anim::advance_springs(&mut self.anim, &self.world, &self.mesh_registry, &self.spring_defaults, clock, &self.frame_carry);
             let ms = span.ms();
             let mut p = self.script_host.profile().borrow_mut();
             p.record(floptle_core::profile::Bucket::Animation, ms);

@@ -482,6 +482,13 @@ simTime = 0.0
 ---@type number
 simDt = 0.0
 
+---Seconds the drawn world moved between the last two frames drawn: what a
+---body's on-screen pose advanced by. Divide by it when differencing positions
+---read frame to frame; `dt` is wrong for that once ticks drop. Set at the late
+---pass, so update reads the step its positions were drawn over.
+---@type number
+drawDt = 0.0
+
 ---The tunables this script declares (shown in the Inspector).
 ---@type table<string, number>
 defaults = {}
