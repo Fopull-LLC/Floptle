@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 235
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 236
 - [node — transform & body fields](#node--transform--body-fields) — 45
 - [node — methods & handles](#node--methods--handles) — 41
 - [vectors, directions & easing](#vectors-directions--easing) — 51
@@ -37,7 +37,7 @@ each group, and meant to be searched.
 - [vessels — assembly.*](#vessels--assembly) — 17
 - [the camera & the screen](#the-camera--the-screen) — 9
 - [physics controls — pause & step](#physics-controls--pause--step) — 5
-- [frame cost — perf.*](#frame-cost--perf) — 26
+- [frame cost — perf.*](#frame-cost--perf) — 27
 - [accessibility — access.*](#accessibility--access) — 11
 - [persistence — save.*](#persistence--save) — 11
 - [timers — after, every, tween](#timers--after-every-tween) — 4
@@ -602,13 +602,17 @@ Turning a script down when nobody needs it: script.sleep stops the engine callin
 
 script.asleep(node, kind) → true while that script is asleep (script.sleep).
 
+### `script.generation`
+
+script.generation(kind) → a number that changes whenever findScripts(kind) could answer differently: a node gaining or losing that script, one carrying it made or destroyed, switched on or off, or moved under another parent. Ask findScripts once, keep the list, and ask again when this has moved: local gen, list; function update() if script.generation("vessel") ~= gen then gen = script.generation("vessel") list = findScripts("vessel") end end. Cheap: one lookup.
+
 ### `script.setRate`
 
 script.setRate(hz) — run this script's fixedUpdate hz times a second instead of every tick, handing it the time since its last call as dt; nil or 0 goes back to every tick. script.setRate(hz, node, kind) sets another's. Nodes are staggered, so a crowd at 10 Hz doesn't all think on the same tick. For NPCs far enough away that nobody sees them react late.
 
 ### `script.sleep`
 
-script.sleep() — stop calling this script's update, fixedUpdate and lateUpdate on this node until it is woken. The engine skips it entirely, so a sleeping NPC costs nothing a frame. Wakes on script.wake(node, kind), on a collision or trigger event on its node (the event is delivered, and wakes it), or on its own terms: script.sleep{ seconds = 2 } wakes after that much game time, script.sleep{ wakeWithin = 40 } once the active camera is within 40 m. Calling one of its functions from another script does NOT wake it — call script.wake there. Called from start(), the same frame's update is skipped too.
+script.sleep() — stop calling this script's update, fixedUpdate and lateUpdate on this node until it is woken. The engine skips it entirely, so a sleeping NPC costs nothing a frame. Wakes on script.wake(node, kind), on a collision or trigger event on its node (the event is delivered, and wakes it), or on its own terms: script.sleep{ seconds = 2 } wakes after that much game time, script.sleep{ wakeWithin = 40 } once the active camera is within 40 m. Calling one of its functions from another script does NOT wake it — call script.wake there. Called from start(), the same frame's update is skipped too. Seconds go in the table, never as a bare number: script.sleep(2) raises, and says so in the Console even inside a pcall.
 
 ### `script.wake`
 
@@ -3826,9 +3830,13 @@ perf.parts() → { name = ms, … } — the named pieces of work inside the buck
 
 perf.resources() → { meshes = { {name=, script=, bytes=}, … }, textures = { … } } — every mesh and texture a script made and has not let go of (mesh.build, assets.textureFromPixels / textureFromBytes / textureFromUrl, camera.captureTexture), largest first, each with the script file whose code made it, a createNode or spawn callback included, and its bytes on the GPU. They live until mesh.free / assets.release or Stop; a scene load does not free them. perf.counts() carries the totals. Readable whether or not perf collection is on.
 
+### `perf.sampleLimit`
+
+perf.sampleLimit(n?) → how many distinct lines the script sampler keeps, in a frame and between two perf.samples() calls, after setting it to n (512 by default, 16 to 65536). Past it, new lines are added up in one row named "(other)"; a profile read every few seconds over a large game outgrows the default, so raise it until (other) is small. Needs perf.enable(true) to sample at all.
+
 ### `perf.sampleScripts`
 
-perf.sampleScripts(on [, intervalMs]) → whether it is on. The script sampler: every intervalMs (0.25 by default) of a script's run time it notes the function and line running, charged with the wall time since the sample before, so an engine call that ran long is charged to the line that made it. Every entry into Lua starts the clock afresh, a callback (spawn, assembly.split, assembly.rebuild) included, so the engine's work before it is never charged to its first line. Each frame keeps its hottest ten lines (perf.frames, perf.hitches); perf.samples() has every line since it was last asked. A tight loop runs slower while it samples, so it is opt-in. Needs perf.enable(true); perf.enable(false) stops it.
+perf.sampleScripts(on [, intervalMs]) → whether it is on. The script sampler: every intervalMs (0.25 by default) of a script's run time it notes the function and line running, charged with the wall time since the sample before, so an engine call that ran long is charged to the line that made it. Every entry into Lua starts the clock afresh, a callback (spawn, assembly.split, assembly.rebuild) included, and so does every script's hook the engine hands a pass to, so the engine's work before it is never charged to its first line (the first line of a fixedUpdate included), and the engine's own checks between hooks are no script's line. Each frame keeps its hottest ten lines (perf.frames, perf.hitches); perf.samples() has every line since it was last asked. A tight loop runs slower while it samples, so it is opt-in. Needs perf.enable(true); perf.enable(false) stops it.
 
 ### `perf.samples`
 

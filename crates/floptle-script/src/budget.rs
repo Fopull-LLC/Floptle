@@ -148,8 +148,15 @@ impl Budget {
     /// entry: nothing it had spent before belongs to the next one. Cheap — a
     /// flag the next check reads. Nested calls never come through here; it
     /// is the driver's, at each script it hands the pass to.
+    ///
+    /// It counts as a new entry for the script sampler too, whose clock
+    /// starts again at the script's first line: the engine's own work since
+    /// the last sample (stamps, the scene mirror, timers' bookkeeping) is
+    /// nobody's line, and it was charged to the first line the next script
+    /// ran, the first line of a `fixedUpdate` most visibly.
     pub fn restart(&self) {
         self.fresh.set(true);
+        self.entries.set(self.entries.get().wrapping_add(1));
     }
 
     /// The interrupt body: cheap on every call; every [`CHECK_EVERY`] a clock
@@ -216,7 +223,8 @@ impl Budget {
         msg.contains(MARKER)
     }
 
-    /// Outermost entries into Lua so far.
+    /// Entries into Lua so far: outermost ones, and each script the driver
+    /// hands a pass to ([`Self::restart`]).
     pub fn entries(&self) -> u64 {
         self.entries.get()
     }

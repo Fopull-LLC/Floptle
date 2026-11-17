@@ -1728,3 +1728,41 @@ end
     assert!(world.get::<floptle_core::TerrainFinePaint>(e).is_none(), "nil paints whole voxels again");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **`script.sleep(2)` is said in the Console, even inside a `pcall`.** The
+/// number form was never one: the call raises, and a `pcall` around it hid
+/// that every frame while the script never slept. The load says where the
+/// call is written, the first call says it again, once, and the options
+/// form still sleeps.
+#[test]
+fn a_sleep_with_a_number_is_said_in_the_console_even_inside_a_pcall() {
+    let dir = std::env::temp_dir().join(format!("floptle_sleep_number_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "napper",
+        "calls = 0\nfunction update(node, dt)\n  calls = calls + 1\n  pcall(script.sleep, 2)\n  \
+         local ok = pcall(function() script.sleep(0.5) end)\nend\n",
+    );
+    write_script(&dir, "sleeper", "function update(node, dt) script.sleep{ seconds = 2 } end\n");
+    let (mut world, e) = world_with_script("napper");
+    let s = world.spawn();
+    world.insert(s, Transform::IDENTITY);
+    world.insert(s, Scripts(vec![floptle_core::ScriptInst::new("sleeper")]));
+    let mut host = ScriptHost::new();
+    let mut warnings = Vec::new();
+    for f in 0..3 {
+        host.run(&mut world, &dir, 1.0 / 60.0, f as f32 / 60.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        warnings.extend(host.drain_logs().into_iter().filter(|l| l.level == LogLevel::Warn).map(|l| l.msg));
+    }
+    let loaded: Vec<&String> = warnings.iter().filter(|w| w.starts_with("napper.lua:")).collect();
+    assert_eq!(loaded.len(), 1, "the load names the one literal call it can see: {warnings:#?}");
+    assert!(loaded[0].starts_with("napper.lua:5:") && loaded[0].contains("script.sleep{ seconds = 0.5 }"), "{}", loaded[0]);
+    let ran: Vec<&String> = warnings.iter().filter(|w| w.starts_with("napper: script.sleep(")).collect();
+    assert_eq!(ran.len(), 1, "the first call is said once, not every frame: {warnings:#?}");
+    let calls: i64 = host.instance_env(e.index(), "napper").unwrap().get("calls").unwrap();
+    assert_eq!(calls, 3, "the napper never slept, so it ran every frame");
+    assert!(host.sleepers.borrow().is_asleep(s.index(), "sleeper"), "the options form no longer sleeps");
+    let _ = std::fs::remove_dir_all(&dir);
+}

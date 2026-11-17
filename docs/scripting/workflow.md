@@ -356,11 +356,18 @@ end
 Each sample carries the wall time since the one before, so a long engine call
 (a sweep, a terrain query) is charged to the line that made it. The clock
 starts afresh at every entry into Lua, a callback from `spawn` or
-`assembly.split` included, so the engine's work before a callback is not
-charged to its first line. Every frame
+`assembly.split` included, and at every script the engine hands a pass to, so
+the engine's work before a callback or a hook (a `fixedUpdate`'s first line
+included) is not charged to its first line, and the engine's own checks
+between hooks are no script's line. Every frame
 record and every hitch keeps its ten hottest lines, so a 559 ms frame says the
 function it was in. The sampler makes a tight loop slower while it runs, which
 is why it is off until asked for.
+
+`perf.samples()` keeps 512 distinct lines between two reads, and adds up
+the rest in a row named `(other)`. A large game read every few seconds
+outgrows that: `perf.sampleLimit(4000)` keeps more (up to 65,536), and
+`perf.sampleLimit()` says what it is.
 
 `perf.scripts()` rows also carry `engineMs` and `calls`: last frame's raycasts
 and sweeps made from that script, so "27 ms, 25 of it in `spherecast`" is one
@@ -483,6 +490,11 @@ it can't check the distance itself. Instead it wakes on its own terms:
 wakes it after that much game time. A collision or trigger on its node also
 wakes it, and so does `script.wake(node, "enemy")` from another script, for
 instance the one that just shot it.
+
+The seconds go in the table: `script.sleep{ seconds = 2 }`. A bare number,
+`script.sleep(2)`, is not a form it takes; it raises, and because a `pcall`
+around it would hide that every frame while the script never slept, the
+Console says so too, when the script loads and on the first call.
 
 For NPCs in view but far away, `script.setRate(10)` runs `fixedUpdate` ten
 times a second instead of sixty, handing it the time since its last call.

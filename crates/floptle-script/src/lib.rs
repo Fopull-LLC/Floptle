@@ -760,6 +760,9 @@ pub struct ScriptHost {
     /// [`env::stamp_unchanged_lua`], compiled once: whether a kept `node`
     /// table can skip its drain and re-stamp — see [`env::stamp_unchanged`].
     stamp_unchanged: mlua::Function,
+    /// The script sampler, shared with the interrupt and `perf.sampleScripts`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    sampler: std::rc::Rc<sampler::Sampler>,
     /// Extra folders a script name may resolve in, after the project's own
     /// `scripts/`: the script folders of the project's installed **packages**,
     /// in load order. Set by the editor when packages load.
@@ -1982,6 +1985,14 @@ pub(crate) struct SceneMirror {
     /// sites depend on which — so this is built in the same pass and the same
     /// order as `order` and `by_name`.
     by_kind: HashMap<String, Vec<u32>>,
+    /// What `script.generation(kind)` answers from: a clock that moves on
+    /// every change to what `findScripts(kind)` could return, the kind's own
+    /// last change, and the last change to every kind's at once (a node
+    /// switched on or off, or moved under another parent, which the default
+    /// scope reads through; or the lists derived again from scratch).
+    find_clock: u64,
+    kind_rev: HashMap<String, u64>,
+    scope_rev: u64,
     /// tag → every entity carrying it, in scene order. Same reasoning as
     /// `by_kind`, for `findTagged`.
     by_tag: HashMap<String, Vec<u32>>,
@@ -2138,6 +2149,50 @@ impl SceneMirror {
 }
 
 impl SceneMirror {
+    /// `kind`'s list of carriers changed.
+    pub(crate) fn bump_kind(&mut self, kind: &str) {
+        self.find_clock += 1;
+        match self.kind_rev.get_mut(kind) {
+            Some(r) => *r = self.find_clock,
+            None => {
+                self.kind_rev.insert(kind.to_string(), self.find_clock);
+            }
+        }
+    }
+
+    /// Something every kind's scoped list reads changed.
+    pub(crate) fn bump_scope(&mut self) {
+        self.find_clock += 1;
+        self.scope_rev = self.find_clock;
+    }
+
+    /// `script.generation(kind)`: moves whenever `findScripts(kind)`, in any
+    /// scope, could answer differently.
+    pub(crate) fn kind_generation(&self, kind: &str) -> u64 {
+        self.kind_rev.get(kind).copied().unwrap_or(0).max(self.scope_rev)
+    }
+
+    /// Set whether `id` carries `Disabled` itself, moving the scope's clock
+    /// only when that changed.
+    pub(crate) fn set_disabled(&mut self, id: u32, off: bool) {
+        let changed = if off { self.disabled.insert(id) } else { self.disabled.remove(&id) };
+        if changed {
+            self.bump_scope();
+        }
+    }
+
+    /// Set `id`'s parent, moving the scope's clock only when it changed.
+    pub(crate) fn set_parent(&mut self, id: u32, p: Option<u32>) -> Option<u32> {
+        let old = match p {
+            Some(p) => self.parent.insert(id, p),
+            None => self.parent.remove(&id),
+        };
+        if old != p {
+            self.bump_scope();
+        }
+        old
+    }
+
     /// `p`'s child list changed.
     pub(crate) fn bump_children(&mut self, p: u32) {
         self.child_clock += 1;

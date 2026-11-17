@@ -3446,8 +3446,29 @@ impl ScriptHost {
             sleepers.clone(),
             net.current.clone(),
             script_clock.clone(),
+            logs.clone(),
         ) {
             floptle_say::say_err!("[lua] failed to install the script API: {e}");
+        }
+        // `script.generation(kind)`: a number that moves whenever
+        // `findScripts(kind)` could answer differently, so a game that asks
+        // for the same list every frame can keep it until it does.
+        {
+            let scene = shared.scene.clone();
+            let generation = lua.create_function(move |_, kind: String| {
+                let s = scene.borrow();
+                let canonical = match crate::match_kind(s.by_kind.keys().map(String::as_str), &kind) {
+                    crate::KindMatch::One(k) => k,
+                    _ => kind,
+                };
+                Ok(s.kind_generation(&canonical))
+            });
+            match (lua.globals().get::<mlua::Table>("script"), generation) {
+                (Ok(t), Ok(f)) => {
+                    let _ = t.set("generation", f);
+                }
+                _ => floptle_say::say_err!("[lua] failed to install script.generation"),
+            }
         }
         // The `space.*` orbital readouts (solar demo S2).
         let space_info: Rc<RefCell<crate::space_api::SpaceInfo>> =
@@ -3573,6 +3594,7 @@ impl ScriptHost {
         Self {
             lua,
             stamp_unchanged,
+            sampler: sampler.clone(),
             extra_script_dirs: Vec::new(),
             sources: HashMap::new(),
             alloc_by_kind: RefCell::new(HashMap::new()),
@@ -7589,6 +7611,11 @@ impl ScriptHost {
                         Hookless::Refresh(key) => {
                             let span = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
                             self.charge_memory_to(Some(&inst.kind));
+                            // Engine work, not the script's: the stamp check
+                            // runs a little Lua, which the sampler must not
+                            // take for a script line nor charge the engine's
+                            // time since the last sample to.
+                            self.budget.restart();
                             self.refresh_hookless(key, &inst.kind, &mut tr);
                             if let Some(span) = span {
                                 let ms = span.ms();
@@ -8337,6 +8364,7 @@ impl ScriptHost {
         s.fine_paint.clear();
         s.by_kind.clear();
         s.by_tag.clear();
+        s.bump_scope();
         for (e, tr) in world.query::<Transform>() {
             Self::mirror_entity(&mut s, world, e, tr, Some(&mut live_tilemaps));
         }
@@ -8467,7 +8495,8 @@ impl ScriptHost {
         s.transforms.remove(&id);
         s.names.remove(&id);
         s.tags.remove(&id);
-        s.parent.remove(&id);
+        s.set_parent(id, None);
+        s.set_disabled(id, false);
         s.scripts.remove(&id);
         s.tilemaps.remove(&id);
         s.dirty.remove(&id);
@@ -8487,7 +8516,7 @@ impl ScriptHost {
             s.names.insert(id, n.0.clone());
         }
         if let Some(p) = world.get::<floptle_core::Parent>(e) {
-            s.parent.insert(id, p.0.index());
+            s.set_parent(id, Some(p.0.index()));
         }
         if let Some(sc) = world.get::<Scripts>(e) {
             s.scripts.insert(id, sc.0.iter().map(|i| i.kind.clone()).collect());
@@ -8503,6 +8532,7 @@ impl ScriptHost {
         s.by_name.clear();
         s.by_kind.clear();
         s.by_tag.clear();
+        s.bump_scope();
         let old_children = std::mem::take(&mut s.children);
         for (e, _) in world.query::<Transform>() {
             let id = e.index();
@@ -8644,7 +8674,7 @@ impl ScriptHost {
 
         let parent = world.get::<floptle_core::Parent>(e).map(|p| p.0.index());
         if s.parent.get(&id).copied() != parent {
-            if let Some(old) = s.parent.remove(&id)
+            if let Some(old) = s.set_parent(id, None)
                 && let Some(v) = s.children.get_mut(&old)
             {
                 v.retain(|&x| x != id);
@@ -8654,7 +8684,7 @@ impl ScriptHost {
                 s.bump_children(old);
             }
             if let Some(p) = parent {
-                s.parent.insert(id, p);
+                s.set_parent(id, Some(p));
                 insert(s.children.entry(p).or_default(), &s.ents);
                 s.bump_children(p);
             }
@@ -8664,10 +8694,12 @@ impl ScriptHost {
         if s.scripts.get(&id) != kinds.as_ref() {
             for k in s.scripts.remove(&id).unwrap_or_default() {
                 remove(&mut s.by_kind, &k);
+                s.bump_kind(&k);
             }
             if let Some(kinds) = kinds {
                 for k in &kinds {
                     insert(s.by_kind.entry(k.clone()).or_default(), &s.ents);
+                    s.bump_kind(k);
                 }
                 s.scripts.insert(id, kinds);
             }
@@ -8692,7 +8724,8 @@ impl ScriptHost {
         s.shader_state.remove(&id);
         s.visible.remove(&id);
         s.cast_shadow.remove(&id);
-        s.disabled.remove(&id);
+        // `disabled` is not dropped here: `mirror_values` sets it either way,
+        // and moves `script.generation` only if it changed.
         s.persistent.remove(&id);
         s.layers.remove(&id);
     }
@@ -8735,7 +8768,7 @@ impl ScriptHost {
             }
             if let Some(p) = world.get::<floptle_core::Parent>(e) {
                 let pid = p.0.index();
-                s.parent.insert(id, pid);
+                s.set_parent(id, Some(pid));
                 s.children.entry(pid).or_default().push(id);
                 // A whole rebuild stamps by comparing lists once at the end.
                 if !rebuilding {
@@ -8745,6 +8778,7 @@ impl ScriptHost {
             if let Some(sc) = world.get::<Scripts>(e) {
                 for inst in &sc.0 {
                     s.by_kind.entry(inst.kind.clone()).or_default().push(id);
+                    s.bump_kind(&inst.kind);
                 }
                 s.scripts.insert(id, sc.0.iter().map(|i| i.kind.clone()).collect());
             }
@@ -8892,9 +8926,7 @@ impl ScriptHost {
             if let Some(c) = world.get::<floptle_core::CastShadow>(e) {
                 s.cast_shadow.insert(id, c.0);
             }
-            if world.get::<floptle_core::Disabled>(e).is_some() {
-                s.disabled.insert(id);
-            }
+            s.set_disabled(id, world.get::<floptle_core::Disabled>(e).is_some());
             if world.get::<floptle_core::Persistent>(e).is_some() {
                 s.persistent.insert(id);
             }
@@ -9170,6 +9202,7 @@ impl ScriptHost {
                     }
                     self.stopped.remove(name);
                     self.warn_upvalue_pressure(name, generation, &src);
+                    self.warn_sleep_numbers(name, generation, &src);
                     if let Some(old) = self.instances.remove(&id) {
                         let _ = self.lua.remove_registry_value(old.env);
                     }
@@ -10269,6 +10302,23 @@ impl ScriptHost {
     #[cfg(test)]
     pub(crate) fn source_reads(&self, name: &str) -> u32 {
         self.sources.get(name).map_or(0, |s| s.reads)
+    }
+
+    /// Say, when a script loads, where it calls `script.sleep` with a number
+    /// — once per version of the file. The call raises every time it runs,
+    /// and a `pcall` around it hides that.
+    fn warn_sleep_numbers(&mut self, name: &str, generation: u64, src: &str) {
+        let calls = crate::sleep_api::sleep_number_calls(src);
+        if calls.is_empty() || !self.upvalue_warned.insert((format!("{name}#sleep"), generation)) {
+            return;
+        }
+        for (line, n) in calls {
+            self.logs.borrow_mut().push(ScriptLog {
+                level: LogLevel::Warn,
+                msg: format!("{name}.lua:{line}: {}", crate::sleep_api::sleep_number_message(&n)),
+                source: Some((name.to_string(), line as u32)),
+            });
+        }
     }
 
     /// Warn a script that is one edit from unloadable.
@@ -11629,6 +11679,81 @@ mod host_tests {
         let cb: f32 = samples.iter().filter(|s| s.script == "split_cb").map(|s| s.ms).sum();
         assert!(samples.iter().any(|s| s.script == "pass"), "the pass was never sampled: {samples:?}");
         assert!(cb < 10.0, "the callback was charged {cb:.2} ms for a short loop after 20 ms of engine work: {samples:?}");
+    }
+
+    /// **Each script the pass is handed to starts the sampler's clock
+    /// afresh.** The engine's work between two hooks of one pass (stamps,
+    /// the scene mirror, a tick's timers) was charged to the first line the
+    /// next script ran: the first line of a `fixedUpdate` most visibly. Here
+    /// 20 ms of engine work sits between a sampled hook and a short one in
+    /// the same armed pass.
+    #[test]
+    fn each_script_handed_the_pass_starts_the_sampler_clock_afresh() {
+        let host = ScriptHost::new();
+        host.profile().borrow_mut().enable(true);
+        let first: mlua::Function = host
+            .lua
+            .load("return function()\n  perf.sampleScripts(true, 0.05)\n  local x = 0\n  for i = 1, 200000 do x = x + i end\nend\n")
+            .set_name("=first")
+            .eval()
+            .unwrap();
+        let next: mlua::Function = host
+            .lua
+            .load("return function()\n  local x = 0\n  for i = 1, 2000 do x = x + i end\nend\n")
+            .set_name("=next")
+            .eval()
+            .unwrap();
+        {
+            let _pass = host.budget.arm();
+            first.call::<()>(()).unwrap();
+            let t = floptle_core::time::Instant::now();
+            while t.elapsed().as_secs_f32() < 0.02 {}
+            host.budget.restart();
+            next.call::<()>(()).unwrap();
+        }
+        host.profile().borrow_mut().end_frame();
+        let samples = host.profile().borrow_mut().take_samples();
+        let charged: f32 = samples.iter().filter(|s| s.script == "next").map(|s| s.ms).sum();
+        assert!(samples.iter().any(|s| s.script == "first"), "the first hook was never sampled: {samples:?}");
+        assert!(charged < 10.0, "the next hook was charged {charged:.2} ms for a short loop after 20 ms of engine work");
+    }
+
+    /// **The engine's check of a kept `node` table is no script's line.** A
+    /// crowd whose hooks were handed their `node` tables is checked every
+    /// pass without a hook; that check is a little Lua of the engine's own,
+    /// and the sampler named it the hottest line of a game.
+    #[test]
+    fn the_engines_node_table_check_is_never_a_sampled_line() {
+        let dir = std::env::temp_dir().join(format!("floptle-sampler-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::tests::write_script(&dir, "starter", "function start(node) node.x = node.x + 0 end\n");
+        crate::tests::write_script(
+            &dir,
+            "busy",
+            "function update(node, dt) local x = 0 for i = 1, 3000 do x = x + i end end\n",
+        );
+        let mut world = World::default();
+        for i in 0..200 {
+            let e = world.spawn();
+            world.insert(e, floptle_core::transform::Transform::IDENTITY);
+            world.insert(e, Scripts(vec![floptle_core::ScriptInst::new(if i % 10 == 0 { "busy" } else { "starter" })]));
+        }
+        let mut host = ScriptHost::new();
+        host.profile().borrow_mut().enable(true);
+        host.profile().borrow_mut().set_sampling(Some(0.01));
+        host.sampler.set(Some(0.01));
+        for f in 0..20 {
+            host.run(&mut world, &dir, 1.0 / 60.0, f as f32 / 60.0);
+            host.run_fixed(&mut world, 1.0 / 60.0, f as f32 / 60.0);
+            host.run_late(&mut world, 1.0 / 60.0, f as f32 / 60.0);
+            host.profile().borrow_mut().end_frame();
+        }
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let samples = host.profile().borrow_mut().take_samples();
+        assert!(samples.iter().any(|s| s.script == "busy"), "nothing was sampled: {samples:?}");
+        let stamp: Vec<_> = samples.iter().filter(|s| s.script.contains("stamp_unchanged")).collect();
+        assert!(stamp.is_empty(), "the engine's check was charged as a line: {stamp:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **`terrain.saveDir` is a directory the engine writes into**, so it is

@@ -429,3 +429,63 @@ fn seed_step_cost_over_an_idle_crowd() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// **What keeping a handed `node` table current costs at rest**, printed:
+/// 230 instances whose only hook is `start` (so every later pass is one
+/// without a hook, checking the table it was handed), beside 50 running an
+/// `update` interleaved with them, over the frame pass, a tick and the late
+/// pass. Run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn kept_node_tables_at_rest_cost() {
+    let dir = std::env::temp_dir().join(format!("floptle-perf-kept-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(&dir, "busy", "function update(node, dt) node.y = node.y + dt * params.speed end\n");
+    write_script(&dir, "starter", "defaults = { speed = 1 }\nfunction start(node) node.x = node.x + 0 end\n");
+    let mut world = World::default();
+    for i in 0..280usize {
+        let e = world.spawn();
+        world.insert(e, Transform::from_translation(glam::DVec3::new(i as f64, 0.0, 0.0)));
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: if i % 28 < 23 { "starter".into() } else { "busy".into() },
+                enabled: true,
+                params: vec![("speed".into(), 2.0)],
+                refs: Vec::new(),
+                strs: Vec::new(),
+                pinned_bools: None,
+            }]),
+        );
+    }
+    let mut host = ScriptHost::new();
+    host.profile().borrow_mut().enable(true);
+    for f in 0..10 {
+        profiled_frame(&mut host, &mut world, &dir, f);
+    }
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let n = 600;
+    let mut hookless = 0.0f32;
+    for f in 10..10 + n {
+        hookless += profiled_frame(&mut host, &mut world, &dir, f).part("scriptsHookless");
+    }
+    floptle_say::say_err!("scriptsHookless, 230 kept tables at rest beside 50 busy: {:.4} ms a frame", hookless / n as f32);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// **`perf.sampleLimit` raises the sampler's line limit and says what it
+/// is.** Set, it reads back; asked with nothing, it answers; a limit of zero
+/// lines is refused rather than taken.
+#[test]
+fn perf_sample_limit_sets_and_reads_the_line_limit() {
+    let host = ScriptHost::new();
+    let (set, read, def): (i64, i64, i64) = host
+        .lua
+        .load("perf.enable(true) local d = perf.sampleLimit() return perf.sampleLimit(2000), perf.sampleLimit(), d")
+        .eval()
+        .unwrap();
+    assert_eq!((set, read), (2000, 2000));
+    assert_eq!(def as usize, floptle_core::profile::MAX_SAMPLE_LINES);
+    assert!(host.lua.load("perf.sampleLimit(0)").exec().is_err(), "a limit of no lines was taken");
+}

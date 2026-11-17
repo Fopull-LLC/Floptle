@@ -145,6 +145,24 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
         })?,
     )?;
 
+    // perf.sampleLimit(n?) -> how many distinct lines the sampler keeps
+    // before folding the rest into "(other)", after setting it to n.
+    let p = profile.clone();
+    t.set(
+        "sampleLimit",
+        lua.create_function(move |_, n: Option<f64>| {
+            if let Some(n) = n {
+                if !n.is_finite() || n < 1.0 {
+                    return Err(mlua::Error::runtime(format!(
+                        "perf.sampleLimit({n}): the number of lines to keep, at least 1"
+                    )));
+                }
+                p.borrow_mut().set_sample_lines(n as usize);
+            }
+            Ok(p.borrow().sample_lines())
+        })?,
+    )?;
+
     // perf.samples() -> every sampled line since the last call, hottest first:
     // { {script=, fn=, line=, n=, ms=}, … }.
     let p = profile.clone();
@@ -811,14 +829,16 @@ fn require_on(
 
 /// The calls that answer while collection is off, because they are meaningful
 /// then: the switch itself, whether it is on, the bucket names, and the counts
-/// (which are free to keep and obviously not a measurement when zero).
+/// (which are free to keep and obviously not a measurement when zero), and
+/// the settings a game makes before it turns collection on (`hitchThreshold`,
+/// `sampleLimit`), which read back what was set, not a measurement.
 ///
 /// Everything else refuses, and the test below enumerates the real `perf` table
 /// against this list — so a getter added later cannot quietly default to
 /// answering zero without somebody deciding it should.
 #[cfg(test)]
 const READABLE_WHILE_OFF: &[&str] =
-    &["enable", "enabled", "buckets", "counts", "mirrorCause", "overloaded", "hitchThreshold", "fogPaths"];
+    &["enable", "enabled", "buckets", "counts", "mirrorCause", "overloaded", "hitchThreshold", "fogPaths", "sampleLimit"];
 
 #[cfg(test)]
 mod tests {
