@@ -55,7 +55,8 @@ function onSlashHit(node) log("hit frame!") end
 | `anim:duration(clip)` / `anim:events(clip)` | the clip **as authored** — length in seconds, and its event list |
 | `anim:setBoneRot` / `addBoneRot` / `setBonePos` / `addBonePos` | change one bone after the clips, for this frame |
 | `anim:reach(tip, target, {pole=})` / `anim:lookAt(bones, target)` | two-bone IK and look-at, for this frame |
-| `anim:boneWorld(bone)` | where a bone is: position, yaw, pitch, roll |
+| `anim:boneWorld(bone)` | where a bone is: position, yaw, pitch, roll (not the spring bones' drawn swing) |
+| `anim:boneDrawn(bone)` | where the last frame drew a bone, spring swing included, same four values |
 
 Bone writes and IK, with a foot-planting recipe, are in
 [`docs/animation.md`](../animation.md#bones-from-a-script).

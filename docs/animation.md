@@ -338,7 +338,16 @@ end
   frame's drawn pose, which already held last frame's writes. Read before any
   write, it gives the animator's pose for this frame, without last frame's
   writes, unless `anim:holdPose(true)` is keeping them. It works under
-  `floptle run` and on a dedicated server too.
+  `floptle run` and on a dedicated server too. On a rig with spring bones it
+  is not where the bone is drawn: once a script writes any bone in a frame
+  it is the pose without the springs' swing, and otherwise it carries the
+  swing from a step earlier.
+- `anim:boneDrawn(bone)` gives the same four values for where the last frame
+  drew the bone, spring swing included: to measure where a swinging hair tip
+  or tail actually is. Spring bones step after `lateUpdate`, so this is the
+  last drawn frame's pose, placed by where the node is now. On a rig with no
+  spring bones, or before anything has been drawn, it answers as `boneWorld`
+  does.
 - Reads: `anim:state([layer])`, `anim:time([layer])`, `anim:finished([layer])`,
   `anim:isPlaying([state])`, `anim:clips()`, `anim:layers()`.
 - Authored data, from the asset rather than playback (so it works in `start()`):

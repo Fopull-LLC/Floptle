@@ -333,6 +333,9 @@ pub struct AnimSystem {
     /// the script host's bone reads so a frame's refill copies poses and never
     /// names or rigs.
     bone_names: HashMap<String, (Rc<Vec<String>>, Rc<floptle_anim::Skeleton>)>,
+    /// The rigs whose spring bones stepped this frame: their `poses` are the
+    /// sprung pose the frame draws, handed to `anim:boneDrawn`.
+    sprung: Vec<Entity>,
     /// `anim:events` / `anim:duration` data per entity, keyed by the bound revision.
     /// The script mirror is rebuilt every frame; this half only changes when an
     /// instance rebinds, so cloning event strings 60×/s would be pure waste.
@@ -463,6 +466,20 @@ impl AnimSystem {
             }
         }
         out.end();
+    }
+
+    /// Hand the poses this frame draws to the scripts (`anim:boneDrawn`):
+    /// after the spring bones step, the sprung pose of every rig whose
+    /// springs moved. A rig without springs draws the pose
+    /// [`AnimSystem::publish_bones`] already handed over.
+    pub fn publish_drawn(&self, out: &mut floptle_script::BonePoses) {
+        out.drawn_begin();
+        for e in &self.sprung {
+            if let Some(pose) = self.poses.get(e) {
+                out.set_drawn(e.index(), pose);
+            }
+        }
+        out.drawn_end();
     }
 
     /// The authored duration + events of every state this instance can play, for
@@ -1871,7 +1888,8 @@ pub fn advance_springs(
     carry: &HashMap<u32, [f64; 3]>,
 ) {
     let mut warn: Vec<(String, String)> = Vec::new();
-    let AnimSystem { instances, poses, overrides, .. } = system;
+    let AnimSystem { instances, poses, overrides, sprung, .. } = system;
+    sprung.clear();
     for (&e, inst) in instances.iter_mut() {
         let posed = std::mem::take(&mut inst.posed);
         if !matches!(inst.binding, AnimBinding::Rig) {
@@ -1970,6 +1988,7 @@ pub fn advance_springs(
         inst.world.clear();
         inst.world.extend(rt.skel_world.iter().map(|w| rig.offset * *w));
         poses.insert(e, inst.world.clone());
+        sprung.push(e);
     }
     for (key, msg) in warn {
         if system.warned.insert(key) {

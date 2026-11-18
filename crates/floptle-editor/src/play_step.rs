@@ -1837,6 +1837,10 @@ impl Editor {
                 interpolated: &interpolated,
             };
             anim::advance_springs(&mut self.anim, &self.world, &self.mesh_registry, &self.spring_defaults, clock, &self.frame_carry);
+            // Where the frame draws each sprung bone, for `anim:boneDrawn` in
+            // the next frame's scripts: `boneWorld` reads the animator's pose,
+            // which does not hold this step's swing.
+            self.anim.publish_drawn(&mut self.script_host.bone_poses());
             let ms = span.ms();
             let mut p = self.script_host.profile().borrow_mut();
             p.record(floptle_core::profile::Bucket::Animation, ms);

@@ -1410,6 +1410,20 @@ fn gizmo_color(r: Option<f64>, g: Option<f64>, b: Option<f64>) -> [f32; 3] {
 pub struct BonePoses {
     nodes: HashMap<u32, NodeBones>,
     frame: u64,
+    /// The poses the last frame drew, spring bones swung in, for
+    /// `anim:boneDrawn`: only the rigs whose springs stepped. A rig without
+    /// springs draws the pose `nodes` holds, so it is not copied twice.
+    drawn: HashMap<u32, DrawnBones>,
+    drawn_frame: u64,
+}
+
+/// One rig's pose as drawn, model space, index-parallel to its names.
+struct DrawnBones {
+    /// The names the pose was published under: a rig swapped under the same
+    /// node since then makes the entry stale.
+    names: Rc<Vec<String>>,
+    model: Vec<glam::Mat4>,
+    frame: u64,
 }
 
 struct NodeBones {
@@ -1509,6 +1523,61 @@ impl BonePoses {
     pub fn end(&mut self) {
         let frame = self.frame;
         self.nodes.retain(|_, nb| nb.frame == frame);
+        let nodes = &self.nodes;
+        self.drawn.retain(|eid, _| nodes.contains_key(eid));
+    }
+
+    /// Start handing over the poses this frame draws (`anim:boneDrawn`).
+    pub fn drawn_begin(&mut self) {
+        self.drawn_frame += 1;
+    }
+
+    /// Node `eid`'s pose as this frame draws it, springs swung in. Ignored
+    /// for a node this frame published no pose for.
+    pub fn set_drawn(&mut self, eid: u32, model: &[glam::Mat4]) {
+        let Some(nb) = self.nodes.get(&eid) else { return };
+        if nb.names.len() != model.len() {
+            return;
+        }
+        let frame = self.drawn_frame;
+        let d = self.drawn.entry(eid).or_insert_with(|| DrawnBones {
+            names: nb.names.clone(),
+            model: Vec::with_capacity(model.len()),
+            frame,
+        });
+        if !Rc::ptr_eq(&d.names, &nb.names) {
+            d.names = nb.names.clone();
+        }
+        d.model.clear();
+        d.model.extend_from_slice(model);
+        d.frame = frame;
+    }
+
+    /// Drop the drawn poses this frame did not hand over: springs that did
+    /// not step, nodes gone.
+    pub fn drawn_end(&mut self) {
+        let frame = self.drawn_frame;
+        self.drawn.retain(|_, d| d.frame == frame);
+    }
+
+    /// Forget every drawn pose: the world they were drawn in is gone (a
+    /// scene swap), and a node of the new one may reuse an old id.
+    pub fn forget_drawn(&mut self) {
+        self.drawn.clear();
+    }
+
+    /// The model-space transform of bone `name` on node `eid` as the last
+    /// frame drew it, springs swung in. `None` when nothing drew it with
+    /// springs: no springs on the rig, nothing drawn yet, a stale entry —
+    /// the caller answers with the animated pose, which is what was drawn.
+    pub(crate) fn bone_drawn(&self, eid: u32, name: &str) -> Option<glam::Mat4> {
+        let d = self.drawn.get(&eid)?;
+        let nb = self.nodes.get(&eid)?;
+        if !Rc::ptr_eq(&d.names, &nb.names) {
+            return None;
+        }
+        let i = d.names.iter().position(|n| n == name)?;
+        d.model.get(i).copied()
     }
 
     /// The model-space transform of bone `name` on node `eid`: `Ok(None)` when
