@@ -1293,6 +1293,8 @@ pub struct Raster {
     last_pass_kept_primed_depth: bool,
     /// How many opaque buckets the last colour pass drew depth-Equal.
     last_pass_equal_buckets: usize,
+    /// How many of those were meshed-terrain buckets ([`is_terrain`]).
+    last_pass_equal_terrain_buckets: usize,
     /// Draw prepass-covered opaque buckets with [`Self::primed_pipeline`]
     /// when the depth was primed (on). Off draws them as before, testing
     /// LessEqual and cutting their own coverage: for tests to compare.
@@ -2537,6 +2539,7 @@ impl Raster {
             depth_primed: false,
             last_pass_kept_primed_depth: false,
             last_pass_equal_buckets: 0,
+            last_pass_equal_terrain_buckets: 0,
             keep_primed_depth: true,
             use_primed_pipeline: true,
             globals_bind,
@@ -5732,6 +5735,7 @@ impl Raster {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster") });
         let mut equal_buckets;
+        let mut equal_terrain;
         let rec = floptle_core::profile::Span::new();
         let counts;
         {
@@ -5765,37 +5769,57 @@ impl Raster {
             // writes depth only where its matter wins the test against the
             // primed depth: in front of a mesh, the mesh is hidden and EQUAL
             // rightly fails; behind it, nothing is written and the prepass
-            // depth stands. Raster terrain keeps the ordinary test all the
-            // same, as a precaution rather than a demonstrated need: where the
-            // field also marches the terrain, its surface and the meshed
-            // ground coincide, and a march landing a hair nearer would lose
-            // the ground under EQUAL. A slab of terrain with a blob in front
-            // drew the same either way. Every other bucket, leaves and cards
-            // above all, keeps EQUAL.
+            // depth stands. Raster terrain is no exception. Where the march
+            // stored a depth nearer than the ground, the ordinary LessEqual
+            // test failed the ground there too, so the two tests reject the
+            // same fragments. And the field does not march meshed terrain at
+            // all: its volumes are shadow and AO only (`w = 3`), so no marched
+            // surface of its own lands a hair nearer than the ground.
+            //
+            // A chunk still dissolving in keeps the ordinary test, for the
+            // 0.35 s it takes. Its holes are pixels the prepass left unprimed,
+            // and the march may draw there, through the hole: matter touching
+            // the ground stores, at the contact, a depth the depth buffer
+            // cannot tell from the ground's own, and EQUAL, with the
+            // dissolve compiled out, shades the ground back into the hole.
+            // A slab of dissolving terrain with a blob sunk into it showed
+            // it at one pixel. A whole generated planet, every chunk settled,
+            // draws EQUAL, and its lighting pass falls from 9.3 ms to 3 ms
+            // (`terrain_shades_once_under_raymarched_matter` holds both).
             let equal = primed && self.use_primed_pipeline;
-            let owns = clear.is_some();
-            if equal && !owns {
-                let (ground, rest): (Vec<_>, Vec<_>) =
-                    opaque_buckets.iter().partition(|&&(_, _, start, _)| raws.get(start as usize).is_some_and(is_terrain));
-                b.pipeline(&mut rp, &self.pipeline);
-                self.draw_buckets(&mut rp, &mut b, &ground);
-                b.pipeline(&mut rp, &self.primed_pipeline);
-                self.draw_buckets(&mut rp, &mut b, &rest);
-                equal_buckets = rest.len();
+            let terrain = |b: &(usize, Option<u32>, u32, u32)| raws.get(b.2 as usize).is_some_and(is_terrain);
+            let is_fading = |b: &(usize, Option<u32>, u32, u32)| {
+                terrain(b) && raws.get(b.2 as usize..(b.2 + b.3) as usize).is_some_and(|r| r.iter().any(|r| r.color[3] < 0.999))
+            };
+            let (fading, settled): (Vec<_>, Vec<_>) = if equal {
+                opaque_buckets.iter().copied().partition(is_fading)
             } else {
-                b.pipeline(&mut rp, if equal { &self.primed_pipeline } else { &self.pipeline });
-                self.draw_buckets(&mut rp, &mut b, &opaque_buckets);
-                equal_buckets = if equal { opaque_buckets.len() } else { 0 };
+                (Vec::new(), opaque_buckets)
+            };
+            b.pipeline(&mut rp, if equal { &self.primed_pipeline } else { &self.pipeline });
+            self.draw_buckets(&mut rp, &mut b, &settled);
+            if !fading.is_empty() {
+                b.pipeline(&mut rp, &self.pipeline);
+                self.draw_buckets(&mut rp, &mut b, &fading);
             }
+            equal_buckets = if equal { settled.len() } else { 0 };
+            equal_terrain = if equal { settled.iter().filter(|b| terrain(b)).count() } else { 0 };
             if !skin_opaque.is_empty() {
                 b.pipeline(&mut rp, if equal { &self.skin_primed_pipeline } else { &self.skin_pipeline });
                 self.draw_buckets(&mut rp, &mut b, skin_opaque);
             }
             if let Some(ap) = array_passes.filter(|_| !array_opaque.is_empty()) {
+                let (fading, settled): (Vec<_>, Vec<_>) =
+                    if equal { array_opaque.iter().copied().partition(is_fading) } else { (Vec::new(), array_opaque) };
                 b.pipeline(&mut rp, if equal { &ap.primed } else { &ap.pipeline });
-                self.draw_buckets(&mut rp, &mut b, &array_opaque);
+                self.draw_buckets(&mut rp, &mut b, &settled);
+                if !fading.is_empty() {
+                    b.pipeline(&mut rp, &ap.pipeline);
+                    self.draw_buckets(&mut rp, &mut b, &fading);
+                }
                 if equal {
-                    equal_buckets += array_opaque.len();
+                    equal_buckets += settled.len();
+                    equal_terrain += settled.iter().filter(|b| terrain(b)).count();
                 }
             }
             self.draw_flsl_buckets(&mut rp, &mut b, &flsl_opaque);
@@ -5823,6 +5847,7 @@ impl Raster {
         self.note_pass(counts, rec);
         self.submit(gpu, encoder);
         self.last_pass_equal_buckets = equal_buckets;
+        self.last_pass_equal_terrain_buckets = equal_terrain;
     }
 
     /// Draw the `.flsl` surfaces that read `sceneColor`, once the scene behind
@@ -6840,6 +6865,11 @@ impl Raster {
     /// depth-Equal pipeline, each visible pixel shaded once.
     pub fn last_pass_equal_buckets(&self) -> usize {
         self.last_pass_equal_buckets
+    }
+
+    /// How many of [`Self::last_pass_equal_buckets`] were meshed terrain.
+    pub fn last_pass_equal_terrain_buckets(&self) -> usize {
+        self.last_pass_equal_terrain_buckets
     }
 
     /// Keep the depth the prepass primed in the colour pass (the default), or

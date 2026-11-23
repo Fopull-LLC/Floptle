@@ -893,6 +893,96 @@ fn cutout_cards_shade_once_under_raymarched_matter() {
     assert_eq!(differ, 0, "under raymarched matter the depth-Equal pipeline drew a different picture from the old one");
 }
 
+/// **Meshed terrain shades each visible pixel once, under raymarched matter
+/// too.** A slab of terrain 24 m across, a blob hanging in front of it and a
+/// second sunk into it, so its outline crosses the ground where the march
+/// and the meshed surface meet at the same depth, and every other chunk of
+/// the slab caught half way through its dissolve-in. The blobs are marched
+/// between the depth prepass and the colour pass, which then loads the
+/// colour rather than clearing it. The settled terrain draws through the
+/// depth-Equal pipeline like every other solid surface, and the picture is
+/// the same as the ordinary test's: where the march stored a nearer depth,
+/// LessEqual failed the ground as EQUAL does, and the field marches no
+/// terrain of its own (its volumes are shadow and AO only), so nothing
+/// marched lands a hair nearer than the ground it coincides with.
+///
+/// The dissolving chunks keep the ordinary test. Drawn EQUAL, with the
+/// dissolve compiled out, one pixel of a hole at the sunk blob's contact
+/// took the ground's colour instead of the blob's (27 channel values): the
+/// march, drawing through the hole, stored a depth the buffer cannot tell
+/// from the ground's.
+///
+/// Settled terrain drawn with the ordinary test on top of the primed depth
+/// shaded every hidden layer of a whole generated planet: its lighting pass
+/// took 9.3 ms at 1600×900 against 3 ms drawn depth-Equal.
+#[cfg(feature = "editor-ui")]
+#[test]
+fn terrain_shades_once_under_raymarched_matter() {
+    let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+    let sun = ed.world.spawn();
+    ed.world.insert(sun, Transform { rotation: Quat::from_rotation_x(-1.0), ..Transform::IDENTITY });
+    // Contact shadows read the prepass, so the frame runs one.
+    ed.world.insert(sun, floptle_core::Light { intensity: 1.0, contact_shadows: true, ..Default::default() });
+    let ground = ed.world.spawn();
+    ed.world.insert(ground, Transform::IDENTITY);
+    ed.world.insert(ground, Matter::Terrain { id: 1, collision: Default::default() });
+    let mut field = floptle_field::ChunkField::new(0.5);
+    field.fill_slab(floptle_core::math::Vec3::new(-12.0, -6.0, -12.0), floptle_core::math::Vec3::new(12.0, 0.0, 12.0), 0.0, [0.4, 0.5, 0.3]);
+    ed.terrains.insert(ground, crate::terrain_edit::EditorTerrain::new(field));
+    ed.terrain_gpu_dirty = true;
+    // One blob in front of the ground, one sunk into it.
+    for (at, scale) in [(DVec3::new(-2.0, 2.5, 3.0), 1.2), (DVec3::new(3.0, 0.0, -2.0), 1.6)] {
+        let blob = ed.world.spawn();
+        ed.world.insert(blob, Transform { translation: at, ..Transform::IDENTITY });
+        ed.world.insert(blob, Matter::Blob { scale });
+    }
+    ed.camera.position = DVec3::new(0.0, 7.0, 14.0);
+    ed.camera.pitch = -0.45;
+    ed.camera.yaw = 0.0;
+    ed.settle_terrain_gpu();
+    assert!(ed.settle_terrain_meshes(ed.camera.position, std::time::Duration::from_secs(120)), "the slab did not finish meshing");
+    let (w, h) = (1280u32, 720u32);
+    let cam = ed.camera.render_camera();
+    let shoot = |ed: &mut crate::Editor, equal: bool| {
+        ed.raster.as_mut().unwrap().set_use_primed_pipeline(equal);
+        let mut px = Vec::new();
+        for _ in 0..2 {
+            px = crate::shot::render_frame_pixels(ed, &cam, None, w, h, !0, false).expect("a frame");
+        }
+        let r = ed.raster.as_ref().unwrap();
+        (px, (r.last_pass_kept_primed_depth(), r.last_pass_equal_terrain_buckets()))
+    };
+    let (solid, (_, settled)) = shoot(&mut ed, true);
+    let (solid_old, _) = shoot(&mut ed, false);
+    // Stop the editor's clock (an `Instant` in the future reads as no time
+    // gone by), then stamp every other chunk as having arrived half its
+    // dissolve ago, so the two pictures dissolve the same pixels.
+    ed.started = Some(floptle_core::time::Instant::now() + std::time::Duration::from_secs(3600));
+    let render = ed.terrain_render.get_mut(&ground).unwrap();
+    let mut coords: Vec<[i32; 3]> = render.slots.keys().copied().collect();
+    coords.sort();
+    for c in coords.iter().step_by(2) {
+        render.born.insert(*c, -0.175);
+    }
+    let (new, (owned, terrain)) = shoot(&mut ed, true);
+    let (old, (_, terrain_old)) = shoot(&mut ed, false);
+    if let Ok(out) = std::env::var("FLOPTLE_TERRAIN_EQUAL_PNG") {
+        let tex = floptle_render::TextureData { pixels: new.clone(), width: w, height: h };
+        std::fs::write(std::path::Path::new(&out).join("terrain_equal.png"), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+    }
+    let differ = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x.abs_diff(**y) > 1).count();
+    assert!(coords.len() >= 2, "the fixture: the slab meshed {} chunks", coords.len());
+    assert!(differ(&new, &solid) > 0, "the fixture: no chunk was dissolving");
+    assert!(!owned, "the fixture: no raymarch pass drew between the prepass and the colour pass");
+    assert_eq!(terrain_old, 0, "the fixture: the old pipeline drew terrain depth-Equal");
+    assert!(settled > 0 && terrain > 0, "under raymarched matter no terrain bucket drew depth-Equal ({settled} settled, {terrain} with chunks dissolving)");
+    let d = differ(&solid, &solid_old);
+    assert_eq!(d, 0, "settled terrain drawn depth-Equal changed {d} channel values of the picture");
+    let d = differ(&new, &old);
+    assert_eq!(d, 0, "dissolving terrain changed {d} channel values of the picture");
+    assert!(terrain < settled, "the dissolving chunks drew depth-Equal too ({terrain} of {settled} buckets)");
+}
+
 /// **Holding the sun moves the light, in a picture.** A floor under a star 5°
 /// above the horizon is lit at a graze; with the Lighting node's key light
 /// held straight overhead the same floor is lit square on, and is brighter by
