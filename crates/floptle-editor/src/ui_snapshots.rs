@@ -313,3 +313,22 @@ fn snapshot_tile_ghost() {
     h.render().expect("no GPU?").save(&out).unwrap();
     floptle_say::say!("wrote {}", out.display());
 }
+
+/// The note a newly maximized Game tab shows for a moment, over a bright
+/// stand-in for a game frame: small, centred at the top, readable on light
+/// and dark ground alike.
+#[test]
+#[ignore]
+fn snapshot_fullscreen_hint() {
+    let mut h = harness(egui::vec2(800.0, 160.0), |ui| {
+        let r = ui.max_rect();
+        let half = egui::Rect::from_min_max(r.min, egui::pos2(r.center().x, r.max.y));
+        ui.painter().rect_filled(r, 0.0, egui::Color32::from_rgb(120, 170, 230));
+        ui.painter().rect_filled(half, 0.0, egui::Color32::from_rgb(235, 235, 225));
+        crate::frame_ui::fullscreen_hint(ui, crate::dock::EditorTab::Game, 0.0);
+    });
+    let out = out_path("fullscreen-hint");
+    h.run();
+    h.render().expect("no GPU?").save(&out).unwrap();
+    floptle_say::say!("wrote {}", out.display());
+}
