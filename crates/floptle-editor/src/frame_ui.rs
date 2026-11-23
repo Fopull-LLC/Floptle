@@ -1502,6 +1502,8 @@ impl Editor {
         // context-menus and model-drops fall through onto whatever panel now
         // occupies that space. `scene_ui` re-arms it only on frames it draws.
         self.scene_rect = None;
+        // Spent on freeing the game's mouse this frame (see `fullscreen_tab`).
+        let escape_freed_cursor = std::mem::take(&mut self.escape_freed_cursor);
         let mut viewer = EditorTabViewer {
             world: &mut self.world,
             selection: &mut self.selection,
@@ -1538,6 +1540,7 @@ impl Editor {
             bone_selection: &mut self.bone_selection,
             pivot_edit: &mut self.pivot_edit,
             fullscreen_tab: &mut self.fullscreen_tab,
+            fullscreen_shown: &mut self.fullscreen_shown,
             focused_tab,
             hier_search: &mut self.hier_search,
             hier_scope: &mut self.hier_scope,
@@ -1677,35 +1680,34 @@ impl Editor {
             packages_action: &mut out.pkg_action,
             cmd: &mut out.cmd,
         };
-        // Fullscreen: one tab maximized over the whole window (double-click a tab to
-        // toggle). A slim header lets you restore (or press Esc); the dock layout is
-        // untouched underneath and comes back exactly as it was.
+        // Fullscreen: one tab maximized over the whole window (double-click a
+        // tab to toggle, F11 for the Game tab). Nothing is drawn over it: a
+        // header across the top used to cover the top of the game, which is
+        // exactly where a game puts its HUD. How to get back is shown for a
+        // moment as the tab goes fullscreen, then fades away. Escape restores;
+        // in the Game tab the first Escape takes the mouse back from the game
+        // (and is spent on that), the next one restores the layout. The dock
+        // layout is untouched underneath and comes back exactly as it was.
         if let Some(ft) = *viewer.fullscreen_tab {
             let mut exit = false;
-            // A build has nothing to restore to — no header, and Escape
+            // A build has nothing to restore to — no hint, and Escape
             // belongs to the game (cursor release), not the layout.
             if !player_mode {
-                // A panel, not a bare `ui.horizontal`. A plain row paints no
-                // background of its own, so the strip it occupied stayed
-                // transparent and the 3D surface render showed through it —
-                // a band of scene along the top edge of every maximized tab,
-                // whichever tab it was. A panel fills itself, the same way
-                // the menu bar above it always has.
-                egui::Panel::top("fullscreen_header").show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .button(format!("⛶ Restore  ·  {}", ft.title()))
-                            .on_hover_text(
-                                "double-click a tab to toggle fullscreen · Esc to restore",
-                            )
-                            .clicked()
-                        {
-                            exit = true;
-                        }
-                        ui.small("double-click a tab or press Esc to restore");
-                    });
-                });
-                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                let now = ui.input(|i| i.time);
+                let since = match *viewer.fullscreen_shown {
+                    Some((t, at)) if t == ft => at,
+                    _ => {
+                        *viewer.fullscreen_shown = Some((ft, now));
+                        now
+                    }
+                };
+                let age = (now - since) as f32;
+                fullscreen_hint(ui, ft, age);
+                if fullscreen_hint_alpha(age) > 0.0 {
+                    // Keep frames coming while it fades, even in an idle editor.
+                    ui.ctx().request_repaint();
+                }
+                if escape_restores_layout(ui.input(|i| i.key_pressed(egui::Key::Escape)), escape_freed_cursor) {
                     exit = true;
                 }
             }
@@ -1727,6 +1729,7 @@ impl Editor {
                 *viewer.fullscreen_tab = None;
             }
         } else {
+            *viewer.fullscreen_shown = None;
             // The tab bars' region is painted under the dock, into a slot
             // reserved before it draws: where the bars are is only known once
             // the dock has laid itself out, and painting after would cover
@@ -3555,6 +3558,108 @@ fn net_impair_ui(ui: &mut egui::Ui) {
 /// or Game, is maximized over the window, as a build's Game view always is.
 /// What only the panels read is gathered when this says so.
 #[cfg(feature = "editor-ui")]
+/// How long the "how to get back" note stays over a newly maximized tab, and
+/// how long it then takes to fade out, in seconds.
+const FULLSCREEN_HINT_SECS: f32 = 2.0;
+const FULLSCREEN_HINT_FADE: f32 = 0.6;
+
+/// The note a maximized tab shows for a moment: centred at the top, small, and
+/// on the tooltip layer without taking the pointer, so it never blocks a
+/// click or a game's own UI while it is up. `age` is seconds since the tab
+/// went fullscreen; after [`FULLSCREEN_HINT_SECS`] it fades and is gone.
+pub(crate) fn fullscreen_hint(ui: &egui::Ui, tab: EditorTab, age: f32) {
+    let alpha = fullscreen_hint_alpha(age);
+    if alpha <= 0.0 {
+        return;
+    }
+    let ctx = ui.ctx();
+    let text = if tab == EditorTab::Game {
+        "Esc or F11 to restore the layout"
+    } else {
+        "Esc to restore the layout"
+    };
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("fullscreen_hint")));
+    let font = egui::FontId::proportional(13.0);
+    let galley = painter.layout_no_wrap(text.to_string(), font, egui::Color32::WHITE.gamma_multiply(alpha));
+    let screen = ctx.content_rect();
+    let pad = egui::vec2(10.0, 5.0);
+    let size = galley.size() + pad * 2.0;
+    let rect = egui::Rect::from_min_size(egui::pos2(screen.center().x - size.x * 0.5, screen.top() + 12.0), size);
+    painter.rect_filled(rect, 6.0, egui::Color32::from_black_alpha((170.0 * alpha) as u8));
+    painter.galley(rect.min + pad, galley, egui::Color32::WHITE);
+}
+
+/// Whether this frame's Escape puts a maximized tab back in the layout: not
+/// when the same press was spent taking the mouse back from the game.
+pub(crate) fn escape_restores_layout(escape_pressed: bool, escape_freed_cursor: bool) -> bool {
+    escape_pressed && !escape_freed_cursor
+}
+
+/// The hint's opacity `age` seconds after a tab went fullscreen: fully shown,
+/// then a linear fade, then 0 for good.
+pub(crate) fn fullscreen_hint_alpha(age: f32) -> f32 {
+    if age.is_nan() || age < 0.0 || age >= FULLSCREEN_HINT_SECS + FULLSCREEN_HINT_FADE {
+        return 0.0;
+    }
+    (1.0 - (age - FULLSCREEN_HINT_SECS) / FULLSCREEN_HINT_FADE).clamp(0.0, 1.0)
+}
+
 pub(crate) fn panels_drawn(fullscreen_tab: Option<EditorTab>) -> bool {
     !matches!(fullscreen_tab, Some(EditorTab::Scene | EditorTab::Game))
+}
+
+#[cfg(feature = "editor-ui")]
+impl Editor {
+    /// F11 in the editor: the Game tab over the whole window, or back to the
+    /// layout. Another maximized tab is put back for the Game tab, so the key
+    /// always does the same thing.
+    pub(crate) fn toggle_game_fullscreen(&mut self) {
+        self.fullscreen_tab =
+            if self.fullscreen_tab == Some(EditorTab::Game) { None } else { Some(EditorTab::Game) };
+    }
+}
+
+#[cfg(all(test, feature = "editor-ui"))]
+mod fullscreen_tests {
+    use super::*;
+
+    /// **F11 puts the Game tab over the window and back.** From the layout,
+    /// from another maximized tab, and back to the layout.
+    #[test]
+    fn f11_toggles_the_game_tab_over_the_window() {
+        let mut ed = Editor::default();
+        ed.toggle_game_fullscreen();
+        assert_eq!(ed.fullscreen_tab, Some(EditorTab::Game), "F11 from the layout");
+        ed.toggle_game_fullscreen();
+        assert_eq!(ed.fullscreen_tab, None, "F11 again goes back to the layout");
+        ed.fullscreen_tab = Some(EditorTab::Inspector);
+        ed.toggle_game_fullscreen();
+        assert_eq!(ed.fullscreen_tab, Some(EditorTab::Game), "F11 over another maximized tab");
+    }
+
+    /// **Escape that freed the game's mouse leaves the Game tab maximized.**
+    /// The first Escape in a game holding the mouse takes it back; only an
+    /// Escape with nothing else to do restores the layout.
+    #[test]
+    fn an_escape_spent_on_the_mouse_does_not_restore_the_layout() {
+        assert!(escape_restores_layout(true, false), "a plain Escape restores");
+        assert!(!escape_restores_layout(true, true), "an Escape that freed the mouse is spent");
+        assert!(!escape_restores_layout(false, false), "no Escape, no restore");
+    }
+
+    /// **The hint over a maximized tab goes away on its own.** Fully shown
+    /// at first, fading after two seconds, and gone for good by 2.6 s, so
+    /// nothing is left over the top of the view.
+    #[test]
+    fn the_fullscreen_hint_fades_and_is_gone() {
+        assert_eq!(fullscreen_hint_alpha(0.0), 1.0);
+        assert_eq!(fullscreen_hint_alpha(FULLSCREEN_HINT_SECS), 1.0);
+        let mid = fullscreen_hint_alpha(FULLSCREEN_HINT_SECS + FULLSCREEN_HINT_FADE * 0.5);
+        assert!((mid - 0.5).abs() < 1e-4, "half way through the fade reads {mid}");
+        for t in [FULLSCREEN_HINT_SECS + FULLSCREEN_HINT_FADE, 10.0, 1e6] {
+            assert_eq!(fullscreen_hint_alpha(t), 0.0, "still showing at {t} s");
+        }
+        assert_eq!(fullscreen_hint_alpha(f32::NAN), 0.0);
+        assert_eq!(fullscreen_hint_alpha(-1.0), 0.0);
+    }
 }

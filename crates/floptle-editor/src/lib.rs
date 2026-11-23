@@ -1060,6 +1060,7 @@ struct EditorTabViewer<'a> {
     pivot_edit: &'a mut bool,
     /// Double-clicking a tab toggles it into this slot (maximized full-window).
     fullscreen_tab: &'a mut Option<EditorTab>,
+    fullscreen_shown: &'a mut Option<(EditorTab, f64)>,
     /// Which dock tab holds keyboard focus this frame (last frame's dock state —
     /// see `Editor::focused_tab`). A panel that reads raw keys out of egui has to
     /// check this or it acts on chords aimed at another panel: the Animating
@@ -3074,8 +3075,17 @@ struct Editor {
     #[cfg(feature = "editor-ui")]
     dock_state: Option<egui_dock::DockState<EditorTab>>,
     /// When set, that one tab is shown maximized full-window (double-click a tab to
-    /// toggle); the dock layout is bypassed until it's restored.
+    /// toggle, F11 for the Game tab, Escape to restore); the dock layout is
+    /// bypassed until it's restored.
     fullscreen_tab: Option<EditorTab>,
+    /// The tab that was maximized last frame, and the UI clock when it was
+    /// maximized: the "how to get back" hint shows for a moment after that and
+    /// then fades, so nothing stays over the top of the view.
+    #[cfg(feature = "editor-ui")]
+    fullscreen_shown: Option<(EditorTab, f64)>,
+    /// This frame's Escape went to taking the pointer back from the game, so it
+    /// is spent: a maximized Game tab stays maximized until a second Escape.
+    escape_freed_cursor: bool,
     /// The in-engine Scripting IDE (open files + Docs page).
     #[cfg(feature = "editor-ui")]
     ide: IdeState,
@@ -5265,6 +5275,7 @@ impl Editor {
                     // editor now holds the pointer until you click
                     // back into the Game view.
                     self.set_cursor_freed(true);
+                    self.escape_freed_cursor = true;
                 } else if self.player_mode {
                     // nothing else to cancel in a build
                 } else if self.anim_ui.drag_from.is_some() {
@@ -5302,6 +5313,12 @@ impl Editor {
                 let on = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
                 self.app_set_fullscreen(!on);
             }
+            // In the editor, F11 is the playtest switch: the Game tab over the
+            // whole window, and back to the layout exactly as it was. Any other
+            // maximized tab is put back too, so the key always lands somewhere
+            // predictable.
+            #[cfg(feature = "editor-ui")]
+            KeyCode::F11 => self.toggle_game_fullscreen(),
             KeyCode::Enter if self.player_mode && self.alt => {
                 let on = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
                 self.app_set_fullscreen(!on);
