@@ -237,3 +237,72 @@ fn a_chain_kicked_once_comes_back_to_its_animated_pose() {
     assert!(far > 0.05, "the fixture: thirty frames of push moved the tip only {far:.4} (clip {:?}, pushed {:?})", still[0], kicked[0]);
     assert!(back < far * 0.3, "a hundred frames after the push, the tip is {back:.4} from the clip's pose, against {far:.4} at the end of the push: nothing pulled it back");
 }
+
+/// Sae's hair tip at frame `at`, read both ways: `(boneWorld, boneDrawn)`,
+/// with `springs` on her node and the script running `each` every frame.
+fn tip_world_and_drawn(tag: &str, springs: &str, each: &str, at: u32) -> ([f64; 3], [f64; 3]) {
+    let d = std::env::temp_dir().join(format!("flspring-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("scenes")).unwrap();
+    std::fs::create_dir_all(d.join("scripts")).unwrap();
+    let sae = concat!(env!("CARGO_MANIFEST_DIR"), "/../floptle-assets/tests/fixtures/Sae.mirrored.rigged.glb");
+    std::fs::copy(sae, d.join("Sae.glb")).unwrap();
+    std::fs::write(d.join("project.ron"), "(title: Some(\"b\"), entry_scene: Some(\"scenes/first.ron\"))").unwrap();
+    std::fs::write(
+        d.join("scripts/ask.lua"),
+        format!("local frames = 0\n\
+         function update(node, dt)\n\
+         \x20 local a = find('Sae'):animator()\n\
+         \x20 {each}\n\
+         \x20 frames = frames + 1\n\
+         \x20 if frames == {at} then\n\
+         \x20   local w = a:boneWorld('Hair_4')\n\
+         \x20   local p = a:boneDrawn('Hair_4')\n\
+         \x20   print(string.format('PAIR %.5f %.5f %.5f %.5f %.5f %.5f', w.x, w.y, w.z, p.x, p.y, p.z))\n\
+         \x20 end\n\
+         end\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("scenes/first.ron"),
+        format!(
+            "(name: \"s\", nodes: [\
+             (name: \"Sae\", matter: Mesh(asset_path: \"Sae.glb\"){springs}),\
+             (name: \"Driver\", scripts: [(kind: \"ask\")])])"
+        ),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_floptle"))
+        .args(["run", &d.to_string_lossy(), "--frames", &(at + 2).to_string()])
+        .output()
+        .expect("run floptle");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&d);
+    let line = text.lines().find(|l| l.contains("PAIR ")).unwrap_or_else(|| panic!("{tag}: no reading:\n{text}"));
+    let v: Vec<f64> = line.split("PAIR ").nth(1).unwrap().split_whitespace().map(|x| x.parse().unwrap()).collect();
+    ([v[0], v[1], v[2]], [v[3], v[4], v[5]])
+}
+
+/// **A script can read where a sprung bone is drawn** (card 0779).
+/// `anim:boneWorld` is the animated pose: a script that writes any bone in
+/// a frame (here a zero turn of a hand, as a rig with IK does every frame)
+/// reads the hair without its swing, so a hair tip's reach read a fixed
+/// length while the hair visibly swung. `anim:boneDrawn` reads the pose the
+/// last frame drew, springs included. A stiff chain pushed sideways by
+/// strong gravity: thirty frames in, the drawn tip is well off the animated
+/// one, toward the push. With no springs the two agree.
+#[test]
+fn bone_drawn_reads_the_sprung_pose_and_bone_world_the_animated_one() {
+    let chain = ", spring_bones: Some((chains: [(name: \"Hair\", root: \"Hair_root\", stiffness: 4.0, drag: 0.3, max_angle: 170.0)], gravity: (0.0, 0.0, 0.0)))";
+    let write = "a:addBoneRot('Hand.L', 0, 0, 0)";
+    let dist = |a: [f64; 3], b: [f64; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+    let (world, drawn) = tip_world_and_drawn("bd-push", chain, &format!("a:setSpringGravity(60, 0, 0); {write}"), 30);
+    assert!(
+        dist(world, drawn) > 0.05,
+        "boneDrawn is only {:.4} from boneWorld's animated pose on a chain pushed sideways (world {world:?}, drawn {drawn:?})",
+        dist(world, drawn)
+    );
+    assert!(drawn[0] > world[0], "the drawn tip is not toward +X, where gravity pushes: world {world:?}, drawn {drawn:?}");
+    let (world, drawn) = tip_world_and_drawn("bd-none", "", write, 30);
+    assert!(dist(world, drawn) < 1e-4, "with no springs boneDrawn is {:.5} from boneWorld (world {world:?}, drawn {drawn:?})", dist(world, drawn));
+}

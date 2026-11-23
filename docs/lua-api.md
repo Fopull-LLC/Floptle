@@ -43,7 +43,7 @@ each group, and meant to be searched.
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
 - [components — getcomponent](#components--getcomponent) — 130
-- [animation — node:animator](#animation--nodeanimator) — 33
+- [animation — node:animator](#animation--nodeanimator) — 34
 - [particles — effects from script](#particles--effects-from-script) — 16
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 42
 - [assets](#assets) — 20
@@ -1270,7 +1270,7 @@ node:addTag("burning") — add a tag at runtime (duplicates are ignored). findTa
 
 ### `node:animator`
 
-node:animator() — the animation handle for this node's Animation Controller (or a rigged model's embedded clips). Setters: :play/:restart/:crossfade/:stop/:setSpeed/:setLayerWeight/:seek/:setParam/:setEnabled/:setCulling. Bones, per frame: :setBoneRot/:addBoneRot/:setBonePos/:addBonePos/:reach/:lookAt, many at once with :boneIndex/:setBones, kept with :holdPose. Getters: :state/:time/:finished/:isPlaying/:clips/:layers/:boneWorld.
+node:animator() — the animation handle for this node's Animation Controller (or a rigged model's embedded clips). Setters: :play/:restart/:crossfade/:stop/:setSpeed/:setLayerWeight/:seek/:setParam/:setEnabled/:setCulling. Bones, per frame: :setBoneRot/:addBoneRot/:setBonePos/:addBonePos/:reach/:lookAt, many at once with :boneIndex/:setBones, kept with :holdPose. Getters: :state/:time/:finished/:isPlaying/:clips/:layers/:boneWorld/:boneDrawn.
 
 ```lua
 local anim = node:animator()
@@ -4622,13 +4622,17 @@ anim:addBonePos("Hips", vec3(0, -0.12, 0) [, weight]) — move one bone by this 
 
 anim:addBoneRot("Spine1", yaw, pitch, roll [, weight]) — turn one bone further by this much, on top of what the clips put there, for this frame only. The way to aim a chest over a run cycle without taking the run's motion off it.
 
+### `anim:boneDrawn`
+
+anim:boneDrawn("Hair_4") → pos, yaw, pitch, roll — where the last frame drew the bone, in world space, spring bones' swing included: where a swinging hair tip, cable or tail actually is, which anim:boneWorld does not say. Spring bones step after lateUpdate, so this is the last drawn frame's pose, placed by where the node is now. On a rig with no spring bones, and before anything has been drawn, it answers as boneWorld does. nil until the model is posed.
+
 ### `anim:boneIndex`
 
 anim:boneIndex("Rib12") → number — the bone's number on this model, its place in node:bones(). Every bone write (setBoneRot/addBoneRot/setBonePos/addBonePos) takes the number instead of the name, and anim:setBones takes a list of them: no name copied and looked up per call. nil until the model has posed once (so not in start); a bone the model lacks raises.
 
 ### `anim:boneWorld`
 
-anim:boneWorld("Hand") → pos, yaw, pitch, roll — where the bone is this frame, in world space, after clips, bone writes and IK. A write made earlier in the same pass is already in the answer, counted once, so `setBonePos` then `boneWorld` reads back the moved bone (written every frame, it is not read twice). Read before any write this frame, it is the animator's pose for this frame, without last frame's writes (unless anim:holdPose(true) keeps them). nil until the model is posed. Works under `floptle run` and on a dedicated server, which read the rig without its pictures, so a hitbox can follow a hand where nothing is drawn.
+anim:boneWorld("Hand") → pos, yaw, pitch, roll — where the bone is this frame, in world space, after clips, bone writes and IK. A write made earlier in the same pass is already in the answer, counted once, so `setBonePos` then `boneWorld` reads back the moved bone (written every frame, it is not read twice). Read before any write this frame, it is the animator's pose for this frame, without last frame's writes (unless anim:holdPose(true) keeps them). nil until the model is posed. Works under `floptle run` and on a dedicated server, which read the rig without its pictures, so a hitbox can follow a hand where nothing is drawn. On a rig with spring bones it is not where the bone is drawn (after a bone write it is the pose without the springs' swing, otherwise the swing from a step earlier): anim:boneDrawn says where it is drawn.
 
 ### `anim:clips`
 
@@ -4680,7 +4684,7 @@ anim:reach("Hand", target [, { pole = vec3, weight = 1, root = "UpperArm", mid =
 
 ### `anim:resetSprings`
 
-anim:resetSprings([chain]) — start a spring-bones chain (every chain, with no name) from its animated pose with no speed: after moving the model somewhere new, so its hair does not whip across the jump. A jump bigger than a couple of metres in a frame resets on its own. Spring bones are the node's SpringBones component (Inspector ▸ Spring Bones, or `spring_bones` in a scene): chains of bones, each from a root bone down, that hang under gravity, swing as the body turns or speeds up, spring back toward the pose and stay out of colliders riding other bones (the head, the neck). They run each frame after the clips, bone writes and IK, so :boneWorld and things attached to a bone see them swung; a steady speed (a rover, a planet's rails) leaves them hanging, only turning and speeding up swing them.
+anim:resetSprings([chain]) — start a spring-bones chain (every chain, with no name) from its animated pose with no speed: after moving the model somewhere new, so its hair does not whip across the jump. A jump bigger than a couple of metres in a frame resets on its own. Spring bones are the node's SpringBones component (Inspector ▸ Spring Bones, or `spring_bones` in a scene): chains of bones, each from a root bone down, that hang under gravity, swing as the body turns or speeds up, spring back toward the pose and stay out of colliders riding other bones (the head, the neck). They run each frame after the clips, bone writes and IK, so things attached to a bone ride them swung and :boneDrawn reads them as drawn; a steady speed (a rover, a planet's rails) leaves them hanging, only turning and speeding up swing them.
 
 ### `anim:restart`
 

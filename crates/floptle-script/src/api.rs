@@ -7796,7 +7796,7 @@ fn anim_weight(v: Option<f64>, call: &str) -> mlua::Result<f32> {
 
 /// The animator methods that change this frame's pose after the animator has
 /// made it: bone writes, reach (two-bone IK) and look-at, plus the
-/// parameters blend states read and `boneWorld`.
+/// parameters blend states read, `boneWorld` and `boneDrawn`.
 fn install_anim_pose_methods(
     lua: &Lua,
     shared: &Shared,
@@ -8082,18 +8082,19 @@ fn install_anim_pose_methods(
             lua.create_function(move |lua, (this, name): (Table, String)| {
                 let e: u32 = this.raw_get("__id")?;
                 let node = new_node_handle(lua, e)?;
-                Ok(match bone_world(&scene, &poses, &cmds, &node, &name, "boneWorld")? {
-                    Some(w) => {
-                        let (y, p, r) = w.rotation.to_euler(EulerRot::YXZ);
-                        mlua::MultiValue::from_vec(vec![
-                            crate::math_api::LuaVec3(w.translation).into_lua(lua)?,
-                            Value::Number(y as f64),
-                            Value::Number(p as f64),
-                            Value::Number(r as f64),
-                        ])
-                    }
-                    None => mlua::MultiValue::new(),
-                })
+                bone_pose_values(lua, bone_world(&scene, &poses, &cmds, &node, &name, "boneWorld")?)
+            })?,
+        )?;
+    }
+    {
+        let (scene, poses, cmds) =
+            (shared.scene.clone(), shared.bone_poses.clone(), shared.anim_commands.clone());
+        anim_methods.set(
+            "boneDrawn",
+            lua.create_function(move |lua, (this, name): (Table, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let node = new_node_handle(lua, e)?;
+                bone_pose_values(lua, bone_drawn(&scene, &poses, &cmds, &node, &name)?)
             })?,
         )?;
     }
@@ -9082,6 +9083,45 @@ fn bone_world(
             )));
         }
     };
+    Ok(Some(world.mul_transform(&floptle_core::Transform::from_matrix(model.as_dmat4()))))
+}
+
+/// `anim:boneWorld` / `anim:boneDrawn`'s answer: the position, then yaw,
+/// pitch and roll; nothing for a node without a posed skeleton.
+fn bone_pose_values(lua: &Lua, w: Option<floptle_core::Transform>) -> mlua::Result<mlua::MultiValue> {
+    Ok(match w {
+        Some(w) => {
+            let (y, p, r) = w.rotation.to_euler(EulerRot::YXZ);
+            mlua::MultiValue::from_vec(vec![
+                crate::math_api::LuaVec3(w.translation).into_lua(lua)?,
+                Value::Number(y as f64),
+                Value::Number(p as f64),
+                Value::Number(r as f64),
+            ])
+        }
+        None => mlua::MultiValue::new(),
+    })
+}
+
+/// A bone where the last frame drew it, spring bones swung in
+/// (`anim:boneDrawn`): that frame's drawn pose, placed by the node's world
+/// transform now. Springs step after `lateUpdate`, so every script read in
+/// a frame sees the previous frame's picture. A rig with no springs, or one nothing has drawn yet,
+/// answers with [`bone_world`] — the pose that is drawn when no spring
+/// moves it — refusals included.
+fn bone_drawn(
+    scene: &Rc<RefCell<crate::SceneMirror>>,
+    poses: &Rc<RefCell<crate::BonePoses>>,
+    cmds: &Rc<RefCell<Vec<(u32, AnimCmd)>>>,
+    this: &Table,
+    name: &str,
+) -> mlua::Result<Option<floptle_core::Transform>> {
+    let e: u32 = this.raw_get("__id")?;
+    let Some(model) = poses.borrow().bone_drawn(e, name) else {
+        return bone_world(scene, poses, cmds, this, name, "boneDrawn");
+    };
+    let s = scene.borrow();
+    let world = world_transform_of_handle(&s, this, e);
     Ok(Some(world.mul_transform(&floptle_core::Transform::from_matrix(model.as_dmat4()))))
 }
 

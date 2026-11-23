@@ -1634,6 +1634,9 @@ impl Editor {
         self.flush_slot_terrains_sync();
         self.script_host.profile().borrow_mut().record_part("sceneSave", t0.ms());
         let Some(rel) = self.switch_scene_during_play(req) else { return };
+        // The old world's drawn bone poses name nodes that are gone; a node
+        // of the new one may reuse an id.
+        self.script_host.bone_poses().forget_drawn();
         let t0 = floptle_core::profile::Span::new();
         // The new scene's input model is its own business — release any cursor
         // grab the old scene earned (game trap / script mouse lock), or a
