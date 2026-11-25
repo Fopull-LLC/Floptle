@@ -1,5 +1,10 @@
 ## Just shipped
 
+**v0.120.0 — "Steady Light"**. Reflections stay on while a game takes
+pictures, spring bones come back to where the animation holds them, ground
+under cover can be lit from a cache, terrain shades for a third of the cost,
+and F11 gives a playtest the whole window.
+
 **v0.119.1 — "Open Water"**. Seas with swells that float boats on the
 waves you see, lakes that fill, spill and settle, rivers laid down as a line
 of points, and splashes scripts can hear. Spring bones swing hair, cables
