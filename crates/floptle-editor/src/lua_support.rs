@@ -246,6 +246,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field shadowNearAlways number Draw the near cascade at any shadowDistance, not only past 160 m (1/0; assign true/false).
 ---@field shadowNormalOffset number How far a lit point moves along its normal before it looks the shadow map up, in texels (0..16, default 1.5). More stops striped self-shadow; too much lifts shadows off their casters.
 ---@field shadowDepthBias number How much nearer the sun a point's depth is taken before the shadow map compares it, in texels (0..16, default 2).
+---@field shadowSunStep number How far the sun turns, in degrees, before the shadow map follows it (default 0 = follows every frame, 0..5). Stops shadow edges stepping and jittering under a turning sun; the lighting still follows the sun every frame.
 ---@field fog number Depth fog on (1/0; assign true/false).
 ---@field contactShadows number Contact shadows (1/0): the small dark line where things touch, traced from the depth buffer so a mesh casts its real silhouette. Only what is ON SCREEN casts one.
 ---@field contactLength number How far a contact shadow traces, in world units.

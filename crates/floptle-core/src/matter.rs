@@ -1317,6 +1317,20 @@ pub struct Light {
     /// with the map, in the map's texels (default 2). The same trade as
     /// `shadow_normal_offset`, along the sun rather than the normal.
     pub shadow_depth_bias: f32,
+    /// How far the sun turns, in degrees, before the shadow map follows it
+    /// (default [`SHADOW_SUN_STEP`](Self::SHADOW_SUN_STEP), 0, which follows
+    /// every frame). The map is drawn toward the sun direction rounded to a fixed
+    /// grid of directions, so it holds still while the sun crosses one cell
+    /// and moves once when it crosses into the next. The lighting itself still
+    /// follows the sun every frame.
+    ///
+    /// A sun that turns a little every frame (a day cycle, a planet's spin)
+    /// otherwise turns the map's texel grid every frame, and every shadow
+    /// edge steps between texels. Worse on a big world: the map's world-fixed
+    /// snap is measured from the origin, and far from it the smallest turn
+    /// moves that grid by many texels, so the edges jitter randomly from one
+    /// frame to the next. A still sun looks exactly as it did.
+    pub shadow_sun_step: f32,
     /// Contact shadows: a short screen-space trace that catches what the marched
     /// field cannot. A dynamic mesh casts through a collider proxy — a box or a
     /// capsule — so a character's shadow is a capsule's, and the place that reads
@@ -1532,6 +1546,15 @@ impl Light {
     /// settings screen's "low"), and drawing a second map for it would make
     /// "low" both sharper and dearer.
     pub const SHADOW_NEAR_FROM_DISTANCE: f32 = 160.0;
+
+    /// How far the sun turns, in degrees, before the shadow map follows it,
+    /// unless a scene says otherwise
+    /// ([`shadow_sun_step`](Self::shadow_sun_step)): 0, every frame, as it
+    /// always was. Opt-in, because a fast day cycle crosses a small step
+    /// several times a second and each crossing moves every edge at once,
+    /// which measured worse than following (Solar, 11-25); a slow sun over a
+    /// big world is where a step pays.
+    pub const SHADOW_SUN_STEP: f32 = 0.0;
 }
 
 impl Default for Light {
@@ -1559,6 +1582,7 @@ impl Default for Light {
             shadow_near_always: false,
             shadow_normal_offset: 1.5,
             shadow_depth_bias: 2.0,
+            shadow_sun_step: Self::SHADOW_SUN_STEP,
             contact_shadows: false,
             contact_length: 0.35,
             contact_steps: 12,

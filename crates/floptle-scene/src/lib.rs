@@ -2960,6 +2960,11 @@ pub struct LightDoc {
     pub shadow_normal_offset: f32,
     #[serde(default = "default_shadow_depth_bias", skip_serializing_if = "is_default_shadow_depth_bias")]
     pub shadow_depth_bias: f32,
+    /// How far the sun turns before the shadow map follows it, in degrees (see
+    /// `Light::shadow_sun_step`); `Light::SHADOW_SUN_STEP`, and not written,
+    /// by default.
+    #[serde(default = "default_shadow_sun_step", skip_serializing_if = "is_default_shadow_sun_step")]
+    pub shadow_sun_step: f32,
     /// Contact shadows default off: they cost a screen-space trace per lit
     /// fragment, and a scene that never asked for them should not start paying.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -3113,6 +3118,12 @@ fn default_shadow_depth_bias() -> f32 {
 fn is_default_shadow_depth_bias(v: &f32) -> bool {
     *v == 2.0
 }
+fn default_shadow_sun_step() -> f32 {
+    floptle_core::Light::SHADOW_SUN_STEP
+}
+fn is_default_shadow_sun_step(v: &f32) -> bool {
+    *v == floptle_core::Light::SHADOW_SUN_STEP
+}
 fn default_fog_sky() -> f32 {
     1.0
 }
@@ -3208,6 +3219,7 @@ impl From<&Light> for LightDoc {
             shadow_near_always: l.shadow_near_always,
             shadow_normal_offset: l.shadow_normal_offset,
             shadow_depth_bias: l.shadow_depth_bias,
+            shadow_sun_step: l.shadow_sun_step,
             contact_shadows: l.contact_shadows,
             contact_length: l.contact_length,
             contact_steps: l.contact_steps,
@@ -3272,6 +3284,8 @@ impl LightDoc {
             shadow_near_always: self.shadow_near_always,
             shadow_normal_offset: self.shadow_normal_offset.clamp(0.0, 16.0),
             shadow_depth_bias: self.shadow_depth_bias.clamp(0.0, 16.0),
+            // NaN (a hand-edited file) is the default rather than off.
+            shadow_sun_step: if self.shadow_sun_step.is_nan() { floptle_core::Light::SHADOW_SUN_STEP } else { self.shadow_sun_step.clamp(0.0, 5.0) },
             contact_shadows: self.contact_shadows,
             contact_length: self.contact_length.clamp(0.01, 20.0),
             contact_steps: self.contact_steps.clamp(2, 32),
@@ -7102,6 +7116,24 @@ mod tests {
             .unwrap()
             .to_light();
         assert_eq!((wild.shadow_near_distance, wild.shadow_normal_offset, wild.shadow_depth_bias), (0.0, 16.0, 0.0));
+    }
+
+    /// The sun step: kept when set, not written at its default (0, which
+    /// follows the sun every frame), read as the default from a scene
+    /// saved before it, and fenced to 0..5 degrees.
+    #[test]
+    fn the_shadow_sun_step_round_trips_and_is_fenced() {
+        let set = ron::to_string(&LightDoc::from(&Light { shadow_sun_step: 0.25, ..Light::default() })).unwrap();
+        assert!(set.contains("shadow_sun_step:0.25"), "{set}");
+        assert_eq!(ron::from_str::<LightDoc>(&set).unwrap().to_light().shadow_sun_step, 0.25);
+        let plain = ron::to_string(&LightDoc::from(&Light::default())).unwrap();
+        assert!(!plain.contains("shadow_sun_step"), "the default is written: {plain}");
+        let old = ron::from_str::<LightDoc>("(direction: (0, 1, 0))").unwrap().to_light();
+        assert_eq!(old.shadow_sun_step, Light::SHADOW_SUN_STEP);
+        for (asked, got) in [("-1", 0.0), ("40", 5.0), ("1.5", 1.5)] {
+            let l = ron::from_str::<LightDoc>(&format!("(direction: (0, 1, 0), shadow_sun_step: {asked})")).unwrap().to_light();
+            assert_eq!(l.shadow_sun_step, got, "asked {asked}");
+        }
     }
 
     #[test]

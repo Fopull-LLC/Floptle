@@ -42,7 +42,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 11
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
-- [components — getcomponent](#components--getcomponent) — 130
+- [components — getcomponent](#components--getcomponent) — 131
 - [animation — node:animator](#animation--nodeanimator) — 34
 - [particles — effects from script](#particles--effects-from-script) — 16
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 42
@@ -4334,6 +4334,10 @@ Most steps a sun-shadow ray takes, 8..64 (default 64). The march is most of what
 ### `env.shadowStrength`
 
 How dark full shadow gets, 0..1 (ambient still fills, so never pitch black).
+
+### `env.shadowSunStep`
+
+How far the sun turns, in degrees, before the shadow map follows it (read/write, 0..5, default 0 = follows the sun every frame). The map is drawn toward the sun direction rounded to a fixed grid of directions, so it holds still while the sun crosses one cell and moves once into the next; the lighting still follows the sun every frame. A turning sun otherwise turns the map's texel grid every frame, and every shadow edge steps, or on a big world jitters, from frame to frame. A still sun looks the same either way. Worth it for a slow sun over a big world; a fast day cycle crosses a small step several times a second, and each crossing moves every edge at once. Only matters with env.shadowMap on.
 
 ### `env.shadowTintB`
 

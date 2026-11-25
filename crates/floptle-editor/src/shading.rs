@@ -711,6 +711,39 @@ pub(crate) fn sun_near_distance(l: &Light) -> Option<f32> {
     Some(near)
 }
 
+/// The direction the sun map is drawn toward: `to_sun` (a unit vector)
+/// rounded to the centre of its cell on a fixed grid of directions about
+/// `step` degrees across ([`Light::shadow_sun_step`]); 0 is `to_sun` itself.
+///
+/// The cells are rings of equal elevation, each ring cut into as many equal
+/// arcs as fit around it, so a cell is about `step` across in both directions
+/// at any elevation. No state: the same sun gives the same map on every frame
+/// and in every view, and the map moves only when the sun crosses into the next
+/// cell.
+///
+/// Why it is needed: [`floptle_render::sun_shadow_matrix`] snaps the map to
+/// a texel grid fixed in the world, measured from the world's origin. When the
+/// sun turns by an angle, that grid moves by the angle times the camera's
+/// distance from the origin. A planet's spin turns the sun by about a
+/// thousandth of a degree a frame; ten thousand kilometres from the origin,
+/// that is a couple of hundred metres a frame, so the grid lands somewhere new
+/// within a texel every frame, and with texels of a few tens of centimetres
+/// every shadow edge jittered while the camera stood still.
+pub(crate) fn sun_step_direction(to_sun: floptle_core::math::Vec3, step: f32) -> floptle_core::math::Vec3 {
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
+    let step = if step.is_nan() { Light::SHADOW_SUN_STEP } else { step.clamp(0.0, 5.0) };
+    if step <= 0.0 {
+        return to_sun;
+    }
+    let ring = PI / (PI / step.to_radians()).round().max(1.0);
+    let el = to_sun.y.clamp(-1.0, 1.0).asin();
+    let el = (((el + FRAC_PI_2) / ring).floor().min(PI / ring - 1.0) + 0.5) * ring - FRAC_PI_2;
+    let arc = TAU / (TAU * el.cos() / ring).round().max(1.0);
+    let az = to_sun.z.atan2(to_sun.x);
+    let az = ((az / arc).floor() + 0.5) * arc;
+    floptle_core::math::Vec3::new(el.cos() * az.cos(), el.sin(), el.cos() * az.sin())
+}
+
 /// The sun shadow map's lanes for this view (`Light::shadow_map`): the far
 /// map, and the near cascade when [`sun_near_distance`] asks for one. All
 /// zero, and the march decides, unless the sun casts and the map is asked
@@ -744,6 +777,7 @@ pub(crate) fn sun_map_lanes(
     if to_sun == floptle_core::math::Vec3::ZERO {
         return off;
     }
+    let to_sun = sun_step_direction(to_sun, l.shadow_sun_step);
     let size = floptle_render::sun_map_size_for(l.shadow_map_size);
     // Softness widens the filter: 1.5 texels hard, about 7.5 at full softness.
     let radius = 1.5 + 6.0 * l.shadow_softness.clamp(0.0, 1.0);
@@ -2545,6 +2579,56 @@ mod sun_cascade_tests {
         assert_eq!(sun_near_distance(&Light { shadow_near_always: true, ..lit(60.0, 2048) }), None, "40 m is not under half of 60 m");
         assert_eq!(sun_near_distance(&Light { shadow_near_distance: 200.0, ..lit(364.0, 2048) }), None);
     }
+
+    /// **A turning sun does not move the map until it crosses a cell, even far
+    /// from the origin.** Solar's report: in the VAB, with the camera still,
+    /// shadow edges (and the sun's highlight on metal, which the shadow
+    /// dims) flickered every frame. The camera is planet-far from the origin,
+    /// so the world-fixed snap moved by many texels on the smallest turn of
+    /// the sun. With the step, frames whose sun turns a thousandth of a degree
+    /// draw the same map; at 0 they do not (what this guards against).
+    #[test]
+    fn a_slowly_turning_sun_holds_the_map_still_far_from_the_origin() {
+        let vp = floptle_core::math::Mat4::perspective_rh(1.0, 1.6, 0.1, 1000.0);
+        let camera = DVec3::new(6.4e6, 1.2e5, -3.1e6);
+        let l = Light { shadow_near_distance: Light::SHADOW_NEAR_DISTANCE, shadow_sun_step: 0.25, ..lit(400.0, 4096) };
+        let sun_at = |deg: f32| {
+            let a = deg.to_radians();
+            [a.cos() * 0.8, a.sin() * 0.8 + 0.2, 0.55, 0.0]
+        };
+        let frames = |l: &Light| (0..30).map(|f| sun_map_lanes(l, sun_at(31.0 + f as f32 * 0.001), None, vp, camera)).collect::<Vec<_>>();
+        let held = frames(&l);
+        let moved = held.windows(2).filter(|w| w[0].vp != w[1].vp || w[0].near_vp != w[1].near_vp).count();
+        assert!(moved <= 1, "{moved} of 29 frames moved the map");
+        let every = frames(&Light { shadow_sun_step: 0.0, ..l });
+        let moved = every.windows(2).filter(|w| w[0].vp != w[1].vp).count();
+        assert!(moved >= 25, "with no step the map follows the sun: only {moved} of 29 frames moved it");
+    }
+
+    /// The rounded direction is a unit vector within about a step of the sun,
+    /// at every elevation (overhead and straight below included), and 0 or a
+    /// still sun leaves it as it was.
+    #[test]
+    fn the_stepped_sun_stays_within_a_step_of_the_sun() {
+        let v = floptle_core::math::Vec3::new;
+        for step in [0.1f32, 0.25, 1.0, 5.0] {
+            for i in 0..2000 {
+                let t = i as f32 * 0.618_034;
+                let y = (i as f32 / 1999.0) * 2.0 - 1.0;
+                let r = (1.0 - y * y).max(0.0).sqrt();
+                let d = v(r * (t * TAU_F).cos(), y, r * (t * TAU_F).sin());
+                let q = sun_step_direction(d, step);
+                assert!((q.length() - 1.0).abs() < 1e-4, "step {step}: |{q:?}| for {d:?}");
+                let off = d.dot(q).clamp(-1.0, 1.0).acos().to_degrees();
+                assert!(off <= step * 1.5, "step {step}: {off}° off for {d:?}");
+            }
+        }
+        let d = v(0.48, 0.8, 0.36);
+        assert_eq!(sun_step_direction(d, 0.0), d);
+        assert_eq!(sun_step_direction(d, 0.25), sun_step_direction(d, 0.25));
+        assert_eq!(sun_step_direction(d, f32::NAN), sun_step_direction(d, Light::SHADOW_SUN_STEP));
+    }
+    const TAU_F: f32 = std::f32::consts::TAU;
 
     /// The far map's lanes are what they always were at the default offset
     /// and bias, a scene without the cascade has its near lanes zero, and

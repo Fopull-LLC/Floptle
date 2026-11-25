@@ -421,6 +421,29 @@ opaque + lighting pass fell from 9.5 ms to 4.1 ms, and the map itself costs
 evaluates both sides, and the first cut ran the march and the map on every
 pixel: 16 ms instead of 4.
 
+### A turning sun: the sun step
+
+`sun_shadow_matrix` snaps the map to a texel grid fixed in the world, so a
+moving camera does not make edges crawl. But that grid is measured from the
+world's origin, along the sun. When the sun turns by an angle, the grid moves by
+that angle times the camera's distance from the origin. On a planet-sized world
+a day cycle's smallest turn moved it by hundreds of metres a frame, so the map
+landed at a new sub-texel offset every frame, and every shadow edge jittered
+while the camera stood still.
+
+`Light::shadow_sun_step` (`env.shadowSunStep`, the panel's **sun step**; 0, every
+frame, by default) draws the map toward the sun direction rounded to a fixed grid
+of directions (`sun_step_direction`: rings of equal elevation, each cut into equal
+arcs). The map holds still while the sun crosses a cell and moves once when it
+enters the next. The lighting still follows the real sun. A still sun draws exactly
+what it did. Guard: `a_slowly_turning_sun_holds_the_map_still_far_from_the_origin`.
+
+**Opt-in, measured.** Solar's day cycle turns its sun fast enough to cross a
+0.25° cell several times a second, and each crossing moves every edge at once:
+in 30-frame bursts at quiet outdoor spots, frame-to-frame change went *up* (0.03
+to 0.07). A step pays for a slow sun over a big world, where the per-frame
+crawl is the visible thing.
+
 ### The near cascade
 
 One map's texel is `shadow_distance` × 1.7 / `shadow_map_size`. A game that

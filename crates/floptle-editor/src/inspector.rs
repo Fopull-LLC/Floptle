@@ -5089,6 +5089,12 @@ impl EditorTabViewer<'_> {
                         cmd.inspector_changed |=
                             ui.add(egui::DragValue::new(&mut l.shadow_depth_bias).speed(0.05).range(0.0..=16.0)).changed();
                     });
+                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.shadow_sun_step, 0.0..=5.0).suffix("°"), "sun step")
+                        .on_hover_text(
+                            "how far the sun turns before the shadow map follows it. Holds shadow edges still under a slow \
+                             sun instead of stepping every frame; the lighting still follows the sun. 0 = every frame (default)",
+                        )
+                        .changed();
                 }
                 // Contact shadows: the short-range half, from the depth
                 // buffer rather than from the field.
