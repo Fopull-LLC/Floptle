@@ -175,10 +175,11 @@ pub(crate) fn render_frame_texture(
         (cw, ch),
         crate::offscreen::OffscreenOpts {
             depth_tex: Some(&depth_tex),
-            // The Game view's own picture store, so a shot draws glass and the
+            // A picture store of its own, so a shot draws glass and the
             // surfaces that show the scene behind them as the Game view does:
             // without one there is nothing to capture what is behind them into.
-            history: crate::offscreen::HistorySlot::GamePanel,
+            // Not the Game view's store: see `HistorySlot::Capture`.
+            history: crate::offscreen::HistorySlot::Capture(crate::offscreen::capture_history_key(stack_of, cw, ch)),
             // The game's own view when the picture is of the active camera
             // (`floptle shot`, a capture of the player's camera); another
             // camera's picture keeps to the side cache, or it would forget
@@ -688,6 +689,92 @@ end
         ed.release_runtime_textures();
         assert_eq!(ed.ensure_texture(&tex), None, "Stop kept a captured texture");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A script's captures leave the game's reflections alone.** Captures
+    /// shared the Game view's picture store. A history carries the camera and
+    /// the size it was taken at, so a 64×64 picture from another camera resized
+    /// it, which drops the picture, and the game's next frame had nothing to
+    /// reflect. In Solar every frame of the builder's opening, while the
+    /// catalogue photographed its parts, sent every mirror to the sky and back:
+    /// the metal and its reflection on the deck flickered for 20-odd seconds.
+    #[test]
+    fn a_capture_leaves_the_game_views_reflections_alone() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let (asker, dir) = scene(&mut ed, "hist");
+        // The Game view's store, holding a picture, as after any game frame.
+        let gpu = ed.gpu.as_ref().unwrap();
+        let fmt = gpu.scene_format();
+        let src = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("game-frame"),
+            size: wgpu::Extent3d { width: 320, height: 180, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: fmt,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = src.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut game = floptle_render::SceneHistory::new(&gpu.device, 320, 180, fmt);
+        game.capture(gpu, &view, floptle_core::math::Mat4::IDENTITY, DVec3::ZERO, None);
+        let before = game.texture().width();
+        ed.game_scene_history = Some(game);
+
+        let done = |ed: &crate::Editor| get::<mlua::String>(ed, asker, "side").is_some() && get::<String>(ed, asker, "tex").is_some();
+        frames(&mut ed, &dir, done);
+        assert!(done(&ed), "the captures never came back");
+        let game = ed.game_scene_history.as_ref().expect("a capture dropped the Game view's store");
+        assert!(game.is_primed(), "a capture left the Game view's store with no picture: its mirrors show the sky");
+        assert_eq!(game.texture().width(), before, "a capture resized the Game view's store");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Captures leave one another's reflections alone too.** With one store
+    /// for every capture, a screenshot taken each frame (Solar's flicker probe)
+    /// and a 64×64 icon taken between resized it back and forth, and the
+    /// screenshots reflected the sky on every icon: the collision had moved,
+    /// not gone. A store per camera and size keeps each picture where it was,
+    /// and past the cap the least recently used goes first.
+    #[test]
+    fn each_capture_camera_and_size_keeps_its_own_reflections() {
+        use crate::offscreen::{capture_history_key, HistorySlot, CAPTURE_HISTORIES};
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let shot = HistorySlot::Capture(capture_history_key(None, 1280, 720));
+        let icon = HistorySlot::Capture(capture_history_key(Some(ed.world.spawn()), 64, 64));
+        assert_ne!(shot, icon);
+        ed.sync_offscreen_history(shot, true, (1280, 720));
+        // A picture in the shot's store, as after a capture.
+        {
+            let gpu = ed.gpu.as_ref().unwrap();
+            let fmt = gpu.scene_format();
+            let src = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("shot-frame"),
+                size: wgpu::Extent3d { width: 1280, height: 720, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: fmt,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = src.create_view(&wgpu::TextureViewDescriptor::default());
+            let HistorySlot::Capture(k) = shot else { unreachable!() };
+            let h = ed.capture_histories.iter_mut().find(|(key, _)| *key == k).and_then(|(_, h)| h.as_mut()).unwrap();
+            h.capture(gpu, &view, floptle_core::math::Mat4::IDENTITY, DVec3::ZERO, None);
+        }
+        ed.sync_offscreen_history(icon, true, (64, 64));
+        let rebuilt = ed.sync_offscreen_history(shot, true, (1280, 720));
+        assert!(!rebuilt, "an icon's capture rebuilt the screenshot's store");
+        let kept = ed.history_slot(shot).expect("the screenshot's store is gone");
+        assert!(kept.is_primed(), "an icon's capture left the screenshot reflecting the sky");
+        assert_eq!(ed.history_slot(icon).unwrap().texture().width(), 32);
+        // Past the cap the least recently used goes: the icon, not the shot.
+        for i in 0..CAPTURE_HISTORIES - 1 {
+            ed.sync_offscreen_history(HistorySlot::Capture(capture_history_key(None, 100 + i as u32, 100)), true, (100, 100));
+        }
+        assert!(ed.history_slot(icon).is_none(), "the oldest store outlived the cap");
+        assert!(ed.capture_histories.len() <= CAPTURE_HISTORIES);
     }
 
     /// The sky a capture draws is the scene's sky shader, not the Skybox's

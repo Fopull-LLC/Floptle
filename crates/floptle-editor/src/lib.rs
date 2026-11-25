@@ -2199,6 +2199,11 @@ struct Editor {
     /// the panel has a different one of each. Sharing would have each view
     /// reprojecting the other's frame, which looks like the reflection tearing.
     game_scene_history: Option<floptle_render::SceneHistory>,
+    /// The same, for scripts' captures (`HistorySlot::Capture`), one per
+    /// camera and size, most recently used last: never the Game panel's, or a
+    /// capture from another camera at another size wipes the game's
+    /// reflections for the frame it is taken, and never one another's.
+    capture_histories: Vec<(u64, Option<floptle_render::SceneHistory>)>,
     /// Selection-outline post-process (silhouette mask + edge detect).
     outline: Option<Outline>,
     /// Editor reference-grid renderer.

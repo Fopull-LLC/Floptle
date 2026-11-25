@@ -116,6 +116,40 @@ pub(crate) enum HistorySlot {
     None,
     /// The docked Game panel — the one offscreen view that is the game.
     GamePanel,
+    /// A script's `camera.capture` / `camera.captureTexture`: its own store,
+    /// so a picture taken has glass and reflections the way the Game view
+    /// draws them.
+    ///
+    /// **Never the Game panel's.** A capture shared it once, and a history
+    /// carries the camera it was taken from and the size it was taken at: a
+    /// 64×64 icon from a studio camera resized the store, which drops its
+    /// picture, and the game's next frame resized it back and had nothing to
+    /// reflect. Every frame a capture was taken, every mirror in the game went
+    /// to the sky and back. Solar photographs its whole parts catalogue when
+    /// the builder opens, and the rocket, the metal and their reflection on
+    /// the deck flickered for the 20-odd seconds that took.
+    ///
+    /// **One per camera and size**, the key ([`capture_history_key`]): one
+    /// store for every capture just moved the same collision among the
+    /// captures, and a screenshot taken every frame while icons were being
+    /// made went to the sky on every icon. At most [`CAPTURE_HISTORIES`] are
+    /// kept, the least recently used dropped first.
+    Capture(u64),
+}
+
+/// The most capture stores kept at once ([`HistorySlot::Capture`]). A store
+/// is half the capture's size with its mips, so a 1280×720 shot's is about
+/// 2.5 MB and an icon's a few kilobytes; past this, the least recently used
+/// goes, and a camera that comes back starts with the sky for one frame.
+pub(crate) const CAPTURE_HISTORIES: usize = 6;
+
+/// The [`HistorySlot::Capture`] key for a capture through `camera` (`None`:
+/// the player's) at `w`×`h`.
+pub(crate) fn capture_history_key(camera: Option<floptle_core::Entity>, w: u32, h: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut s = std::collections::hash_map::DefaultHasher::new();
+    (camera, w, h).hash(&mut s);
+    s.finish()
 }
 
 /// Copy a presented swapchain image back to the CPU as tightly packed RGBA.
@@ -447,8 +481,10 @@ impl Editor {
         match slot {
             HistorySlot::None => None,
             HistorySlot::GamePanel => self.game_scene_history.as_ref(),
+            HistorySlot::Capture(k) => self.capture_histories.iter().find(|(key, _)| *key == k).and_then(|(_, h)| h.as_ref()),
         }
     }
+
 
     /// Allocate, resize or drop an offscreen view's stored picture to match what
     /// it is being asked for. Returns whether the texture behind it changed.
@@ -473,6 +509,20 @@ impl Editor {
         let hist = match slot {
             HistorySlot::None => return false,
             HistorySlot::GamePanel => &mut self.game_scene_history,
+            HistorySlot::Capture(k) => {
+                // Most recently used last; a new key past the cap drops the
+                // first.
+                let at = self.capture_histories.iter().position(|(key, _)| *key == k);
+                let entry = match at {
+                    Some(i) => self.capture_histories.remove(i),
+                    None => (k, None),
+                };
+                self.capture_histories.push(entry);
+                while self.capture_histories.len() > CAPTURE_HISTORIES {
+                    self.capture_histories.remove(0);
+                }
+                &mut self.capture_histories.last_mut().expect("just pushed").1
+            }
         };
         if !want {
             return hist.take().is_some();
@@ -1597,6 +1647,7 @@ impl Editor {
                 && let Some(h) = match opts.history {
                     HistorySlot::None => None,
                     HistorySlot::GamePanel => self.game_scene_history.as_mut(),
+                    HistorySlot::Capture(k) => self.capture_histories.iter_mut().find(|(key, _)| *key == k).and_then(|(_, h)| h.as_mut()),
                 }
             {
                 let glass_t = floptle_core::profile::Span::new();
@@ -1732,9 +1783,12 @@ impl Editor {
         // Keep this view's picture, for its own next frame's reflections. Same
         // place in the order as the window path: everything belonging to the
         // scene has drawn and nothing that does not has started.
-        if let (Some(gpu), HistorySlot::GamePanel) = (self.gpu.as_ref(), opts.history)
-            && let Some(h) = self.game_scene_history.as_mut()
-        {
+        let kept = match opts.history {
+            HistorySlot::None => None,
+            HistorySlot::GamePanel => self.game_scene_history.as_mut(),
+            HistorySlot::Capture(k) => self.capture_histories.iter_mut().find(|(key, _)| *key == k).and_then(|(_, h)| h.as_mut()),
+        };
+        if let (Some(gpu), Some(h)) = (self.gpu.as_ref(), kept) {
             h.capture(gpu, color, view_proj, cam.world_position, cam_frame);
         }
         if timing {

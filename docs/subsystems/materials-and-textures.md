@@ -551,6 +551,19 @@ panel has its own; a thumbnail or a GI bake has none and reflects the sky, which
 is what it did before any of this existed. Sharing one would have each view
 reprojecting the other's frame, which reads as the reflection tearing.
 
+A script's `camera.capture` / `camera.captureTexture` has its own as well
+(`HistorySlot::Capture`). It once used the Game panel's, and a 64×64 icon from
+another camera resized that store, which drops its picture: on every frame a
+capture was taken, the game had nothing to reflect and every mirror showed the
+sky. Solar photographs its whole parts catalogue when the builder opens, and the
+metal flickered for the 20-odd seconds that took. Captures also keep one store per
+camera and size (`capture_history_key`, at most `CAPTURE_HISTORIES`, least
+recently used dropped first): one shared capture store only moved the collision,
+and a screenshot taken every frame went to the sky on every icon. Render-target
+cameras use no history at all. Guards:
+`a_capture_leaves_the_game_views_reflections_alone`,
+`each_capture_camera_and_size_keeps_its_own_reflections`.
+
 ### Reflection probes: what a room reflects (v0.53.0)
 
 Screen-space reflections answer "is what I am reflecting on screen?". The
